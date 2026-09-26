@@ -1,0 +1,24 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+# Local credentials and editor settings
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+# Generated simulation output and model artifacts
+outputs/
+checkpoints/
+.cache/
+*.log
+*.mp4
+*.gif
+*.pt
+*.pth
+*.safetensors
+.DS_Store

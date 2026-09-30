@@ -1,0 +1,65 @@
+# Loop setup verification — 2026-09-30
+
+This file records setup evidence, not capstone experiment results. No real
+implementation ticket was claimed, executed or closed during these checks.
+
+## Verified
+
+- Windows: the 36-test controller suite passed with Python 3.13.12 (134.036
+  seconds, one Linux-only filename test skipped). The three subsequently added
+  publication regressions also passed (12.732 seconds). Tests use real
+  temporary Git repositories and simulated GitHub/model/container boundaries.
+  They exercise issue ownership, blockers, atomic claims, invalid worker receipts,
+  failed/empty checks, prohibited control edits, stale reviews, changed scope,
+  retries, review-only resume, PR target/draft checks, ignored artifacts and exact
+  Git blob export despite archive attributes, linked context paths, hidden index
+  flags and unrelated GitHub closing directives.
+- WSL/Linux: the complete final 39-test suite passed (8.821 seconds).
+- All three Bash entry points and the internal launcher pass `bash -n`.
+- Personal-login preflight passed on Windows for Codex, Cursor and Claude.
+  Cursor's Windows account advertised `cursor-grok-4.6-xhigh`. Authentication and
+  catalog presence alone do not prove successful coding/model execution.
+- A real Docker isolation smoke passed with
+  `python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b`:
+  exact committed file contents and mode `0644`, UID `65534`, read-only source,
+  credential variables absent, and an external network connection rejected.
+- Astra medium was invoked through personal Codex login, with source inlined
+  when the managed parent prevented read-only tools. Its reviews found substantive
+  defects; the controller was revised to use an exact candidate commit, clean
+  isolated validation, expected-SHA branch leases and phase-aware recovery.
+
+## Provider smoke limits
+
+- Native Windows Cursor rejected sandbox mode: its CLI requires Linux/macOS for
+  that mode. The approved team target is WSL/Linux; the loop stops on native
+  Windows rather than disabling the sandbox. Linux Cursor 2026.09.28-64d2043 is
+  installed, and WSL authentication/model discovery passed after the user's login.
+  The sandboxed Grok coding smoke timed out at 240 seconds with no fixture edit,
+  including after correcting prompt delivery to the documented positional form.
+  Cursor coding remains unverified; do not treat login/model discovery as a pass.
+- Nested Windows Codex coding was constrained to read-only access by the parent
+  environment. The synthetic edit did not happen and all three fixture tests
+  failed. This is an environment limitation, not a successful coding smoke.
+  Run `python ralph/smoke.py codex` from an ordinary authenticated terminal.
+- A native Linux Codex release download did not complete within the bounded
+  installation attempt. WSL Codex/Astra review is not installed or authenticated.
+  A full Cursor loop also needs that personal reviewer setup in the same OS;
+  Windows review authentication does not automatically transfer into WSL.
+- Claude had an authentication-only check. No Claude inference or review call
+  was made, and the client's API key was not used.
+
+## Adoption gates
+
+The setup must be reviewed and merged through a supervised PR before production
+loops can load it from `origin/main`. Each actual ticket also needs a sole GitHub
+assignee, clear acceptance criteria, closed blockers and an approved, preloaded
+validation image/check plan. Paid/GPU/robot experiments remain separate authorized
+work; a passing software test is not experimental evidence.
+
+No visible `main` protection/rulesets were found during setup inspection; the
+current account has repository write access. A repository admin must apply the
+human-approval/check requirements in the runbook. Local AI review receipts are
+not a server-enforced GitHub approval or a cryptographic attestation.
+
+Local evidence is retained under ignored `.ralph/`; raw prompts/transcripts and
+personal authentication material are excluded from publication.

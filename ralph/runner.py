@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import subprocess
 import tarfile
@@ -186,8 +187,25 @@ def changed_paths(worktree: Path, environment: dict | None = None) -> list[str]:
 def tree_snapshot(worktree: Path) -> str:
     tracked = run(git_argv(worktree, "ls-files", "-z"), worktree, env=private_env()).stdout.split("\0")
     paths = set(filter(None, tracked)) | set(changed_paths(worktree))
-    return digest({name: hashlib.sha256((worktree / name).read_bytes()).hexdigest()
+    return digest({name: hashlib.sha256(source_bytes(worktree / name)).hexdigest()
                    if (worktree / name).is_file() else "missing" for name in sorted(paths)})
+
+
+def source_bytes(path: Path, limit: int | None = None) -> bytes:
+    """Never let a worker-created pipe/device turn a controller read into a wait."""
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise Stop(f"Source must be a regular file: {path.name}")
+    if limit is not None and info.st_size > limit:
+        raise Stop(f"Large artifact needs supervised publication: {path.name}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise Stop(f"Source became a non-regular file: {path.name}")
+        data = stream.read() if limit is None else stream.read(limit + 1)
+    if limit is not None and len(data) > limit:
+        raise Stop(f"Large artifact needs supervised publication: {path.name}")
+    return data
 
 
 def export_commit(worktree: Path, head: str, target: Path):
@@ -305,7 +323,7 @@ def inspect_changes(worktree: Path, policy: dict, paths: list[str] | None = None
             raise Stop(f"Changed path escapes the worktree or is a symlink: {name}")
         if not path.exists():
             continue
-        data = path.read_bytes()
+        data = source_bytes(path, policy["max_changed_file_bytes"])
         if len(data) > policy["max_changed_file_bytes"] or b"\0" in data:
             raise Stop(f"Large or binary artifact needs supervised publication: {name}")
         if path.name.startswith(".env") or path.suffix.lower() in (".pem", ".key", ".p12") or secret.search(data.decode("utf-8", errors="replace")):

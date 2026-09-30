@@ -90,6 +90,8 @@ python ralph/smoke.py codex
 python ralph/smoke.py cursor
 ```
 
+On Linux, use `python3` for the smoke commands if `python` is not installed.
+
 The smoke consumes a small amount of personal model usage, writes only synthetic
 temperature-conversion fixtures under ignored `.ralph/smoke/`, and never touches
 GitHub. Codex smoke also exercises Astra read-only review. The doctor checks login

@@ -16,7 +16,8 @@ implementation ticket was claimed, executed or closed during these checks.
   Git blob export despite archive attributes, linked context paths, hidden index
   flags, unrelated GitHub closing directives, nested agent instructions and
   complete Unicode filenames in review packets.
-- WSL/Linux: the complete final 42-test suite passed (9.502 seconds).
+- WSL/Linux: the complete final 43-test suite passed (9.839 seconds), including
+  rejection of worker-created FIFOs before source reads.
 - GitHub Actions: Ubuntu and Windows checks passed on initial PR commit
   `1b73b6a` (39-test suite); subsequent commits require their own fresh checks.
 - All three Bash entry points and the internal launcher pass `bash -n`.
@@ -31,6 +32,9 @@ implementation ticket was claimed, executed or closed during these checks.
   when the managed parent prevented read-only tools. Its reviews found substantive
   defects; the controller was revised to use an exact candidate commit, clean
   isolated validation, expected-SHA branch leases and phase-aware recovery.
+  Later findings about instruction paths, review filenames and special source
+  files were addressed with regression coverage. Source review is distinct from
+  live provider activation and human approval; the setup PR remains a draft.
 
 ## Provider smoke limits
 

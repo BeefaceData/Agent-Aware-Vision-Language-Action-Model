@@ -450,6 +450,22 @@ class LifecycleTests(unittest.TestCase):
 
 
 class GuardTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO regression requires Linux")
+    def test_special_source_file_stops_before_reading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner.git(root, "init", "-q")
+            path = root / "source.py"
+            path.write_text("value = 1\n")
+            runner.git(root, "add", "source.py")
+            runner.git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                       "commit", "-qm", "test: seed tracked source")
+            path.unlink()
+            os.mkfifo(path)
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("must not read FIFO")):
+                with self.assertRaisesRegex(runtime.Stop, "regular file"):
+                    runner.inspect_changes(root, {"max_changed_file_bytes": 200000}, ["source.py"])
+
     def test_agent_instruction_paths_are_protected_at_every_depth(self):
         paths = ("CLAUDE.md", "src/AGENTS.md", "src/AGENTS.override.md", "src/CLAUDE.local.md",
                  "src/.cursorrules", "src/.cursor/rules/test.mdc", "src/.claude/settings.json")

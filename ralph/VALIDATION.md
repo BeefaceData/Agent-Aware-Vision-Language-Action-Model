@@ -8,7 +8,8 @@ implementation ticket was claimed, executed or closed during these checks.
 - Windows: the 36-test controller suite passed with Python 3.13.12 (134.036
   seconds, one Linux-only filename test skipped). The three subsequently added
   publication regressions also passed (12.732 seconds), followed by the three
-  instruction-path/Unicode review regressions (10.808 seconds). Tests use real
+  instruction-path/Unicode review regressions (10.808 seconds) and the portable
+  exact-byte/size-limit regression. Tests use real
   temporary Git repositories and simulated GitHub/model/container boundaries.
   They exercise issue ownership, blockers, atomic claims, invalid worker receipts,
   failed/empty checks, prohibited control edits, stale reviews, changed scope,
@@ -16,8 +17,8 @@ implementation ticket was claimed, executed or closed during these checks.
   Git blob export despite archive attributes, linked context paths, hidden index
   flags, unrelated GitHub closing directives, nested agent instructions and
   complete Unicode filenames in review packets.
-- WSL/Linux: the complete final 43-test suite passed (9.839 seconds), including
-  rejection of worker-created FIFOs before source reads.
+- WSL/Linux: the complete final 44-test suite passed (10.533 seconds), including
+  rejection of worker-created FIFOs before source reads and exact-byte preservation.
 - GitHub Actions: Ubuntu and Windows checks passed on initial PR commit
   `1b73b6a` (39-test suite); subsequent commits require their own fresh checks.
 - All three Bash entry points and the internal launcher pass `bash -n`.
@@ -33,8 +34,11 @@ implementation ticket was claimed, executed or closed during these checks.
   defects; the controller was revised to use an exact candidate commit, clean
   isolated validation, expected-SHA branch leases and phase-aware recovery.
   Later findings about instruction paths, review filenames and special source
-  files were addressed with regression coverage. Source review is distinct from
-  live provider activation and human approval; the setup PR remains a draft.
+  files were addressed with regression coverage. The last full-source assessment
+  requested the special-file fix; its focused Astra follow-up passed after seeing
+  the complete platform-guarded test and portable byte/size-limit test. That is a
+  scoped source assessment, not blanket approval of provider execution or human
+  acceptance. The setup PR remains a draft.
 
 ## Provider smoke limits
 

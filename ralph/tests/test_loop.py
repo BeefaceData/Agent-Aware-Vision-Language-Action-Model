@@ -450,6 +450,16 @@ class LifecycleTests(unittest.TestCase):
 
 
 class GuardTests(unittest.TestCase):
+    def test_regular_source_reads_preserve_bytes_and_enforce_size_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.txt"
+            data = b"first\r\nsecond\x1alast\n"
+            path.write_bytes(data)
+            self.assertEqual(runner.source_bytes(path), data)
+            self.assertEqual(runner.source_bytes(path, len(data)), data)
+            with self.assertRaisesRegex(runtime.Stop, "Large artifact"):
+                runner.source_bytes(path, len(data) - 1)
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO regression requires Linux")
     def test_special_source_file_stops_before_reading(self):
         with tempfile.TemporaryDirectory() as directory:

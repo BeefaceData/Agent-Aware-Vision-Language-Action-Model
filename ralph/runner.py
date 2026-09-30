@@ -293,7 +293,12 @@ def inspect_changes(worktree: Path, policy: dict, paths: list[str] | None = None
         raise Stop("No changes; a worker claim or commit count is not implementation evidence.")
     secret = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:sk-ant-|ghp_|github_pat_)[A-Za-z0-9_-]{12,}")
     for name in paths:
-        if name.lower().startswith(tuple(p.lower() for p in CONTROL_PATHS)) or Path(name).name in (".gitattributes", ".gitmodules", ".gitconfig") or any(part in (".env", ".git", ".ralph") for part in Path(name).parts):
+        filename = Path(name).name.lower()
+        instructions = {"agents.md", "agents.override.md", "claude.md", "claude.local.md", ".cursorrules"}
+        control_parts = {".env", ".git", ".ralph", ".agents", ".claude", ".codex", ".cursor"}
+        if (name.lower().startswith(tuple(p.lower() for p in CONTROL_PATHS)) or
+                filename in instructions | {".gitattributes", ".gitmodules", ".gitconfig"} or
+                any(part.lower() in control_parts for part in Path(name).parts)):
             raise Stop(f"Control/credential path requires supervised work: {name}")
         path = worktree / name
         if path.is_symlink() or not path.resolve().is_relative_to(worktree.resolve()):
@@ -551,11 +556,15 @@ class Session:
         head = self.state["head"]
         self.publish(report, checks, None)
         diff = git(self.worktree, "diff", "--no-ext-diff", "--no-textconv", self.state["base"], head)
-        names = git(self.worktree, "diff", "--name-only", self.state["base"], head).splitlines()
+        entries = run(git_argv(self.worktree, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                              "--name-status", "-z", self.state["base"], head),
+                      self.worktree, env=private_env()).stdout.split("\0")[:-1]
+        if len(entries) % 2:
+            raise Stop("Unexpected review file discovery response.")
         files = {}
-        for name in names:
-            result = run(git_argv(self.worktree, "show", f"{head}:{name}"), self.worktree, env=private_env(), check=False)
-            files[name] = result.stdout if result.returncode == 0 else "(deleted)"
+        for status, name in zip(entries[::2], entries[1::2]):
+            files[name] = "(deleted)" if status == "D" else run(
+                git_argv(self.worktree, "show", f"{head}:{name}"), self.worktree, env=private_env()).stdout
         data = {"issue": self.args.issue, "base_sha": self.state["base"], "head_sha": head,
                 "worker_claims": report, "controller_checks": checks, "diff": diff, "changed_files": files}
         prompt = (HERE / "prompt.md").read_text(encoding="utf-8") + "\n" + (HERE / "reviewer-prompt.md").read_text(encoding="utf-8") + "\n" + self.packet() + "\n" + json.dumps(data, indent=2)

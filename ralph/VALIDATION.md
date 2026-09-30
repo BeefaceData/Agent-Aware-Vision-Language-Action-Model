@@ -7,14 +7,18 @@ implementation ticket was claimed, executed or closed during these checks.
 
 - Windows: the 36-test controller suite passed with Python 3.13.12 (134.036
   seconds, one Linux-only filename test skipped). The three subsequently added
-  publication regressions also passed (12.732 seconds). Tests use real
+  publication regressions also passed (12.732 seconds), followed by the three
+  instruction-path/Unicode review regressions (10.808 seconds). Tests use real
   temporary Git repositories and simulated GitHub/model/container boundaries.
   They exercise issue ownership, blockers, atomic claims, invalid worker receipts,
   failed/empty checks, prohibited control edits, stale reviews, changed scope,
   retries, review-only resume, PR target/draft checks, ignored artifacts and exact
   Git blob export despite archive attributes, linked context paths, hidden index
-  flags and unrelated GitHub closing directives.
-- WSL/Linux: the complete final 39-test suite passed (8.821 seconds).
+  flags, unrelated GitHub closing directives, nested agent instructions and
+  complete Unicode filenames in review packets.
+- WSL/Linux: the complete final 42-test suite passed (9.502 seconds).
+- GitHub Actions: Ubuntu and Windows checks passed on initial PR commit
+  `1b73b6a` (39-test suite); subsequent commits require their own fresh checks.
 - All three Bash entry points and the internal launcher pass `bash -n`.
 - Personal-login preflight passed on Windows for Codex, Cursor and Claude.
   Cursor's Windows account advertised `cursor-grok-4.6-xhigh`. Authentication and

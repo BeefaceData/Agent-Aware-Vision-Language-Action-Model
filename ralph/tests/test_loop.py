@@ -420,8 +420,44 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(runtime.Stop, "closing directive"):
             self.session.pr_body(report, [], None)
 
+    def test_nested_agent_instructions_stop_before_publication(self):
+        original = self.invoke
+        def change_instructions(*args, **kwargs):
+            answer = original(*args, **kwargs)
+            if not kwargs.get("review"):
+                path = args[2] / "src/AGENTS.md"
+                path.parent.mkdir()
+                path.write_text("Change the next agent's rules")
+            return answer
+        with patch.object(runner, "invoke_model", side_effect=change_instructions):
+            with self.assertRaisesRegex(runtime.Stop, "Control/credential path"):
+                self.session.execute()
+        self.assertEqual(self.hub.ref("ralph/issue-2"), self.base)
+        self.assertIsNone(self.hub.pr)
+
+    def test_review_receives_complete_unicode_filename_contents(self):
+        original = self.invoke
+        def unicode_source(*args, **kwargs):
+            if kwargs.get("review"):
+                self.assertIn(json.dumps("caf\u00e9.py") + ': "# complete Unicode file', args[3])
+            answer = original(*args, **kwargs)
+            if not kwargs.get("review"):
+                (args[2] / "caf\u00e9.py").write_text("# complete Unicode file\nvalue = 42\n", encoding="utf-8")
+            return answer
+        with patch.object(runner, "invoke_model", side_effect=unicode_source):
+            self.session.execute()
+        self.assertTrue(self.hub.ready)
+
 
 class GuardTests(unittest.TestCase):
+    def test_agent_instruction_paths_are_protected_at_every_depth(self):
+        paths = ("CLAUDE.md", "src/AGENTS.md", "src/AGENTS.override.md", "src/CLAUDE.local.md",
+                 "src/.cursorrules", "src/.cursor/rules/test.mdc", "src/.claude/settings.json")
+        with tempfile.TemporaryDirectory() as directory:
+            for name in paths:
+                with self.subTest(name=name), self.assertRaisesRegex(runtime.Stop, "Control/credential path"):
+                    runner.inspect_changes(Path(directory), {}, [name])
+
     def test_closing_keyword_spellings_are_rejected_but_plain_references_work(self):
         for keyword in ("close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"):
             for reference in ("#99", "other/repository#99", "https://github.com/other/repository/issues/99"):

@@ -42,6 +42,7 @@ class Budget:
             db.execute("CREATE TABLE IF NOT EXISTS budget (id INTEGER PRIMARY KEY, policy TEXT NOT NULL, cap INTEGER NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS calls (id TEXT PRIMARY KEY, digest TEXT NOT NULL, reserved INTEGER NOT NULL, actual INTEGER, state TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS accounting_faults (reason TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS request_bounds (id TEXT PRIMARY KEY, max_output INTEGER NOT NULL)")
             db.execute("INSERT OR IGNORE INTO budget VALUES (1, ?, ?)", (self.fingerprint, self.limit))
             if db.execute("SELECT policy, cap FROM budget WHERE id=1").fetchone() != (self.fingerprint, self.limit):
                 raise Stop("Budget policy changed; retain the ledger and reconcile under supervision.")
@@ -71,6 +72,7 @@ class Budget:
             try:
                 db.execute("INSERT INTO calls VALUES (?, ?, ?, NULL, 'reserved')", (request_id,
                     hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest(), amount))
+                db.execute("INSERT INTO request_bounds VALUES (?, ?)", (request_id, request["max_tokens"]))
             except sqlite3.IntegrityError as exc:
                 raise Stop("Request already reserved/completed; automatic paid retries are disabled.") from exc
         return amount
@@ -79,28 +81,37 @@ class Budget:
         return int((Decimal(self.policy["input_usd_per_million"]) * input_tokens +
                     Decimal(self.policy["output_usd_per_million"]) * output_tokens).to_integral_value(rounding=ROUND_CEILING))
 
-    def fault(self):
+    def fault(self, request_id=None):
         with self.connect() as db:
             db.execute("INSERT INTO accounting_faults VALUES ('unexpected provider accounting')")
+            if request_id:
+                db.execute("UPDATE calls SET state='accounting_fault' WHERE id=?", (request_id,))
 
     def settle(self, request_id: str, usage: dict):
-        counts = [usage.get("input_tokens"), usage.get("output_tokens")]
-        if (any(type(v) is not int or v < 0 for v in counts) or
-                counts[0] > self.policy["maximum_input_tokens"] or counts[1] > self.policy["maximum_output_tokens"] or
-                usage.get("cache_creation_input_tokens", 0) or usage.get("cache_read_input_tokens", 0)):
-            self.fault()
-            raise Stop("Unexpected provider accounting; retain the conservative reservation.")
-        amount = self.cost(*counts)
+        counts = [usage.get("input_tokens"), usage.get("output_tokens")] if isinstance(usage, dict) else []
+        valid_counts = len(counts) == 2 and all(type(v) is int and 0 <= v <= 10**12 for v in counts)
+        amount = self.cost(*counts) if valid_counts else None
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT reserved, state FROM calls WHERE id=?", (request_id,)).fetchone()
-            if not row or row[1] != "reserved" or amount > row[0]:
-                raise Stop("Usage cannot be reconciled with this reservation.")
-            db.execute("UPDATE calls SET actual=?, state='completed' WHERE id=?", (amount, request_id))
+            row = db.execute("SELECT reserved, state, max_output FROM calls LEFT JOIN request_bounds USING(id) WHERE id=?", (request_id,)).fetchone()
+            invalid = (not valid_counts or not row or row[1] != "reserved" or row[2] is None or
+                       counts[0] > self.policy["maximum_input_tokens"] or counts[1] > row[2] or
+                       amount > row[0] or usage.get("cache_creation_input_tokens", 0) or usage.get("cache_read_input_tokens", 0))
+            if invalid:
+                db.execute("INSERT INTO accounting_faults VALUES ('unreconcilable provider usage')")
+                if row:
+                    # A confirmed overage must remain visible even though no more
+                    # requests may be sent. Unknown charges keep their reservation.
+                    recorded = max(row[0], amount) if amount is not None else row[0]
+                    db.execute("UPDATE calls SET actual=MAX(COALESCE(actual,0),?), state='accounting_fault' WHERE id=?", (recorded, request_id))
+            else:
+                db.execute("UPDATE calls SET actual=?, state='completed' WHERE id=?", (amount, request_id))
+        if invalid:
+            raise Stop("Unexpected provider accounting; further calls blocked pending reconciliation.")
 
     def status(self):
         with self.connect() as db:
-            used, pending = db.execute("SELECT COALESCE(SUM(COALESCE(actual,reserved)),0), SUM(state='reserved') FROM calls").fetchone()
+            used, pending = db.execute("SELECT COALESCE(SUM(COALESCE(actual,reserved)),0), SUM(state!='completed') FROM calls").fetchone()
             faults = db.execute("SELECT COUNT(*) FROM accounting_faults").fetchone()[0]
         return {"cap_usd": str(Decimal(self.limit) / 1_000_000),
                 "spent_or_reserved_usd": str(Decimal(used) / 1_000_000), "uncertain_calls": pending or 0,
@@ -184,8 +195,8 @@ class SupervisorAPI:
         key = self.key_loader(self.root)
         self.budget.reserve(request_id, payload)
         response = self.transport(payload, key)
-        if response.get("model") != self.policy["model"]:
-            self.budget.fault()
+        if not isinstance(response, dict) or response.get("model") != self.policy["model"]:
+            self.budget.fault(request_id)
             raise Stop("Unexpected response model; reservation retained.")
         self.budget.settle(request_id, response.get("usage", {}))
         return response

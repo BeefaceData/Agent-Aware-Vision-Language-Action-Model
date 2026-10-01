@@ -104,6 +104,26 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(restarted.budget.status()["accounting_blocked"])
         self.assertFalse(self.calls)
 
+    def test_malformed_accounting_or_output_overage_blocks_across_restart(self):
+        examples = [None, [], {"model": "claude-sonnet-5-5", "usage": None},
+                    {"model": "claude-sonnet-5-5", "usage": "invalid"},
+                    {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 1100000, "output_tokens": 2048}}]
+        for i, response in enumerate(examples):
+            with self.subTest(response=response):
+                root = self.root / str(i)
+                client = SupervisorAPI(root, self.policy, transport=lambda payload, key: response,
+                                       key_loader=lambda root: "synthetic-test-secret")
+                with self.assertRaises(Stop): self.request(client)
+                restarted = SupervisorAPI(root, self.policy, transport=self.transport,
+                                          key_loader=lambda root: "synthetic-test-secret")
+                with self.assertRaisesRegex(Stop, "reconciliation"):
+                    self.request(restarted, "episode:2")
+                status = restarted.budget.status()
+                self.assertTrue(status["accounting_blocked"])
+                if i == len(examples)-1:
+                    self.assertEqual(status["spent_or_reserved_usd"], "2.22048")
+        self.assertFalse(self.calls)
+
     def test_changed_budget_or_policy_cannot_reset_spending(self):
         self.request(self.client())
         self.policy = {**self.policy, "budget_usd": "49.00"}

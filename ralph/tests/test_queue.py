@@ -112,6 +112,25 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(controller.state["started"], [2])
         self.mock_merge.assert_not_called()
 
+    def test_resume_rechecks_eligibility_before_assigning_journaled_issue(self):
+        original = self.hub.call
+        self.hub.call = lambda *args: (_ for _ in ()).throw(Stop("assignment disconnected"))
+        controller = self.controller()
+        with self.assertRaisesRegex(Stop, "disconnected"):
+            controller.execute()
+        self.assertEqual(controller.state["active"], 2)
+        self.hub.call = original
+        self.args.resume = True
+        self.hub.items[2]["state"] = "closed"
+        with self.assertRaisesRegex(Stop, "no longer eligible"):
+            self.controller().execute()
+        self.hub.items[2]["state"] = "open"
+        self.hub.blockers = lambda number: [{"state": "open"}]
+        with self.assertRaisesRegex(Stop, "no longer eligible"):
+            self.controller().execute()
+        self.assertFalse(self.hub.claimed)
+        self.assertFalse(self.executed)
+
     def test_manual_mode_stops_after_reviewed_pr(self):
         self.args.auto_merge = False
         controller = self.controller()
@@ -204,6 +223,29 @@ class MergeTests(unittest.TestCase):
         f.hub.api = lambda endpoint: {**original(endpoint), "mergeable_state": "blocked"}
         with patch.object(queue, "ci_ready", return_value=True), self.assertRaisesRegex(Stop, "blocked"):
             queue.merge_reviewed(f.session, {"ci_timeout_seconds": 10, "required_checks": ["checks"]}, time.time()+10)
+        self.assertEqual(f.hub.ref("main"), f.base)
+
+    def test_reviewed_issue_cannot_merge_after_original_deadline(self):
+        f = self.fixture()
+        f.session.save(deadline=time.time()-1)
+        with patch.object(queue, "ci_ready", return_value=True) as ci, self.assertRaisesRegex(Stop, "deadline expired"):
+            queue.merge_reviewed(f.session, {"ci_timeout_seconds": 10}, time.time()+100)
+        ci.assert_not_called()
+        self.assertEqual(f.hub.ref("main"), f.base)
+
+    def test_resuming_ci_wait_does_not_renew_its_deadline(self):
+        f = self.fixture()
+        clock = [time.time()]
+        def sleep(seconds): clock[0] += seconds
+        plan = {"ci_timeout_seconds": 10, "required_checks": ["checks"]}
+        with patch.object(queue, "ci_ready", return_value=False):
+            with self.assertRaisesRegex(Stop, "wait exhausted"):
+                queue.merge_reviewed(f.session, plan, clock[0]+100, sleep=sleep, now=lambda: clock[0])
+        first_deadline = f.session.state["merge_deadline"]
+        with patch.object(queue, "ci_ready", return_value=True) as ci, self.assertRaisesRegex(Stop, "deadline expired"):
+            queue.merge_reviewed(f.session, plan, clock[0]+100, sleep=sleep, now=lambda: clock[0])
+        ci.assert_not_called()
+        self.assertEqual(f.session.state["merge_deadline"], first_deadline)
         self.assertEqual(f.hub.ref("main"), f.base)
 
 

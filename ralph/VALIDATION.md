@@ -2,8 +2,9 @@
 
 ## Queue extension — 2026-10-01
 
-- The 64-test suite passes on WSL/Linux. Windows passes the original 44 tests
-  (two Linux-only skips) and all 20 new queue/budget tests. The new tests exercise
+- The 68-test suite passes on WSL/Linux. Windows passed the preceding 64-test
+  version (two Linux-only skips) and all nine final budget tests; final Windows
+  CI is recorded on the PR. The new tests exercise
   dependency ordering, assignment, dry-run, limits and resume, interrupted-merge
   reconciliation, exact reviewed-head publication and a real Git concurrent-main
   race. Simulated GitHub checks include missing, pending, failed and wrong-app jobs.
@@ -12,6 +13,10 @@
   image payloads and one shared ledger across real Git worktrees. They use no
   real key or provider request. A Windows database-handle leak found by these
   tests was fixed before publication.
+- Initial Astra review found resumed assignment without a fresh eligibility
+  check, renewed merge-wait deadlines, and incomplete accounting-fault handling.
+  These were fixed with regression tests for changed blockers/closure, expired
+  issue/CI deadlines and malformed or over-reservation usage across restart.
 - Bash syntax passes for all provider launchers and the internal helper. Personal
   Codex/Sol and Astra login preflight passes; this is not an editing smoke.
 - The approved production ledger initially reports USD 0 spent/reserved against

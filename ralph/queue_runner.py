@@ -82,6 +82,11 @@ def merge_reviewed(session: Session, plan: dict, deadline: float, *, sleep=time.
     Server protection is never disabled or overridden, and blocked PRs stop here.
     """
     state, hub = session.state, session.hub
+    stop = min(deadline, state["deadline"], state.get("merge_deadline", now() + plan["ci_timeout_seconds"]))
+    if now() >= stop:
+        raise Stop("Original issue/CI/queue deadline expired; merge is not authorized.")
+    if "merge_deadline" not in state:
+        session.save(merge_deadline=stop)
     evidence = read_json(session.directory / f"attempt-{state['attempts']}" / "validated-head.json")
     if (evidence.get("head") != state["head"] or evidence.get("tree") != state["candidate_tree"]
             or not evidence.get("checks") or any(c.get("exit_code") != 0 for c in evidence["checks"])):
@@ -91,7 +96,6 @@ def merge_reviewed(session: Session, plan: dict, deadline: float, *, sleep=time.
     if review["verdict"] != "pass":
         raise Stop("Queue requires an independent passing review for this exact commit.")
     number = int(state["pr"].rstrip("/").split("/")[-1])
-    stop = min(deadline, now() + plan["ci_timeout_seconds"])
     while now() < stop:
         session.fresh()
         pr = session.verified_pr()
@@ -115,6 +119,8 @@ def merge_reviewed(session: Session, plan: dict, deadline: float, *, sleep=time.
         raise Stop("Checks changed before merge.")
     git(session.worktree, "merge-base", "--is-ancestor", state["base"], state["head"])
     session.save(phase="merging")  # Recovery checks reachability before doing more work.
+    if now() >= stop:
+        raise Stop("Original issue/CI/queue deadline expired before push.")
     git(session.worktree, "push", "--no-follow-tags",
         f"--force-with-lease=refs/heads/{session.policy['base_branch']}:{state['base']}",
         "origin", f"{state['head']}:refs/heads/{session.policy['base_branch']}")
@@ -215,6 +221,9 @@ class Queue:
                     continue
                 if hub.ref(self.policy["base_branch"]) != saved["base"]:
                     raise Stop("Interrupted merge needs GitHub reconciliation; worker will not be rerun.")
+            reason = eligibility(hub, active, actor, args.claim_unassigned, args.include_optional)
+            if reason is not None:
+                raise Stop(f"Active issue #{active} is no longer eligible: {reason}")
             if not issue.get("assignees") and args.claim_unassigned:
                 hub.call("issue", "edit", str(active), "--repo", self.policy["repository"], "--add-assignee", actor)
             checks = self.directory / f"checks-{active}.json"

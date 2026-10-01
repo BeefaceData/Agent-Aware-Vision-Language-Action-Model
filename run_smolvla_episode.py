@@ -22,12 +22,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
 
-from episode_harness import EpisodeConfig, StepResult, run_episode
+from episode_harness import EpisodeConfig, ObservationPacket, StepResult, run_episode
 
 
 def parse_args(argv=None):
@@ -124,9 +124,9 @@ def main():
             def reset(self):
                 policy.reset()
 
-            def act(self, observation):
+            def act(self, packet):
                 # Same processing order as LeRobot 0.4.3 rollout().
-                batch = preprocess_observation(observation)
+                batch = preprocess_observation(packet.observation)
                 batch = add_envs_task(env, batch)
                 batch = env_pre(batch)
                 batch = preprocessor(batch)
@@ -140,15 +140,21 @@ def main():
                 return action_numpy
 
         class BaselineEnvironment:
-            def reset(self, seed):
+            def reset(self, seed, episode_id):
+                self.episode_id = episode_id
+                self.sequence = 0
                 observation, _ = env.reset(seed=[seed])
-                return observation
+                return ObservationPacket(episode_id, self.sequence,
+                                         datetime.now(timezone.utc), observation)
 
             def step(self, action):
                 observation, reward, terminated, truncated, info = env.step(action)
+                self.sequence += 1
                 success_info = info.get('final_info', info)
                 return StepResult(
-                    observation=observation,
+                    observation=ObservationPacket(
+                        self.episode_id, self.sequence,
+                        datetime.now(timezone.utc), observation),
                     reward=float(reward[0]),
                     success=bool(np.asarray(success_info.get('is_success', [False])).reshape(-1)[0]),
                     terminated=bool(terminated[0]),
@@ -160,21 +166,33 @@ def main():
                 self.writer = None
                 self.log = None
 
-            def record_frame(self, observation):
+            def record_frame(self, packet):
                 # The wrapper may reset internally on success; returned pixels
                 # preserve the terminal observation instead of env.render().
-                frame = observation['pixels']['image'][0]
+                frame = packet.observation['pixels']['image'][0]
                 self.writer.append_data(np.ascontiguousarray(frame[::-1, ::-1]))
 
-            def begin(self, observation):
+            def begin(self, packet):
                 self.writer = imageio.get_writer(str(video_path), fps=args.video_fps,
                                                  codec='libx264', macro_block_size=1)
-                self.record_frame(observation)
+                self.record_frame(packet)
                 self.log = (out / 'steps.jsonl').open('w', encoding='utf-8')
 
-            def record_step(self, step, action, result):
-                self.record_frame(result.observation)
+            def record_step(self, step, source, action, result, ingestion):
+                if ingestion.accepted:
+                    self.record_frame(result.observation)
+
+                def identity(packet):
+                    return {'episode_id': packet.episode_id,
+                            'sequence': packet.sequence,
+                            'captured_at': packet.captured_at.isoformat()}
+
                 row = {'step': step, 'action': action[0].tolist(),
+                       'source_observation': identity(source),
+                       'result_observation': (identity(result.observation)
+                                              if isinstance(result.observation,
+                                                            ObservationPacket) else None),
+                       'observation_ingestion': ingestion.code,
                        'reward': result.reward, 'success': result.success,
                        'terminated': result.terminated, 'truncated': result.truncated}
                 self.log.write(json.dumps(row) + '\n')
@@ -209,6 +227,7 @@ def main():
         outcome = run_episode(EpisodeConfig(args.seed, limit), BaselinePolicy(),
                               BaselineEnvironment(), recorder, show_progress)
         summary.update(status='completed', steps=outcome.steps,
+                       episode_id=outcome.episode_id,
                        success=outcome.success, sum_rewards=outcome.sum_rewards,
                        stop_reason=outcome.stop_reason,
                        rollout_seconds=outcome.rollout_seconds)

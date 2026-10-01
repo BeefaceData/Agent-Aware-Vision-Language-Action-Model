@@ -1,8 +1,10 @@
 """Observable baseline episode behavior through the public harness interface."""
 
 import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
-from episode_harness import EpisodeConfig, StepResult, run_episode
+from episode_harness import EpisodeConfig, ObservationPacket, StepResult, run_episode
 from run_smolvla_episode import parse_args
 
 
@@ -26,13 +28,22 @@ class ReplayEnvironment:
         self.seeds = []
         self.actions = []
 
-    def reset(self, seed):
+    def reset(self, seed, episode_id):
         self.seeds.append(seed)
-        return 'initial observation'
+        self.episode_id = episode_id
+        self.sequence = 0
+        self.capture_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return ObservationPacket(episode_id, 0, self.capture_start,
+                                 'initial observation')
 
     def step(self, action):
         self.actions.append(action)
-        return next(self.results)
+        self.sequence += 1
+        result = next(self.results)
+        return replace(result, observation=ObservationPacket(
+            self.episode_id, self.sequence,
+            self.capture_start + timedelta(seconds=self.sequence),
+            result.observation))
 
 
 class ReplayRecorder:
@@ -44,10 +55,12 @@ class ReplayRecorder:
     def begin(self, observation):
         self.observations.append(observation)
 
-    def record_step(self, step, action, result):
+    def record_step(self, step, source, action, result, ingestion):
         self.rows.append((step, action, result.reward, result.success,
-                          result.terminated, result.truncated))
-        self.observations.append(result.observation)
+                          result.terminated, result.truncated,
+                          source, result.observation, ingestion.code))
+        if ingestion.accepted:
+            self.observations.append(result.observation)
 
     def finish(self):
         self.finalized = True
@@ -71,14 +84,20 @@ class EpisodeHarnessTests(unittest.TestCase):
         self.assertEqual(environment.seeds, [17])
         self.assertEqual(policy.resets, 1)
         self.assertEqual(policy.observations,
-                         ['initial observation', 'next observation'])
+                         recorder.observations[:2])
         self.assertEqual(environment.actions, ['first action', 'second action'])
-        self.assertEqual(recorder.observations,
+        self.assertEqual([p.observation for p in recorder.observations],
                          ['initial observation', 'next observation', 'terminal observation'])
-        self.assertEqual(recorder.rows, [
+        self.assertEqual([row[:6] for row in recorder.rows], [
             (1, 'first action', 0.25, False, False, False),
             (2, 'second action', 1.0, True, True, False),
         ])
+        self.assertEqual([row[6:8] for row in recorder.rows], [
+            (recorder.observations[0], recorder.observations[1]),
+            (recorder.observations[1], recorder.observations[2]),
+        ])
+        self.assertEqual([row[8] for row in recorder.rows],
+                         ['accepted', 'accepted'])
         self.assertTrue(recorder.finalized)
         self.assertEqual((outcome.success, outcome.steps, outcome.stop_reason,
                           outcome.sum_rewards), (True, 2, 'success', 1.25))
@@ -103,7 +122,8 @@ class EpisodeHarnessTests(unittest.TestCase):
                 self.assertFalse(outcome.success)
                 self.assertEqual(outcome.steps, 1)
                 self.assertEqual(environment.actions, ['only action'])
-                self.assertEqual(recorder.observations[-1], result.observation)
+                self.assertEqual(recorder.observations[-1].observation,
+                                 result.observation)
 
     def test_invalid_horizon_does_not_start_an_episode(self):
         policy = ReplayPolicy([])
@@ -127,7 +147,8 @@ class EpisodeHarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, 'timed out'):
             run_episode(EpisodeConfig(3, 2), policy, environment, recorder)
         self.assertEqual(environment.actions, ['proposed action'])
-        self.assertEqual(recorder.observations, ['initial observation'])
+        self.assertEqual([p.observation for p in recorder.observations],
+                         ['initial observation'])
         self.assertFalse(recorder.finalized)
 
 

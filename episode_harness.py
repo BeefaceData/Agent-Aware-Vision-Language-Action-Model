@@ -9,8 +9,10 @@ policy through this interface.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from time import perf_counter
 from typing import Any, Callable, Mapping, Protocol
+from uuid import uuid4
 
 
 @dataclass(frozen=True)
@@ -20,8 +22,82 @@ class EpisodeConfig:
 
 
 @dataclass(frozen=True)
-class StepResult:
+class ObservationPacket:
+    """One captured observation, identified within a single episode.
+
+    ``captured_at`` is a timezone-aware source capture time, not the time the
+    harness received the packet. Sequences start at zero for the reset frame.
+    """
+
+    episode_id: str
+    sequence: int
+    captured_at: datetime
     observation: Any
+
+
+@dataclass(frozen=True)
+class IngestionOutcome:
+    accepted: bool
+    code: str
+    episode_id: str
+    received_episode_id: str | None
+    expected_sequence: int
+    received_sequence: int | None
+
+
+class ObservationRejected(ValueError):
+    """An environment packet was rejected before it could drive a decision."""
+
+    def __init__(self, outcome: IngestionOutcome):
+        self.outcome = outcome
+        super().__init__(f'observation rejected: {outcome.code}; '
+                         f'expected episode {outcome.episode_id}, '
+                         f'received {outcome.received_episode_id}; '
+                         f'expected sequence {outcome.expected_sequence}, '
+                         f'received {outcome.received_sequence}')
+
+
+class ObservationIngestor:
+    """Accept a contiguous, time-ordered packet stream for one episode."""
+
+    def __init__(self, episode_id: str):
+        if not isinstance(episode_id, str) or not episode_id:
+            raise ValueError('episode_id must be a nonempty string')
+        self.episode_id = episode_id
+        self._next_sequence = 0
+        self._last_capture: datetime | None = None
+
+    def ingest(self, packet: ObservationPacket) -> IngestionOutcome:
+        expected = self._next_sequence
+        received = packet.sequence if isinstance(packet, ObservationPacket) else None
+        received_episode = packet.episode_id if isinstance(packet, ObservationPacket) else None
+        code = 'accepted'
+        if not isinstance(packet, ObservationPacket):
+            code = 'invalid_packet'
+        elif packet.episode_id != self.episode_id:
+            code = 'wrong_episode'
+        elif type(packet.sequence) is not int or packet.sequence < 0:
+            code = 'invalid_sequence'
+        elif not isinstance(packet.captured_at, datetime) or (
+            packet.captured_at.utcoffset() is None
+        ):
+            code = 'invalid_capture_time'
+        elif packet.sequence < self._next_sequence:
+            code = 'duplicate'
+        elif packet.sequence > self._next_sequence:
+            code = 'out_of_order'
+        elif self._last_capture is not None and packet.captured_at < self._last_capture:
+            code = 'out_of_order_capture_time'
+        if code == 'accepted':
+            self._next_sequence += 1
+            self._last_capture = packet.captured_at
+        return IngestionOutcome(code == 'accepted', code, self.episode_id,
+                                received_episode, expected, received)
+
+
+@dataclass(frozen=True)
+class StepResult:
+    observation: ObservationPacket
     reward: float
     success: bool
     terminated: bool
@@ -30,6 +106,7 @@ class StepResult:
 
 @dataclass(frozen=True)
 class EpisodeOutcome:
+    episode_id: str
     success: bool
     steps: int
     stop_reason: str
@@ -40,17 +117,19 @@ class EpisodeOutcome:
 
 class PolicyAdapter(Protocol):
     def reset(self) -> None: ...
-    def act(self, observation: Any) -> Any: ...
+    def act(self, observation: ObservationPacket) -> Any: ...
 
 
 class EnvironmentAdapter(Protocol):
-    def reset(self, seed: int) -> Any: ...
+    def reset(self, seed: int, episode_id: str) -> ObservationPacket: ...
     def step(self, action: Any) -> StepResult: ...
 
 
 class EpisodeRecorder(Protocol):
-    def begin(self, observation: Any) -> None: ...
-    def record_step(self, step: int, action: Any, result: StepResult) -> None: ...
+    def begin(self, observation: ObservationPacket) -> None: ...
+    def record_step(self, step: int, source: ObservationPacket,
+                    action: Any, result: StepResult,
+                    ingestion: IngestionOutcome) -> None: ...
     def finish(self) -> Mapping[str, str]: ...
 
 
@@ -63,16 +142,22 @@ def run_episode(
 ) -> EpisodeOutcome:
     """Run one attempt and return its outcome after artifacts are finalized.
 
-    ``policy`` provides reset/act(observation); ``environment`` provides
-    reset(seed)/step(action); ``recorder`` provides begin(observation),
-    record_step(step, action, result), and finish() -> artifact references.
+    ``policy`` provides reset/act(packet); ``environment`` provides
+    reset(seed, episode_id)/step(action); ``recorder`` provides begin(packet),
+    record_step(step, source_packet, action, result, ingestion), and finish()
+    -> artifact references. Rejected result packets are recorded before raising.
     The caller releases adapter resources on any exception.
     """
     if config.max_steps <= 0:
         raise ValueError('max_steps must be positive')
 
+    episode_id = uuid4().hex
+    ingestor = ObservationIngestor(episode_id)
     policy.reset()
-    observation = environment.reset(config.seed)
+    observation = environment.reset(config.seed, episode_id)
+    initial_ingestion = ingestor.ingest(observation)
+    if not initial_ingestion.accepted:
+        raise ObservationRejected(initial_ingestion)
     recorder.begin(observation)
     rollout_start = perf_counter()
     reward_sum = 0.0
@@ -83,7 +168,10 @@ def run_episode(
     for step in range(1, config.max_steps + 1):
         action = policy.act(observation)
         result = environment.step(action)
-        recorder.record_step(step, action, result)
+        ingestion = ingestor.ingest(result.observation)
+        recorder.record_step(step, observation, action, result, ingestion)
+        if not ingestion.accepted:
+            raise ObservationRejected(ingestion)
         reward_sum += result.reward
         steps = step
         success = result.success
@@ -97,5 +185,5 @@ def run_episode(
 
     rollout_seconds = perf_counter() - rollout_start
     artifacts = recorder.finish()
-    return EpisodeOutcome(success, steps, stop_reason, reward_sum,
+    return EpisodeOutcome(episode_id, success, steps, stop_reason, reward_sum,
                           rollout_seconds, artifacts)

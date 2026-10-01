@@ -109,14 +109,37 @@ wait_ci() {
   done
 }
 finish_merge() {
-  local pr=$1
-  gh_call pr view "$pr" --repo "$REPO" --json state,headRefOid,mergeCommit > "$EVIDENCE/merged.json"
-  jq -e --arg head "$HEAD" '.state == "MERGED" and .headRefOid == $head and .mergeCommit.oid == $head' "$EVIDENCE/merged.json" >/dev/null ||
-    die 'Merge is not yet confirmed at the reviewed commit; rerun to reconcile.'
-  read_issue "$ISSUE" "$EVIDENCE/closed.json"
-  [[ $(jqtext '.state' "$EVIDENCE/closed.json") == CLOSED ]] || die 'PR merged but linked issue is not closed yet; rerun to reconcile.'
-  active_update '.phase="complete"'
-  state_update --argjson issue "$ISSUE" '.completed = ((.completed + [$issue]) | unique) | .active=null'
+  local pr=$1 poll until=$(( $(date +%s) + 120 ))
+  # Updating main and updating PR/issue metadata are not immediately consistent.
+  # Reconcile using reads only; never repeat the merge or count an OPEN response.
+  for ((poll=0; poll<=24; poll++)); do
+    check_deadline
+    gh_call pr view "$pr" --repo "$REPO" --json state,headRefOid,mergeCommit > "$EVIDENCE/merged.json"
+    jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{observed_at:$at,pr:.}' \
+      "$EVIDENCE/merged.json" >> "$EVIDENCE/merge-confirmation.jsonl"
+    jq -e --arg head "$HEAD" '.headRefOid == $head' "$EVIDENCE/merged.json" >/dev/null ||
+      die 'PR head changed during merge confirmation; inspect the evidence.'
+    jq -e '.state == "OPEN" or .state == "MERGED"' "$EVIDENCE/merged.json" >/dev/null ||
+      die 'PR closed without a confirmed merge, or returned invalid state.'
+    if [[ $(jqtext '.state' "$EVIDENCE/merged.json") == MERGED ]]; then
+      jq -e --arg head "$HEAD" '.mergeCommit.oid == null or .mergeCommit.oid == $head' "$EVIDENCE/merged.json" >/dev/null ||
+        die 'PR merged at a different commit; inspect the evidence.'
+      if [[ $(jqtext '.mergeCommit.oid // empty' "$EVIDENCE/merged.json") == "$HEAD" ]]; then
+        read_issue "$ISSUE" "$EVIDENCE/closed.json"
+        jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{observed_at:$at,issue:.}' \
+          "$EVIDENCE/closed.json" >> "$EVIDENCE/merge-confirmation.jsonl"
+        if [[ $(jqtext '.state' "$EVIDENCE/closed.json") == CLOSED ]]; then
+          active_update '.phase="complete"'
+          state_update --argjson issue "$ISSUE" '.completed = ((.completed + [$issue]) | unique) | .active=null'
+          return
+        fi
+      fi
+    fi
+    (( poll < 24 && $(date +%s) < until )) || break
+    say "Waiting for GitHub to confirm PR #$pr merged and issue #$ISSUE closed..."
+    sleep 5
+  done
+  die 'Timed out waiting for GitHub merge confirmation; saved merging state can be reconciled on resume.'
 }
 merge_pr() {
   local pr; pr=$(jqtext '.pr' "$ACTIVE")

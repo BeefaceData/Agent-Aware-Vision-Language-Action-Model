@@ -40,7 +40,15 @@ gh_call() {
   printf '%s\n' "$*" >> "$RUN/gh-calls"
   case "$1 $2" in
     'issue view')
-      if [[ $3 == 1 ]]; then cat "$RUN/prd.json"; else cat "$RUN/issue-$3.json"; fi ;;
+      if [[ $3 == 1 ]]; then cat "$RUN/prd.json"; else
+        if [[ ${MOCK_CLOSE_DELAY:-0} != 0 && $(jqtext '.state' "$RUN/issue-$3.json") == CLOSED ]]; then
+          local count=0
+          [[ ! -f $RUN/close-polls ]] || count=$(cat "$RUN/close-polls")
+          printf '%s\n' "$((count+1))" > "$RUN/close-polls"
+          if (( count < MOCK_CLOSE_DELAY )); then jq '.state="OPEN"' "$RUN/issue-$3.json"; return; fi
+        fi
+        cat "$RUN/issue-$3.json"
+      fi ;;
     'issue edit') return ;;
     'api --paginate') printf '[[]]\n' ;;
     'api --method')
@@ -59,7 +67,15 @@ gh_call() {
     'pr checks') printf '[{"name":"fixture","bucket":"pass","state":"SUCCESS"}]\n' ;;
     'pr view')
       if [[ $(git --git-dir="$ROOT/.ralph-origin.git" rev-parse main) == "$HEAD" ]]; then
-        jq -n --arg head "$HEAD" '{state:"MERGED",headRefOid:$head,mergeCommit:{oid:$head}}'
+        local count=0
+        [[ ! -f $RUN/merge-polls ]] || count=$(cat "$RUN/merge-polls")
+        printf '%s\n' "$((count+1))" > "$RUN/merge-polls"
+        if (( count < ${MOCK_MERGE_DELAY:-0} )); then
+          jq -n --arg head "$HEAD" '{state:"OPEN",headRefOid:$head,mergeCommit:null}'
+        else
+          jq -n --arg head "${MOCK_MERGED_HEAD:-$HEAD}" --arg commit "${MOCK_MERGE_COMMIT:-$HEAD}" \
+            '{state:"MERGED",headRefOid:$head,mergeCommit:{oid:$commit}}'
+        fi
       else
         jq -n --arg head "$HEAD" --arg base "${MOCK_BASE:-$BASE}" '{state:"OPEN",headRefOid:$head,baseRefOid:$base,mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",isDraft:false}'
       fi ;;
@@ -116,6 +132,50 @@ test_check_repair() {
   }
   work_issue
   jq -e '.attempts == 2 and .reviews == 1 and .phase == "complete"' "$ACTIVE" >/dev/null
+}
+test_merge_propagation() {
+  setup; ISSUE=2; state_update '.active=2'
+  MOCK_MERGE_DELAY=1; MOCK_CLOSE_DELAY=1
+  sleep() {
+    jq -e '.completed == [] and .active == 2' "$STATE" >/dev/null
+    jq -e '.phase == "merging"' "$ACTIVE" >/dev/null
+    printf 'waiting\n' >> "$RUN/waits"
+  }
+  work_issue
+  jq -e '.completed == [2] and .active == null' "$STATE" >/dev/null
+  [[ $(wc -l < "$RUN/waits") == 2 ]]
+  [[ $(grep -c 'api --method PATCH' "$RUN/gh-calls") == 1 ]]
+  finish_merge 99
+  jq -e '.completed == [2]' "$STATE" >/dev/null
+  jq -e '.attempts == 1 and .checks == 1 and .reviews == 1' "$ACTIVE" >/dev/null
+}
+test_merge_never_confirms() {
+  setup; ISSUE=2; state_update '.active=2'; MOCK_MERGE_DELAY=999
+  sleep() { :; }
+  work_issue
+  die 'Unreachable: unconfirmed merge was counted.'
+}
+test_merge_resume() {
+  setup; ISSUE=2; state_update '.active=2'; work_issue
+  # Restore the journal state that would survive a stop after the remote merge.
+  active_update '.phase="merging"'
+  state_update '.completed=[] | .active=2'
+  invoke_model() { die 'Resume reran a model.'; }
+  publish_branch() { die 'Resume republished a branch.'; }
+  merge_pr() { die 'Resume retried a merge.'; }
+  work_issue
+  jq -e '.completed == [2] and .active == null' "$STATE" >/dev/null
+  [[ $(grep -c 'api --method PATCH' "$RUN/gh-calls") == 1 ]]
+}
+test_merged_head_changed() {
+  setup; ISSUE=2; state_update '.active=2'; MOCK_MERGED_HEAD=other
+  work_issue
+  die 'Unreachable: changed PR head was accepted.'
+}
+test_wrong_merge_commit() {
+  setup; ISSUE=2; state_update '.active=2'; MOCK_MERGE_COMMIT=other
+  work_issue
+  die 'Unreachable: wrong merged commit was accepted.'
 }
 test_stale_review() {
   setup; ISSUE=2; prepare_issue; worker_attempt; HEAD=$(jqtext '.head' "$ACTIVE")
@@ -241,13 +301,16 @@ test_container() {
 
 if [[ $# -gt 0 ]]; then "$1"; exit; fi
 for script in "$RALPH_DIR"/*.sh "$TEST_DIR"/*.sh; do bash -n "$script"; done
-for test in lifecycle resume check_repair legacy_resume check_gate local_commit keys provider_command; do
+for test in lifecycle resume check_repair merge_propagation merge_resume legacy_resume check_gate local_commit keys provider_command; do
   bash "$0" "test_$test" > "${TMPDIR:-/tmp}/ralph-$test.log" 2>&1 || { cat "${TMPDIR:-/tmp}/ralph-$test.log"; exit 1; }
   printf 'PASS: %s\n' "$test"
 done
 for item in 'stale_review:Independent review blocked' 'main_moved:Merge gate changed' \
   'revision_limit:Two worker attempts exhausted' 'protected_change:Worker changed protected path' \
-  'dependency_failure:Cannot read native dependencies' 'upload_mismatch:GitHub blob differs'; do
+  'dependency_failure:Cannot read native dependencies' 'upload_mismatch:GitHub blob differs' \
+  'merge_never_confirms:Timed out waiting for GitHub merge confirmation' \
+  'merged_head_changed:PR head changed during merge confirmation' \
+  'wrong_merge_commit:PR merged at a different commit'; do
   test=${item%%:*}; expected=${item#*:}
   if bash "$0" "test_$test" > "${TMPDIR:-/tmp}/ralph-$test.log" 2>&1; then
     printf 'FAIL: %s unexpectedly succeeded\n' "$test"; exit 1

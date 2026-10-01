@@ -7,6 +7,9 @@ worktrees and pushes to a local bare remote, with deterministic GitHub/model
 boundaries. They exercise sequential issues, resume, legacy queue migration,
 stale review rejection, changed-main rejection, review repair limits, protected
 files, required checks, credential stripping and the no-fetch local-object path.
+Delayed PR merge visibility and delayed issue closure are tested independently;
+completion is counted once, without another merge request. Unconfirmed merges
+time out, and a different PR head or merged commit stops immediately.
 
 These tests do not establish provider model quality, successful paid supervision,
 or a measured VLA improvement. `codex-afk.sh 50 --doctor` checks the installed

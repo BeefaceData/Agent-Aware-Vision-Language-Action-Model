@@ -65,6 +65,9 @@ not the loop controller.
    A non-forced GitHub ref update fast-forwards main to the exact reviewed commit;
    branch protection and a concurrent main update can reject it.
 8. Count completion only after GitHub confirms the PR merged and issue closed.
+   Poll for up to two minutes while GitHub updates that metadata. If confirmation
+   remains unavailable, preserve the merging phase for read-only reconciliation
+   on resume; do not rerun the worker or send another merge request.
 
 The user has authorized this auto-merge policy. Workers cannot publish or merge.
 A new main commit from a teammate stops an outdated candidate for fresh review.

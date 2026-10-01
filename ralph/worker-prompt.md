@@ -7,7 +7,11 @@
 2. Implement that change in this worktree. Keep tests at public module seams and
    include full-episode behavior when relevant. The controller executes approved
    checks; use permitted focused checks during development. Claude has file tools
-   only: write tests and report their execution as pending the controller. Do not start unrelated tasks or delegate to other
+   only: write tests and report their execution as pending the controller. Put
+   discoverable public behavior tests in `tests/`, using `unittest` for the
+   simulation queue's standard-library validation image. Keep simulator/model
+   imports lazy and inject transports/adapters for replay; a new dependency or
+   image needs supervised provisioning. Do not start unrelated tasks or delegate to other
    coding agents/models.
 3. Inspect the diff and each new file; use `git diff` when execution is available,
    or read the changed files with file tools. Check error paths, concurrency and timing,

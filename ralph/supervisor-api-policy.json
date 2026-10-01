@@ -1,0 +1,15 @@
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-5-5",
+  "key_environment": "ANTHROPIC_API_KEY",
+  "budget_usd": "50.00",
+  "maximum_input_tokens": 1100000,
+  "maximum_output_tokens": 2048,
+  "input_usd_per_million": "2.00",
+  "output_usd_per_million": "10.00",
+  "pricing_checked_on": "2026-10-01",
+  "pricing_valid_until": "2026-10-08",
+  "pricing_source": "https://platform.claude.com/docs/en/models/sonnet-5-5/overview",
+  "permitted_data": "synthetic fixtures and public LIBERO simulation observations",
+  "purpose": "simulation-supervision"
+}

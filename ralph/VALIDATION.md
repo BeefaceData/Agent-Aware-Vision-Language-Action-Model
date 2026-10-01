@@ -1,4 +1,29 @@
-# Loop setup verification — 2026-09-30
+# Loop setup verification
+
+## Queue extension — 2026-10-01
+
+- The 64-test suite passes on WSL/Linux. Windows passes the original 44 tests
+  (two Linux-only skips) and all 20 new queue/budget tests. The new tests exercise
+  dependency ordering, assignment, dry-run, limits and resume, interrupted-merge
+  reconciliation, exact reviewed-head publication and a real Git concurrent-main
+  race. Simulated GitHub checks include missing, pending, failed and wrong-app jobs.
+- Budget transport tests cover concurrent reservations, duplicate IDs, timeouts,
+  changed policy, expired pricing, malformed content/accounting, chronological
+  image payloads and one shared ledger across real Git worktrees. They use no
+  real key or provider request. A Windows database-handle leak found by these
+  tests was fixed before publication.
+- Bash syntax passes for all provider launchers and the internal helper. Personal
+  Codex/Sol and Astra login preflight passes; this is not an editing smoke.
+- The approved production ledger initially reports USD 0 spent/reserved against
+  USD 50. No live Anthropic request, simulator trial or capstone implementation
+  issue was executed during this setup. See the setup PR for independent review
+  and CI evidence attached to the final source head.
+
+The user explicitly authorized auto-merge after independent review and checks
+for this queue. That supersedes the earlier human-only preference below, which
+records the original setup. Single-issue mode still stops for human merge.
+
+## Original setup — 2026-09-30
 
 This file records setup evidence, not capstone experiment results. No real
 implementation ticket was claimed, executed or closed during these checks.

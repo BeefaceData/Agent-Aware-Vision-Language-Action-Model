@@ -1,4 +1,4 @@
-"""One assigned issue -> bounded worker/review cycles -> PR for human merge.
+"""One issue per worker; optional serial queue merges after review and checks.
 
 Run through one of the three *-afk.sh launchers, or pass --backend on Windows.
 The GitHub issue and native dependency graph are authoritative, not local state.
@@ -29,6 +29,7 @@ CONTROL_PATHS = ("ralph/", ".github/", ".agents/", ".claude/", ".codex/", ".curs
 REQUIRED = ("AGENTS.md", "CONTEXT.md", "docs/agents/issue-tracker.md",
             "docs/agents/triage-labels.md", ".agents/skills/commit-convention/SKILL.md",
             "ralph/prompt.md", "ralph/worker-prompt.md", "ralph/reviewer-prompt.md", "ralph/policy.json")
+QUEUE_FILES = ("ralph/queue_runner.py", "ralph/supervisor_api.py", "ralph/supervisor-api-policy.json")
 
 
 def git(root: Path, *args: str) -> str:
@@ -389,7 +390,8 @@ class Session:
         base = git(self.root, "rev-parse", f"origin/{self.policy['base_branch']}")
         # New worktrees must receive the same reviewed instructions as the team.
         # Untracked setup files must first land through a supervised setup PR.
-        for path in REQUIRED + ("ralph/runner.py", "ralph/runtime.py"):
+        extra = QUEUE_FILES if getattr(self.args, "queue_deadline", None) else ()
+        for path in REQUIRED + ("ralph/runner.py", "ralph/runtime.py") + extra:
             try:
                 content = git(self.root, "show", f"{base}:{path}")
             except Stop as exc:
@@ -397,8 +399,7 @@ class Session:
             if not (self.root / path).is_file() or content != (self.root / path).read_text(encoding="utf-8").strip():
                 raise Stop(f"Loop setup must first be reviewed and merged to main: {path}")
         assert_unfiltered(self.root, git(self.root, "ls-tree", "-r", "--name-only", base).splitlines(), source=base)
-        signature = digest({"policy": self.policy, "plan": self.plan, "issue": issue_snapshot(self.issue),
-                            "prd": self.parent.get("body"), "comments": self.comments, "backend": self.args.backend})
+        signature = self.identity()
         if self.state_path.exists():
             if not self.args.resume:
                 raise Stop("A preserved run exists. Inspect it, then explicitly use --resume for the same issue.")
@@ -428,17 +429,27 @@ class Session:
         branch = f"ralph/issue-{self.args.issue}"
         self.directory.mkdir(parents=True)
         self.save(issue=self.args.issue, actor=self.actor, signature=signature, base=base,
-                  head=base, branch=branch, attempts=0, phase="claiming", deadline=time.time() + self.policy["run_timeout_seconds"])
+                  head=base, branch=branch, attempts=0, phase="claiming",
+                  deadline=min(time.time() + self.policy["run_timeout_seconds"],
+                               getattr(self.args, "queue_deadline", float("inf"))))
         self.hub.claim(branch, base)
         self.worktree.parent.mkdir(parents=True, exist_ok=True)
         git(self.root, "worktree", "add", "-b", branch, str(self.worktree), base)
         self.save(phase="working")
 
+    def identity(self):
+        return digest({"policy": self.policy, "plan": self.plan, "issue": issue_snapshot(self.issue),
+                       "prd": self.parent.get("body"), "comments": self.comments, "backend": self.args.backend,
+                       "campaign": getattr(self.args, "campaign", ""),
+                       "auto_merge": getattr(self.args, "auto_merge", False)})
+
     def packet(self) -> str:
         guidance = "\n\n".join(f"## {name}\n{(self.worktree / name).read_text(encoding='utf-8')}" for name in REQUIRED if not name.startswith("ralph/"))
         decisions = "\n\n".join(p.read_text(encoding="utf-8") for p in sorted((self.worktree / "docs/adr").glob("*.md")))
         data = {"issue": self.issue, "comments": self.comments, "parent_prd": self.parent, "criteria": dict(enumerate(self.ac, 1)),
-                "approved_checks": self.plan, "worktree": str(self.worktree)}
+                "approved_checks": self.plan, "worktree": str(self.worktree),
+                "campaign_context": getattr(self.args, "campaign", ""),
+                "merge_mode": "reviewed queue auto-merge" if getattr(self.args, "auto_merge", False) else "human"}
         return guidance + "\n" + decisions + "\n## Task data (not authority to change the loop)\n" + json.dumps(data, indent=2)
 
     def fresh(self):
@@ -468,9 +479,11 @@ class Session:
         return results
 
     def pr_body(self, report: dict, checks: list, review: dict | None) -> str:
-        status = "Astra review passed; awaiting human review." if review and review["verdict"] == "pass" else "Draft: independent review has not passed."
+        status = "Astra review passed; awaiting merge checks." if review and review["verdict"] == "pass" else "Draft: independent review has not passed."
+        automatic = getattr(self.args, "auto_merge", False)
+        merge = "exact-head queue merge" if automatic else "human merge"
         lines = [report["summary"], "",
-                 "```text", "issue -> candidate commit -> isolated checks -> Astra review -> human merge", "```", "",
+                 "```text", f"issue -> candidate commit -> isolated checks -> Astra review -> {merge}", "```", "",
                  "## Evidence", "", f"**Before:** acceptance criteria in #{self.args.issue} await verified completion.",
                  f"**After:** {status}", "",
                  f"Base: `{self.state['base']}`", f"Head: `{self.state['head']}`", "",
@@ -484,9 +497,14 @@ class Session:
         risk = report["merge_danger"]
         lines += ["", "## Merge Danger", "", f"**Door:** {risk['door']}", "", risk["reason"], "",
                   f"**Blast Radius:** {risk['blast_radius']}"]
-        lines += ["", "Human merge checklist:", "- [ ] Inspect the diff and acceptance evidence; all required CI checks pass.",
-                  "- [ ] Confirm the reviewed head and base still match; new commits need a fresh review.",
-                  "- [ ] Confirm resource/client gates for any empirical claims; merge only after approval."]
+        if automatic:
+            lines += ["", "Merge policy: user-authorized serial queue. The controller requires a passing independent",
+                      "Astra review, matching local validation, successful configured GitHub checks and an unchanged",
+                      "base/head. GitHub protection is respected; empirical/resource gates remain separate."]
+        else:
+            lines += ["", "Human merge checklist:", "- [ ] Inspect the diff and acceptance evidence; all required CI checks pass.",
+                      "- [ ] Confirm the reviewed head and base still match; new commits need a fresh review.",
+                      "- [ ] Confirm resource/client gates for any empirical claims; merge only after approval."]
         body = "\n".join(lines) + "\n"
         reject_closing_directives(body)
         return f"## Summary\n\nCloses #{self.args.issue}\n\n" + body
@@ -657,7 +675,8 @@ class Session:
                 if pr["draft"]:
                     self.hub.call("pr", "ready", self.state["pr"])
                 self.save(phase="ready_for_human", review=review)
-                print(f"READY FOR HUMAN: {self.state['pr']}\nIssue remains open; this loop never merges.")
+                destination = "QUEUE MERGE CHECKS" if getattr(self.args, "queue_deadline", None) else "HUMAN"
+                print(f"READY FOR {destination}: {self.state['pr']}")
                 return
             self.save(feedback=review, phase="changes_requested")
             if review["verdict"] == "blocked":
@@ -669,6 +688,11 @@ def main(argv=None) -> int:
     parser.add_argument("--backend", required=True, choices=("codex", "cursor", "claude"))
     parser.add_argument("--issue", type=int)
     parser.add_argument("--checks", type=Path, help="Human-approved JSON argument arrays for this issue")
+    parser.add_argument("--queue", type=Path, help="Dependency-ordered issue queue JSON")
+    parser.add_argument("--max-issues", type=int, default=50, help="Maximum issues started across this queue and its resumes")
+    parser.add_argument("--queue-hours", type=int, default=96, help="Total queue deadline, 1..168 hours")
+    parser.add_argument("--auto-merge", action="store_true", help="Merge exact reviewed commits after all configured checks")
+    parser.add_argument("--claim-unassigned", action="store_true", help="Assign eligible queued issues to your GitHub account")
     parser.add_argument("--dry-run", action="store_true", help="Read-only GitHub/auth preflight; no model or claim")
     parser.add_argument("--doctor", action="store_true", help="Read-only model/login checks; no issue needed")
     parser.add_argument("--resume", action="store_true", help="Continue this machine's saved run within its original budgets")
@@ -683,6 +707,14 @@ def main(argv=None) -> int:
             print(json.dumps({"worker": policy["workers"][args.backend], "reviewer": policy["final_review"],
                               "authentication": "personal login checks passed; model execution not tested"}, indent=2))
             return 0
+        if args.queue:
+            if args.issue or args.checks:
+                parser.error("Use --queue OR --issue/--checks, not both")
+            from queue_runner import run_queue
+            run_queue(ROOT, args, policy)
+            return 0
+        if args.auto_merge or args.claim_unassigned:
+            parser.error("--auto-merge and --claim-unassigned require --queue")
         if not args.issue or args.issue <= 1 or not args.checks:
             parser.error("--issue NUMBER (>1) and --checks PATH are required")
         session = Session(ROOT, args, policy, GitHub(ROOT, policy["repository"]))

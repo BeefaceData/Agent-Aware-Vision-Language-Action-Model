@@ -63,8 +63,16 @@ Follow the project-local `.agents/skills/commit-convention/SKILL.md` when propos
 a commit: Conventional Commit type first, one suitable Gitmoji code after the
 colon, and a body explaining why. The controller inspects and commits the diff.
 
-Worker completion means evidence ready for independent review. Astra review and human approval are distinct stages. Only a human merges;
-the issue closes through the accepted PR merge. Commit count, confident prose,
+Worker completion means evidence ready for independent review. Single-issue mode
+stops for human merge. In explicitly authorized queue mode the controller merges
+after independent Astra review, matching validation and required GitHub checks;
+it then selects the next eligible issue. Workers never merge or select more work.
+The issue closes through the accepted PR merge. Commit count, confident prose,
 model self-review and old `<promise>` tokens are never completion evidence.
 
 Only work on a single issue in each run.
+
+For the simulation-supervisor queue, use `ralph/QUEUE.md` for the selected
+milestone and budgeted transport interface. Build provider integration against
+injected transports; AFK workers and CI make no paid calls. The client key is
+reserved for simulation supervision through the shared USD 50 ledger.

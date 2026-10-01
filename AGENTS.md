@@ -16,4 +16,6 @@ Use a single-context layout: root `CONTEXT.md` and `docs/adr/`. See `docs/agents
 
 For an AFK coding run, use the approved provider launcher and follow
 `ralph/README.md`. Its prompts define the one-issue scope, validation evidence,
-independent review and human-merge boundary.
+independent review and merge policy. Single-issue runs stop for human merge;
+explicit queue mode may auto-merge after review and required checks. For the
+50-issue simulation batch and supervisor API allowance, read `ralph/QUEUE.md`.

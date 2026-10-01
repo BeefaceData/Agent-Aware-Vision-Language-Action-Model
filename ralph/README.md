@@ -4,9 +4,12 @@ Three entry points: `codex-afk.sh`, `cursor-afk.sh`, `claude-afk.sh`.
 There is no generic `afk.sh`. The internal Python controller shares lifecycle
 rules so providers cannot drift into different completion/merge policies.
 
-One invocation handles one explicitly selected GitHub issue, including at most
-two fresh worker attempts. It stops at a reviewed PR for a **human merge**.
-It never chooses the next issue, merges a PR or closes an issue directly.
+Each worker handles one explicitly selected GitHub issue, including at most
+two fresh worker attempts. Single-issue mode stops at a reviewed PR for a human
+merge. The explicit `--queue ... --auto-merge` mode processes a dependency-aware
+allowlist, merging each reviewed PR after checks before starting the next issue.
+See [QUEUE.md](QUEUE.md) for the approved 50-issue simulation batch, launch/resume
+commands and the shared $50 supervisor API budget.
 
 ```text
 assigned issue -> live blocker checks -> atomic branch claim -> isolated worktree
@@ -158,7 +161,8 @@ readiness. Issue, PRD or discussion changes also stop the run for reconciliation
 Each run has a 90-minute wall-clock deadline, at most two worker invocations and at
 most three review calls (one additional call allows recovery from a reviewer outage). Worker calls have a 30-minute timeout; reviews have 15 minutes.
 These are time/call bounds, not monetary billing caps. No automatic model downgrade,
-quota retry, history-rewriting push, rebase, claim stealing or issue rollover occurs.
+quota retry, history-rewriting push, rebase or claim stealing occurs. Issue rollover
+is available only in explicit queue mode.
 Branch publication requires fast-forward ancestry and an exact expected-old-SHA
 lease, so a deletion or concurrent branch change rejects the update.
 
@@ -183,19 +187,24 @@ require supervised review; workers cannot change their own rules incidentally.
 Binary/model/data artifacts and possible credentials are also held for inspection.
 The heuristic credential scan supplements review; it is not a complete secret detector.
 
-## Enforce human merge on GitHub
+## GitHub protection and merge policy
 
 A draft/ready flag and local model receipt are not a server-enforced approval.
-A repository admin must protect `main` with:
+The user has authorized reviewed queue auto-merges. An admin may additionally
+protect `main` with required checks and the team's chosen approval policy:
 
-- pull requests and at least one independent human approval;
+- pull requests and human approvals when the team requires them;
 - stale approvals dismissed and approval of the most recent push required;
 - required CI checks, including both `Ralph checks (ubuntu-latest)` and
   `Ralph checks (windows-latest)`, plus the project's relevant validation jobs;
 - resolved conversations, no force pushes/deletions, and the team's agreed bypass policy.
 
-The human reviewer must inspect the AI review evidence and match the final head
-and base before merging. Any new code commit needs fresh tests and Astra review.
+For manual merges, inspect the AI evidence and match the final head and base.
+Queue merges require unchanged base/head, passing local tests and independent
+Astra review, all named GitHub checks and GitHub's clean mergeability state.
+An existing human-approval protection remains binding and stops the queue until
+satisfied. The controller never changes protection settings or uses admin bypass.
+Any new code commit needs fresh tests and Astra review.
 The committed workflow tests controller behavior on unprivileged `pull_request`
 runners. It carries no client secret and runs no paid model. It is not an AI-review
 attestation service. GitHub approval policy remains an admin action; this setup

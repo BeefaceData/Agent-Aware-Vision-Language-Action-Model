@@ -171,6 +171,7 @@ def main():
             def __init__(self):
                 self.writer = None
                 self.log = None
+                self.cumulative_wait_seconds = 0.0
 
             def record_frame(self, packet):
                 # The wrapper may reset internally on success; returned pixels
@@ -198,6 +199,7 @@ def main():
                 timing.update(observation_age_seconds=result.timing.observation_age_seconds,
                               decision_latency_seconds=result.timing.decision_latency_seconds,
                               execution_seconds=result.timing.execution_seconds)
+                self.cumulative_wait_seconds = result.timing.cumulative_wait_seconds
 
                 row = {'step': step, 'action': action[0].tolist(),
                        'source_observation': identity(source),
@@ -208,6 +210,28 @@ def main():
                        'timing': timing,
                        'reward': result.reward, 'success': result.success,
                        'terminated': result.terminated, 'truncated': result.truncated}
+                self.log.write(json.dumps(row) + '\n')
+                self.log.flush()
+
+            def record_failure(self, step, source, action, failure):
+                timing = asdict(failure.timing)
+                timing.update(
+                    observation_age_seconds=failure.timing.observation_age_seconds,
+                    decision_latency_seconds=failure.timing.decision_latency_seconds)
+                self.cumulative_wait_seconds = failure.timing.cumulative_wait_seconds
+                row = {
+                    'attempted_step': step, 'completed_steps': step - 1,
+                    'status': 'failed',
+                    'failure_stage': failure.stage, 'error_type': failure.error_type,
+                    'proposed_action': action[0].tolist(),
+                    'source_observation': {
+                        'episode_id': source.episode_id,
+                        'sequence': source.sequence,
+                        'captured_at': source.captured_at.isoformat(),
+                        'captured_monotonic': source.captured_monotonic,
+                    },
+                    'result_observation': None, 'timing': timing,
+                }
                 self.log.write(json.dumps(row) + '\n')
                 self.log.flush()
 
@@ -251,6 +275,8 @@ def main():
         raise
     finally:
         summary['total_seconds'] = monotonic() - start
+        if recorder is not None:
+            summary['cumulative_wait_seconds'] = recorder.cumulative_wait_seconds
         # Save diagnostics even if simulation or encoding fails.
         try:
             if recorder is not None:

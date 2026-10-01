@@ -19,6 +19,81 @@ class ControlledClock:
 
 
 class EpisodeTimingTests(unittest.TestCase):
+    def test_delayed_supervisor_exception_preserves_wait_without_action(self):
+        clock = ControlledClock()
+        fixture = successful_replay(clock)
+
+        def supervisor(observation, proposed_action):
+            clock.advance((3.0, 7.0)[observation.sequence])
+            if observation.sequence == 1:
+                raise TimeoutError('supervisor timed out')
+
+        with self.assertRaisesRegex(TimeoutError, 'supervisor timed out'):
+            run_episode(fixture.config, fixture.policy, fixture.environment,
+                        fixture.recorder, supervisor=supervisor, clock=clock)
+
+        self.assertEqual(fixture.environment.actions, [('reach', 0.25)])
+        self.assertEqual(len(fixture.recorder.steps), 1)
+        self.assertEqual(fixture.recorder.steps[0][3].timing.cumulative_wait_seconds,
+                         3.0)
+        self.assertFalse(fixture.recorder.finalized)
+        self.assertEqual(len(fixture.recorder.failures), 1)
+        step, source, action, failure = fixture.recorder.failures[0]
+        self.assertEqual((step, source.sequence, action, failure.stage,
+                          failure.error_type),
+                         (2, 1, ('place', 0.75), 'supervisor', 'TimeoutError'))
+        self.assertEqual((failure.timing.capture_at, failure.timing.request_at,
+                          failure.timing.request_finished_at,
+                          failure.timing.response_at,
+                          failure.timing.execution_started_at,
+                          failure.timing.execution_finished_at),
+                         (103.0, 103.0, 110.0, None, None, None))
+        self.assertEqual(failure.timing.observation_age_seconds, 0.0)
+        self.assertEqual(failure.timing.decision_latency_seconds, 7.0)
+        self.assertEqual(failure.timing.cumulative_wait_seconds, 10.0)
+
+    def test_delayed_response_preserves_wait_when_environment_raises(self):
+        clock = ControlledClock()
+        fixture = successful_replay(clock)
+        attempted_actions = []
+
+        def supervisor(observation, proposed_action):
+            clock.advance((3.0, 7.0)[observation.sequence])
+
+        class FailingEnvironment:
+            def reset(self, seed, episode_id):
+                return fixture.environment.reset(seed, episode_id)
+
+            def step(self, action):
+                if fixture.environment.actions:
+                    attempted_actions.append(action)
+                    clock.advance(2.0)
+                    raise TimeoutError('environment timed out')
+                return fixture.environment.step(action)
+
+        with self.assertRaisesRegex(TimeoutError, 'environment timed out'):
+            run_episode(fixture.config, fixture.policy, FailingEnvironment(),
+                        fixture.recorder, supervisor=supervisor, clock=clock)
+
+        self.assertEqual(fixture.environment.actions, [('reach', 0.25)])
+        self.assertEqual(attempted_actions, [('place', 0.75)])
+        self.assertEqual(len(fixture.recorder.steps), 1)
+        self.assertFalse(fixture.recorder.finalized)
+        self.assertEqual(len(fixture.recorder.failures), 1)
+        step, source, action, failure = fixture.recorder.failures[0]
+        self.assertEqual((step, source.sequence, action, failure.stage,
+                          failure.error_type),
+                         (2, 1, ('place', 0.75), 'execution', 'TimeoutError'))
+        self.assertEqual((failure.timing.capture_at, failure.timing.request_at,
+                          failure.timing.request_finished_at,
+                          failure.timing.response_at,
+                          failure.timing.execution_started_at,
+                          failure.timing.execution_finished_at),
+                         (103.0, 103.0, 110.0, 110.0, 110.0, 112.0))
+        self.assertEqual(failure.timing.observation_age_seconds, 0.0)
+        self.assertEqual(failure.timing.decision_latency_seconds, 7.0)
+        self.assertEqual(failure.timing.cumulative_wait_seconds, 10.0)
+
     def test_observation_only_supervisor_cannot_mutate_executed_proposal(self):
         clock = ControlledClock()
         policy = ReplayPolicy((('initial', ['baseline']),))

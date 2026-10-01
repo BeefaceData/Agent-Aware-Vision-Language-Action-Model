@@ -151,6 +151,56 @@ class StepTiming:
 
 
 @dataclass(frozen=True)
+class FailedStepTiming:
+    """Timing for a failed request or environment call on the episode clock.
+
+    ``request_finished_at`` marks either a response or an exception. A missing
+    response and missing execution boundaries mean those events did not occur.
+    ``execution_finished_at`` marks a call ending in error, not a completed
+    simulator action.
+    """
+
+    capture_at: float
+    request_at: float
+    request_finished_at: float
+    response_at: float | None
+    execution_started_at: float | None
+    execution_finished_at: float | None
+    cumulative_wait_seconds: float
+
+    def __post_init__(self) -> None:
+        boundaries = (self.capture_at, self.request_at,
+                      self.request_finished_at, self.execution_started_at,
+                      self.execution_finished_at)
+        present = tuple(value for value in boundaries if value is not None)
+        if (any(not isfinite(value) for value in present) or
+            any(earlier > later for earlier, later in zip(present, present[1:])) or
+            (self.response_at is not None and
+             self.response_at != self.request_finished_at) or
+            (self.execution_started_at is None) !=
+            (self.execution_finished_at is None) or
+            (self.response_at is None and self.execution_started_at is not None) or
+            not isfinite(self.cumulative_wait_seconds) or
+            self.cumulative_wait_seconds < 0):
+            raise ValueError('failure timing requires finite, ordered monotonic times')
+
+    @property
+    def observation_age_seconds(self) -> float:
+        return self.request_at - self.capture_at
+
+    @property
+    def decision_latency_seconds(self) -> float:
+        return self.request_finished_at - self.request_at
+
+
+@dataclass(frozen=True)
+class StepFailure:
+    stage: str  # 'supervisor' or 'execution'
+    error_type: str
+    timing: FailedStepTiming
+
+
+@dataclass(frozen=True)
 class StepResult:
     observation: ObservationPacket
     reward: float
@@ -184,10 +234,14 @@ class EnvironmentAdapter(Protocol):
 
 
 class EpisodeRecorder(Protocol):
+    """Records completed steps and failed attempts; failure actions are proposals."""
+
     def begin(self, observation: ObservationPacket) -> None: ...
     def record_step(self, step: int, source: ObservationPacket,
                     action: Any, result: StepResult,
                     ingestion: IngestionOutcome) -> None: ...
+    def record_failure(self, step: int, source: ObservationPacket,
+                       action: Any, failure: StepFailure) -> None: ...
     def finish(self) -> Mapping[str, str]: ...
 
 
@@ -204,8 +258,10 @@ def run_episode(
 
     ``policy`` provides reset/act(packet); ``environment`` provides
     reset(seed, episode_id)/step(action); ``recorder`` provides begin(packet),
-    record_step(step, source_packet, action, result, ingestion), and finish()
-    -> artifact references. Rejected result packets are recorded before raising.
+    record_step(step, source_packet, action, result, ingestion),
+    record_failure(step, source_packet, action, failure), and finish()
+    -> artifact references. Rejected result packets and failed calls are recorded
+    before raising; failures do not produce a completed outcome.
     The caller releases adapter resources on any exception. ``clock`` must be
     monotonic and share a timebase with each packet's ``captured_monotonic``.
     ``supervisor`` observes the packet and a copy of the proposed action before
@@ -238,14 +294,34 @@ def run_episode(
         if observation.captured_monotonic > request_at:
             raise ValueError('observation capture is in the future of the episode clock')
         if supervisor is not None:
-            supervisor(observation, proposal_for_supervisor)
+            try:
+                supervisor(observation, proposal_for_supervisor)
+            except BaseException as exc:
+                request_finished_at = clock()
+                cumulative_wait += request_finished_at - request_at
+                recorder.record_failure(
+                    step, observation, action,
+                    StepFailure('supervisor', type(exc).__name__, FailedStepTiming(
+                        observation.captured_monotonic, request_at,
+                        request_finished_at, None, None, None, cumulative_wait)))
+                raise
             response_at = clock()
         else:
             response_at = request_at
-        execution_started_at = clock()
-        result = environment.step(action)
-        execution_finished_at = clock()
         cumulative_wait += response_at - request_at
+        execution_started_at = clock()
+        try:
+            result = environment.step(action)
+        except BaseException as exc:
+            execution_finished_at = clock()
+            recorder.record_failure(
+                step, observation, action,
+                StepFailure('execution', type(exc).__name__, FailedStepTiming(
+                    observation.captured_monotonic, request_at, response_at,
+                    response_at, execution_started_at, execution_finished_at,
+                    cumulative_wait)))
+            raise
+        execution_finished_at = clock()
         timing = StepTiming(observation.captured_monotonic, request_at,
                             response_at, execution_started_at,
                             execution_finished_at, cumulative_wait)

@@ -13,7 +13,7 @@ from time import monotonic
 from typing import Any, Callable, Sequence
 
 from episode_harness import (EpisodeConfig, IngestionOutcome, ObservationPacket,
-                             StepResult)
+                             StepFailure, StepResult)
 
 
 _CAPTURE_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -93,11 +93,13 @@ class ReplayRecorder:
         self.observations: list[ObservationPacket] = []
         self.steps: list[tuple[int, ObservationPacket, Any, StepResult,
                                IngestionOutcome]] = []
+        self.failures: list[tuple[int, ObservationPacket, Any, StepFailure]] = []
         self.finalized = False
 
     def begin(self, observation: ObservationPacket) -> None:
         self.observations = [observation]
         self.steps = []
+        self.failures = []
         self.finalized = False
 
     def record_step(self, step: int, source: ObservationPacket,
@@ -106,6 +108,10 @@ class ReplayRecorder:
         self.steps.append((step, source, action, result, ingestion))
         if ingestion.accepted:
             self.observations.append(result.observation)
+
+    def record_failure(self, step: int, source: ObservationPacket,
+                       action: Any, failure: StepFailure) -> None:
+        self.failures.append((step, source, action, failure))
 
     def finish(self) -> dict[str, str]:
         self.finalized = True

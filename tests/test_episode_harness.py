@@ -51,6 +51,7 @@ class ReplayRecorder:
     def __init__(self):
         self.observations = []
         self.rows = []
+        self.failures = []
         self.finalized = False
 
     def begin(self, observation):
@@ -62,6 +63,9 @@ class ReplayRecorder:
                           source, result.observation, ingestion.code))
         if ingestion.accepted:
             self.observations.append(result.observation)
+
+    def record_failure(self, step, source, action, failure):
+        self.failures.append((step, source, action, failure))
 
     def finish(self):
         self.finalized = True
@@ -153,6 +157,8 @@ class EpisodeHarnessTests(unittest.TestCase):
         self.assertEqual(environment.actions, ['proposed action'])
         self.assertEqual([p.observation for p in recorder.observations],
                          ['initial observation'])
+        self.assertEqual(len(recorder.failures), 1)
+        self.assertEqual(recorder.failures[0][3].stage, 'execution')
         self.assertFalse(recorder.finalized)
 
 

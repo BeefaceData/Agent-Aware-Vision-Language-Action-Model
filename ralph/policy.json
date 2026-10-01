@@ -1,0 +1,31 @@
+{
+  "repository": "BeefaceData/Agent-Aware-Vision-Language-Action-Model",
+  "base_branch": "main",
+  "parent_issue": 1,
+  "workers": {
+    "codex": {
+      "model": "gpt-6-sol",
+      "effort": "xhigh"
+    },
+    "cursor": {
+      "model": "grok-4.6",
+      "effort": "xhigh",
+      "cli_model": "cursor-grok-4.6-xhigh"
+    },
+    "claude": {
+      "model": "claude-fable-5-1",
+      "effort": "xhigh"
+    }
+  },
+  "final_review": {
+    "backend": "codex",
+    "model": "gpt-6-astra",
+    "effort": "medium"
+  },
+  "max_attempts": 2,
+  "run_timeout_seconds": 5400,
+  "worker_timeout_seconds": 1800,
+  "review_timeout_seconds": 900,
+  "max_review_bytes": 600000,
+  "max_changed_file_bytes": 200000
+}

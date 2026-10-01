@@ -27,8 +27,10 @@ from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
 
+from episode_harness import EpisodeConfig, StepResult, run_episode
 
-def parse_args():
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--suite', default='libero_10', choices=[
@@ -43,7 +45,7 @@ def parse_args():
                         help='Playback FPS; use 80 to match wrapper metadata.')
     parser.add_argument('--output-dir', type=Path, default=None,
                         help='New directory; existing directories are rejected.')
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main():
@@ -87,7 +89,7 @@ def main():
         'versions': {p: version(p) for p in ['lerobot', 'torch', 'gymnasium', 'hf-libero']},
         'video_path': str(video_path.resolve()), 'steps': 0, 'success': False,
     }
-    env = writer = None
+    env = recorder = None
     start = perf_counter()
     try:
         print('Loading policy...', flush=True)
@@ -118,22 +120,11 @@ def main():
         print(f'Task {args.task_id}: {instruction}', flush=True)
         print(f'Max steps: {limit}; output: {out.resolve()}', flush=True)
 
-        policy.reset()
-        observation, _ = env.reset(seed=[args.seed])
-        writer = imageio.get_writer(str(video_path), fps=args.video_fps,
-                                   codec='libx264', macro_block_size=1)
+        class BaselinePolicy:
+            def reset(self):
+                policy.reset()
 
-        def record_frame(obs):
-            # Use the returned observation, not env.render(): the 0.4.3 wrapper
-            # internally resets on success. This preserves the terminal frame.
-            frame = obs['pixels']['image'][0]
-            writer.append_data(np.ascontiguousarray(frame[::-1, ::-1]))
-
-        record_frame(observation)
-        reward_sum = 0.0
-        rollout_start = perf_counter()
-        with (out / 'steps.jsonl').open('w', encoding='utf-8') as log:
-            for step in range(1, limit + 1):
+            def act(self, observation):
                 # Same processing order as LeRobot 0.4.3 rollout().
                 batch = preprocess_observation(observation)
                 batch = add_envs_task(env, batch)
@@ -146,31 +137,81 @@ def main():
                 action_numpy = action.detach().cpu().numpy()
                 if action_numpy.shape != (1, 7) or not np.isfinite(action_numpy).all():
                     raise RuntimeError(f'Invalid action: {action_numpy!r}')
+                return action_numpy
 
-                # Future observer/intervention hook belongs here.
-                observation, reward, terminated, truncated, info = env.step(action_numpy)
-                record_frame(observation)
+        class BaselineEnvironment:
+            def reset(self, seed):
+                observation, _ = env.reset(seed=[seed])
+                return observation
+
+            def step(self, action):
+                observation, reward, terminated, truncated, info = env.step(action)
                 success_info = info.get('final_info', info)
-                success = bool(np.asarray(success_info.get('is_success', [False])).reshape(-1)[0])
-                terminated_flag = bool(terminated[0])
-                truncated_flag = bool(truncated[0])
-                reward_value = float(reward[0])
-                reward_sum += reward_value
-                row = {'step': step, 'action': action_numpy[0].tolist(),
-                       'reward': reward_value, 'success': success,
-                       'terminated': terminated_flag, 'truncated': truncated_flag}
-                log.write(json.dumps(row) + '\n')
-                log.flush()
-                summary.update(steps=step, success=success, sum_rewards=reward_sum)
-                if step % 25 == 0 or success or terminated_flag or truncated_flag:
-                    print(f'Step {step}/{limit} | reward={reward_value} | success={success}', flush=True)
-                if success or terminated_flag or truncated_flag:
-                    summary['stop_reason'] = ('success' if success else
-                                              'terminated' if terminated_flag else 'truncated')
-                    break
-            else:
-                summary['stop_reason'] = 'step_limit'
-        summary.update(status='completed', rollout_seconds=perf_counter() - rollout_start)
+                return StepResult(
+                    observation=observation,
+                    reward=float(reward[0]),
+                    success=bool(np.asarray(success_info.get('is_success', [False])).reshape(-1)[0]),
+                    terminated=bool(terminated[0]),
+                    truncated=bool(truncated[0]),
+                )
+
+        class BaselineRecorder:
+            def __init__(self):
+                self.writer = None
+                self.log = None
+
+            def record_frame(self, observation):
+                # The wrapper may reset internally on success; returned pixels
+                # preserve the terminal observation instead of env.render().
+                frame = observation['pixels']['image'][0]
+                self.writer.append_data(np.ascontiguousarray(frame[::-1, ::-1]))
+
+            def begin(self, observation):
+                self.writer = imageio.get_writer(str(video_path), fps=args.video_fps,
+                                                 codec='libx264', macro_block_size=1)
+                self.record_frame(observation)
+                self.log = (out / 'steps.jsonl').open('w', encoding='utf-8')
+
+            def record_step(self, step, action, result):
+                self.record_frame(result.observation)
+                row = {'step': step, 'action': action[0].tolist(),
+                       'reward': result.reward, 'success': result.success,
+                       'terminated': result.terminated, 'truncated': result.truncated}
+                self.log.write(json.dumps(row) + '\n')
+                self.log.flush()
+
+            def finish(self):
+                self.close()
+                return {'video_path': str(video_path.resolve()),
+                        'steps_path': str((out / 'steps.jsonl').resolve())}
+
+            def close(self):
+                try:
+                    if self.log is not None:
+                        self.log.close()
+                        self.log = None
+                finally:
+                    if self.writer is not None:
+                        self.writer.close()
+                        self.writer = None
+
+        recorder = BaselineRecorder()
+        reward_total = 0.0
+
+        def show_progress(step, result):
+            nonlocal reward_total
+            reward_total += result.reward
+            summary.update(steps=step, success=result.success, sum_rewards=reward_total)
+            if step % 25 == 0 or result.success or result.terminated or result.truncated:
+                print(f'Step {step}/{limit} | reward={result.reward} | success={result.success}',
+                      flush=True)
+
+        outcome = run_episode(EpisodeConfig(args.seed, limit), BaselinePolicy(),
+                              BaselineEnvironment(), recorder, show_progress)
+        summary.update(status='completed', steps=outcome.steps,
+                       success=outcome.success, sum_rewards=outcome.sum_rewards,
+                       stop_reason=outcome.stop_reason,
+                       rollout_seconds=outcome.rollout_seconds)
     except BaseException as exc:
         summary.update(status='interrupted' if isinstance(exc, KeyboardInterrupt) else 'error',
                        error=f'{type(exc).__name__}: {exc}')
@@ -179,8 +220,8 @@ def main():
         summary['total_seconds'] = perf_counter() - start
         # Save diagnostics even if simulation or encoding fails.
         try:
-            if writer is not None:
-                writer.close()
+            if recorder is not None:
+                recorder.close()
         finally:
             try:
                 if env is not None:

@@ -122,6 +122,10 @@ The script also prints progress and output paths to the terminal. It does not au
 
 `status: "completed"` means the script completed its rollout; **`success` is the task outcome**. A run can complete normally with `success: false` and `stop_reason: "step_limit"`. The loop's step limit can be reached even when the last logged termination and truncation flags are false.
 
+### Reusable episode interface
+
+`episode_harness.run_episode(EpisodeConfig(seed, max_steps), policy, environment, recorder)` runs one baseline attempt and returns `EpisodeOutcome` with success, executed step count, stop reason, reward total, rollout time, and artifact paths. The policy adapter supplies `reset()` and `act(observation)`; the environment adapter supplies `reset(seed)` and `step(action)` returning a `StepResult`; the recorder supplies `begin(observation)`, `record_step(step, action, result)`, and `finish()` returning artifact references. The caller releases any adapter resources after completion or failure. The existing CLI supplies the LeRobot/LIBERO and file-recording adapters; the interface itself imports no simulator or model packages.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from math import isfinite
 from time import monotonic
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Literal, Mapping, Protocol
 from uuid import uuid4
 
 
@@ -117,8 +117,8 @@ class StepTiming:
     """Seconds on one shared monotonic clock, from source capture to execution.
 
     Decision latency is request-to-response time for the observation-only
-    supervisor callback. Without a supervisor it is zero. The cumulative wait
-    sums those latencies, independently of executed actions.
+    supervisor and any injected action selector. Without either it is zero.
+    The cumulative wait sums those latencies, independently of executed actions.
     """
 
     capture_at: float
@@ -195,9 +195,58 @@ class FailedStepTiming:
 
 @dataclass(frozen=True)
 class StepFailure:
-    stage: str  # 'supervisor' or 'execution'
+    stage: str  # 'supervisor', 'selection', or 'execution'
     error_type: str
     timing: FailedStepTiming
+    action_record: ActionRecord | None = None
+
+
+@dataclass(frozen=True)
+class ActionProposal:
+    """Identity and detached native action for one policy decision."""
+
+    proposal_id: str
+    observation: ObservationPacket
+    action: Any
+
+
+@dataclass(frozen=True)
+class ActionResolution:
+    """A deterministic execution choice; rejection does not call the environment."""
+
+    kind: Literal['pass', 'override', 'reject']
+    action: Any = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ExecutionAcknowledgement:
+    """The environment returned a step result for this proposal.
+
+    This confirms the adapter call completed, not independent physical actuation.
+    """
+
+    proposal_id: str
+    result_episode_id: str | None
+    result_sequence: int | None
+
+
+@dataclass(frozen=True)
+class ActionRecord:
+    """Snapshot of what was proposed, selected, and confirmed at the step seam.
+
+    ``executed_action`` is present only after ``environment.step`` returns.
+    ``selected_action`` retains the attempted command if the call fails. For a
+    rejection both fields and the acknowledgement are absent.
+    """
+
+    proposal_id: str
+    proposed_action: Any
+    selected_action: Any | None
+    executed_action: Any | None
+    execution_acknowledgement: ExecutionAcknowledgement | None
+    disposition: Literal['unmodified', 'overridden', 'rejected', 'unconfirmed']
+    rejection_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +257,7 @@ class StepResult:
     terminated: bool
     truncated: bool
     timing: StepTiming | None = None
+    action_record: ActionRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +279,8 @@ class PolicyAdapter(Protocol):
 
 
 class EnvironmentAdapter(Protocol):
+    """A returned StepResult acknowledges completion of the adapter step call."""
+
     def reset(self, seed: int, episode_id: str) -> ObservationPacket: ...
     def step(self, action: Any) -> StepResult: ...
 
@@ -253,6 +305,7 @@ def run_episode(
     on_step: Callable[[int, StepResult], None] | None = None,
     supervisor: Callable[[ObservationPacket, Any], None] | None = None,
     clock: Callable[[], float] = monotonic,
+    action_selector: Callable[[ActionProposal], ActionResolution] | None = None,
 ) -> EpisodeOutcome:
     """Run one attempt and return its outcome after artifacts are finalized.
 
@@ -265,7 +318,12 @@ def run_episode(
     The caller releases adapter resources on any exception. ``clock`` must be
     monotonic and share a timebase with each packet's ``captured_monotonic``.
     ``supervisor`` observes the packet and a copy of the proposed action before
-    execution; it has no execution authority here. Its wait is measured.
+    execution; it has no execution authority here. ``action_selector`` is an
+    injected, deterministic execution choice for replay or a validated executor.
+    Its input and output actions are copied so neither it nor the environment can
+    mutate the policy proposal or recorded evidence. Its rejection is recorded and
+    ends the attempt without an environment call. Supervisor and selector wait is
+    measured. Overrides must come from a separately validated executor.
     Policy inference, recorder and ``on_step`` time are excluded from that wait.
     """
     if config.max_steps <= 0:
@@ -289,7 +347,9 @@ def run_episode(
 
     for step in range(1, config.max_steps + 1):
         action = policy.act(observation)
-        proposal_for_supervisor = deepcopy(action) if supervisor is not None else None
+        proposed_action = deepcopy(action)
+        proposal_id = f'{episode_id}:{step}'
+        proposal_for_supervisor = deepcopy(proposed_action) if supervisor is not None else None
         request_at = clock()
         if observation.captured_monotonic > request_at:
             raise ValueError('observation capture is in the future of the episode clock')
@@ -300,35 +360,89 @@ def run_episode(
                 request_finished_at = clock()
                 cumulative_wait += request_finished_at - request_at
                 recorder.record_failure(
-                    step, observation, action,
+                    step, observation, deepcopy(proposed_action),
                     StepFailure('supervisor', type(exc).__name__, FailedStepTiming(
                         observation.captured_monotonic, request_at,
-                        request_finished_at, None, None, None, cumulative_wait)))
+                        request_finished_at, None, None, None, cumulative_wait),
+                        ActionRecord(proposal_id, deepcopy(proposed_action), None,
+                                     None, None, 'unconfirmed')))
                 raise
             response_at = clock()
         else:
             response_at = request_at
         cumulative_wait += response_at - request_at
+        if action_selector is None:
+            resolution = ActionResolution('pass')
+        else:
+            try:
+                resolution = action_selector(ActionProposal(
+                    proposal_id, observation, deepcopy(proposed_action)))
+                if not isinstance(resolution, ActionResolution) or resolution.kind not in (
+                    'pass', 'override', 'reject'
+                ) or (resolution.kind == 'reject' and not resolution.reason) or (
+                    resolution.kind != 'reject' and resolution.reason is not None
+                ) or (resolution.kind != 'override' and resolution.action is not None):
+                    raise ValueError('invalid action resolution')
+            except BaseException as exc:
+                selection_finished_at = clock()
+                cumulative_wait += selection_finished_at - response_at
+                recorder.record_failure(
+                    step, observation, deepcopy(proposed_action),
+                    StepFailure('selection', type(exc).__name__, FailedStepTiming(
+                        observation.captured_monotonic, request_at,
+                        selection_finished_at, selection_finished_at,
+                        None, None, cumulative_wait),
+                        ActionRecord(proposal_id, deepcopy(proposed_action), None,
+                                     None, None, 'unconfirmed')))
+                raise
+            selection_finished_at = clock()
+            cumulative_wait += selection_finished_at - response_at
+            response_at = selection_finished_at
+        if resolution.kind == 'reject':
+            recorder.record_failure(
+                step, observation, deepcopy(proposed_action),
+                StepFailure('selection', 'ProposalRejected', FailedStepTiming(
+                    observation.captured_monotonic, request_at, response_at,
+                    response_at, None, None, cumulative_wait),
+                    ActionRecord(proposal_id, deepcopy(proposed_action), None,
+                                 None, None, 'rejected', resolution.reason)))
+            stop_reason = 'proposal_rejected'
+            break
+        selected_action = deepcopy(proposed_action if resolution.kind == 'pass'
+                                   else resolution.action)
+        disposition = 'unmodified' if resolution.kind == 'pass' else 'overridden'
         execution_started_at = clock()
         try:
-            result = environment.step(action)
+            result = environment.step(deepcopy(selected_action))
         except BaseException as exc:
             execution_finished_at = clock()
             recorder.record_failure(
-                step, observation, action,
+                step, observation, deepcopy(proposed_action),
                 StepFailure('execution', type(exc).__name__, FailedStepTiming(
                     observation.captured_monotonic, request_at, response_at,
                     response_at, execution_started_at, execution_finished_at,
-                    cumulative_wait)))
+                    cumulative_wait),
+                    ActionRecord(proposal_id, deepcopy(proposed_action),
+                                 deepcopy(selected_action), None, None,
+                                 'unconfirmed')))
             raise
         execution_finished_at = clock()
         timing = StepTiming(observation.captured_monotonic, request_at,
                             response_at, execution_started_at,
                             execution_finished_at, cumulative_wait)
-        result = replace(result, timing=timing)
+        acknowledgement = ExecutionAcknowledgement(
+            proposal_id,
+            result.observation.episode_id if isinstance(result.observation,
+                                                        ObservationPacket) else None,
+            result.observation.sequence if isinstance(result.observation,
+                                                      ObservationPacket) else None)
+        result = replace(result, timing=timing, action_record=ActionRecord(
+            proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
+            deepcopy(selected_action), acknowledgement, disposition))
         step_timings.append(timing)
         ingestion = ingestor.ingest(result.observation, execution_finished_at)
-        recorder.record_step(step, observation, action, result, ingestion)
+        recorder.record_step(step, observation, deepcopy(selected_action), result,
+                             ingestion)
         if not ingestion.accepted:
             raise ObservationRejected(ingestion)
         reward_sum += result.reward

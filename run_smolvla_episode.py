@@ -185,6 +185,23 @@ def main():
                 self.record_frame(packet)
                 self.log = (out / 'steps.jsonl').open('w', encoding='utf-8')
 
+            @staticmethod
+            def action_evidence(record):
+                def native(value):
+                    return value[0].tolist() if value is not None else None
+
+                return {
+                    'proposal_id': record.proposal_id,
+                    'proposed_action': native(record.proposed_action),
+                    'selected_action': native(record.selected_action),
+                    'executed_action': native(record.executed_action),
+                    'execution_acknowledgement': (
+                        asdict(record.execution_acknowledgement)
+                        if record.execution_acknowledgement is not None else None),
+                    'action_disposition': record.disposition,
+                    'rejection_reason': record.rejection_reason,
+                }
+
             def record_step(self, step, source, action, result, ingestion):
                 if ingestion.accepted:
                     self.record_frame(result.observation)
@@ -202,6 +219,7 @@ def main():
                 self.cumulative_wait_seconds = result.timing.cumulative_wait_seconds
 
                 row = {'step': step, 'action': action[0].tolist(),
+                       **self.action_evidence(result.action_record),
                        'source_observation': identity(source),
                        'result_observation': (identity(result.observation)
                                               if isinstance(result.observation,
@@ -221,9 +239,10 @@ def main():
                 self.cumulative_wait_seconds = failure.timing.cumulative_wait_seconds
                 row = {
                     'attempted_step': step, 'completed_steps': step - 1,
-                    'status': 'failed',
+                    'status': ('rejected' if failure.action_record.disposition == 'rejected'
+                               else 'failed'),
                     'failure_stage': failure.stage, 'error_type': failure.error_type,
-                    'proposed_action': action[0].tolist(),
+                    **self.action_evidence(failure.action_record),
                     'source_observation': {
                         'episode_id': source.episode_id,
                         'sequence': source.sequence,

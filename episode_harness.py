@@ -8,9 +8,11 @@ policy through this interface.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import datetime
-from time import perf_counter
+from math import isfinite
+from time import monotonic
 from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
 
@@ -25,14 +27,16 @@ class EpisodeConfig:
 class ObservationPacket:
     """One captured observation, identified within a single episode.
 
-    ``captured_at`` is a timezone-aware source capture time, not the time the
-    harness received the packet. Sequences start at zero for the reset frame.
+    ``captured_at`` is a timezone-aware source capture time for provenance.
+    ``captured_monotonic`` is sampled at capture from the same monotonic clock
+    as ``run_episode``; it alone is used for durations. Sequences start at zero.
     """
 
     episode_id: str
     sequence: int
     captured_at: datetime
     observation: Any
+    captured_monotonic: float | None = None
 
 
 @dataclass(frozen=True)
@@ -66,8 +70,10 @@ class ObservationIngestor:
         self.episode_id = episode_id
         self._next_sequence = 0
         self._last_capture: datetime | None = None
+        self._last_monotonic_capture: float | None = None
 
-    def ingest(self, packet: ObservationPacket) -> IngestionOutcome:
+    def ingest(self, packet: ObservationPacket,
+               received_at: float | None = None) -> IngestionOutcome:
         expected = self._next_sequence
         received = packet.sequence if isinstance(packet, ObservationPacket) else None
         received_episode = packet.episode_id if isinstance(packet, ObservationPacket) else None
@@ -82,17 +88,66 @@ class ObservationIngestor:
             packet.captured_at.utcoffset() is None
         ):
             code = 'invalid_capture_time'
+        elif (packet.captured_monotonic is None or
+              isinstance(packet.captured_monotonic, bool) or
+              not isinstance(packet.captured_monotonic, (int, float)) or
+              not isfinite(packet.captured_monotonic)):
+            code = 'invalid_monotonic_capture_time'
+        elif received_at is not None and packet.captured_monotonic > received_at:
+            code = 'future_monotonic_capture_time'
         elif packet.sequence < self._next_sequence:
             code = 'duplicate'
         elif packet.sequence > self._next_sequence:
             code = 'out_of_order'
         elif self._last_capture is not None and packet.captured_at < self._last_capture:
             code = 'out_of_order_capture_time'
+        elif (self._last_monotonic_capture is not None and
+              packet.captured_monotonic < self._last_monotonic_capture):
+            code = 'out_of_order_monotonic_capture_time'
         if code == 'accepted':
             self._next_sequence += 1
             self._last_capture = packet.captured_at
+            self._last_monotonic_capture = packet.captured_monotonic
         return IngestionOutcome(code == 'accepted', code, self.episode_id,
                                 received_episode, expected, received)
+
+
+@dataclass(frozen=True)
+class StepTiming:
+    """Seconds on one shared monotonic clock, from source capture to execution.
+
+    Decision latency is request-to-response time for the observation-only
+    supervisor callback. Without a supervisor it is zero. The cumulative wait
+    sums those latencies, independently of executed actions.
+    """
+
+    capture_at: float
+    request_at: float
+    response_at: float
+    execution_started_at: float
+    execution_finished_at: float
+    cumulative_wait_seconds: float
+
+    def __post_init__(self) -> None:
+        times = (self.capture_at, self.request_at, self.response_at,
+                 self.execution_started_at, self.execution_finished_at)
+        if (any(not isfinite(value) for value in times) or
+            any(earlier > later for earlier, later in zip(times, times[1:])) or
+            not isfinite(self.cumulative_wait_seconds) or
+            self.cumulative_wait_seconds < 0):
+            raise ValueError('timing requires finite, ordered monotonic times')
+
+    @property
+    def observation_age_seconds(self) -> float:
+        return self.request_at - self.capture_at
+
+    @property
+    def decision_latency_seconds(self) -> float:
+        return self.response_at - self.request_at
+
+    @property
+    def execution_seconds(self) -> float:
+        return self.execution_finished_at - self.execution_started_at
 
 
 @dataclass(frozen=True)
@@ -102,6 +157,7 @@ class StepResult:
     success: bool
     terminated: bool
     truncated: bool
+    timing: StepTiming | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +169,8 @@ class EpisodeOutcome:
     sum_rewards: float
     rollout_seconds: float
     artifacts: Mapping[str, str]
+    cumulative_wait_seconds: float = 0.0
+    step_timings: tuple[StepTiming, ...] = ()
 
 
 class PolicyAdapter(Protocol):
@@ -139,6 +197,8 @@ def run_episode(
     environment: EnvironmentAdapter,
     recorder: EpisodeRecorder,
     on_step: Callable[[int, StepResult], None] | None = None,
+    supervisor: Callable[[ObservationPacket, Any], None] | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> EpisodeOutcome:
     """Run one attempt and return its outcome after artifacts are finalized.
 
@@ -146,7 +206,11 @@ def run_episode(
     reset(seed, episode_id)/step(action); ``recorder`` provides begin(packet),
     record_step(step, source_packet, action, result, ingestion), and finish()
     -> artifact references. Rejected result packets are recorded before raising.
-    The caller releases adapter resources on any exception.
+    The caller releases adapter resources on any exception. ``clock`` must be
+    monotonic and share a timebase with each packet's ``captured_monotonic``.
+    ``supervisor`` observes the packet and a copy of the proposed action before
+    execution; it has no execution authority here. Its wait is measured.
+    Policy inference, recorder and ``on_step`` time are excluded from that wait.
     """
     if config.max_steps <= 0:
         raise ValueError('max_steps must be positive')
@@ -155,20 +219,39 @@ def run_episode(
     ingestor = ObservationIngestor(episode_id)
     policy.reset()
     observation = environment.reset(config.seed, episode_id)
-    initial_ingestion = ingestor.ingest(observation)
+    initial_ingestion = ingestor.ingest(observation, clock())
     if not initial_ingestion.accepted:
         raise ObservationRejected(initial_ingestion)
     recorder.begin(observation)
-    rollout_start = perf_counter()
+    rollout_start = clock()
     reward_sum = 0.0
     stop_reason = 'step_limit'
     success = False
     steps = 0
+    cumulative_wait = 0.0
+    step_timings: list[StepTiming] = []
 
     for step in range(1, config.max_steps + 1):
         action = policy.act(observation)
+        proposal_for_supervisor = deepcopy(action) if supervisor is not None else None
+        request_at = clock()
+        if observation.captured_monotonic > request_at:
+            raise ValueError('observation capture is in the future of the episode clock')
+        if supervisor is not None:
+            supervisor(observation, proposal_for_supervisor)
+            response_at = clock()
+        else:
+            response_at = request_at
+        execution_started_at = clock()
         result = environment.step(action)
-        ingestion = ingestor.ingest(result.observation)
+        execution_finished_at = clock()
+        cumulative_wait += response_at - request_at
+        timing = StepTiming(observation.captured_monotonic, request_at,
+                            response_at, execution_started_at,
+                            execution_finished_at, cumulative_wait)
+        result = replace(result, timing=timing)
+        step_timings.append(timing)
+        ingestion = ingestor.ingest(result.observation, execution_finished_at)
         recorder.record_step(step, observation, action, result, ingestion)
         if not ingestion.accepted:
             raise ObservationRejected(ingestion)
@@ -183,7 +266,8 @@ def run_episode(
             break
         observation = result.observation
 
-    rollout_seconds = perf_counter() - rollout_start
+    rollout_seconds = clock() - rollout_start
     artifacts = recorder.finish()
     return EpisodeOutcome(episode_id, success, steps, stop_reason, reward_sum,
-                          rollout_seconds, artifacts)
+                          rollout_seconds, artifacts, cumulative_wait,
+                          tuple(step_timings))

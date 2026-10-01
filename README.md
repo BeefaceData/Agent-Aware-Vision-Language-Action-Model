@@ -115,7 +115,7 @@ By default, each episode creates `outputs/smolvla_<suite>_task<id>_<timestamp>/`
 | File | Contents |
 |---|---|
 | `episode.mp4` | Main-camera recording: initial observation and one frame per executed action |
-| `steps.jsonl` | One JSON record per action: step, seven action values, reward, success, terminated, and truncated |
+| `steps.jsonl` | One JSON record per action: observation identity, action, outcome, and monotonic step timing |
 | `result.json` | Instruction, configuration, selected package versions, outcome, stop reason, and timing |
 
 The script also prints progress and output paths to the terminal. It does not automatically save terminal output to a separate log file.
@@ -124,7 +124,9 @@ The script also prints progress and output paths to the terminal. It does not au
 
 ### Reusable episode interface
 
-`episode_harness.run_episode(EpisodeConfig(seed, max_steps), policy, environment, recorder)` runs one baseline attempt and returns `EpisodeOutcome` with success, executed step count, stop reason, reward total, rollout time, and artifact paths. The policy adapter supplies `reset()` and `act(observation)`; the environment adapter supplies `reset(seed)` and `step(action)` returning a `StepResult`; the recorder supplies `begin(observation)`, `record_step(step, action, result)`, and `finish()` returning artifact references. The caller releases any adapter resources after completion or failure. The existing CLI supplies the LeRobot/LIBERO and file-recording adapters; the interface itself imports no simulator or model packages.
+`episode_harness.run_episode(EpisodeConfig(seed, max_steps), policy, environment, recorder)` runs one attempt and returns `EpisodeOutcome` with success, executed step count, stop reason, reward total, rollout time, cumulative supervisor wait, per-step timing, and artifact paths. The policy adapter supplies `reset()` and `act(observation)`; the environment adapter supplies `reset(seed, episode_id)` and `step(action)` returning a `StepResult`; the recorder supplies `begin(observation)`, `record_step(step, source, action, result, ingestion)`, and `finish()` returning artifact references. The caller releases any adapter resources after completion or failure. The existing CLI supplies the LeRobot/LIBERO and file-recording adapters; the interface itself imports no simulator or model packages.
+
+Each observation packet carries a wall-clock `captured_at` for provenance and `captured_monotonic` for durations. The environment and harness must sample the same monotonic clock; tests can inject a controlled `clock` into both. The optional `supervisor(packet, proposed_action)` callback observes a copy of the proposal before execution and cannot replace the executed action. Observation age ends when that request starts, after policy inference. Decision latency is the supervisor request-to-response interval; it is zero when no supervisor is configured. Cumulative wait sums those intervals, independently of the simulator action count. Execution duration covers `environment.step`; rollout duration includes per-step recording but excludes reset and artifact finalization. These measurements describe paused simulation and do not establish physical control timing.
 
 For a synthetic successful replay without a model, simulator, or files, call the same interface with the public fixture:
 

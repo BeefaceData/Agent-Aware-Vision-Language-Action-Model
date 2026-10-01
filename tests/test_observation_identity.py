@@ -13,8 +13,10 @@ CAPTURE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 class ObservationIngestionTests(unittest.TestCase):
-    def packet(self, sequence, captured_at=CAPTURE, episode_id='episode-a'):
-        return ObservationPacket(episode_id, sequence, captured_at, 'frame')
+    def packet(self, sequence, captured_at=CAPTURE, episode_id='episode-a',
+               captured_monotonic=100.0):
+        return ObservationPacket(episode_id, sequence, captured_at, 'frame',
+                                 captured_monotonic)
 
     def test_duplicate_and_out_of_order_packets_have_diagnostic_outcomes(self):
         ingestor = ObservationIngestor('episode-a')
@@ -43,6 +45,25 @@ class ObservationIngestionTests(unittest.TestCase):
                                                timedelta(seconds=1))).code,
                          'out_of_order_capture_time')
         self.assertTrue(ingestor.ingest(self.packet(1, CAPTURE)).accepted)
+
+    def test_monotonic_capture_must_be_finite_and_ordered(self):
+        ingestor = ObservationIngestor('episode-a')
+        self.assertEqual(ingestor.ingest(self.packet(0, captured_monotonic=None)).code,
+                         'invalid_monotonic_capture_time')
+        self.assertTrue(ingestor.ingest(self.packet(0)).accepted)
+        self.assertEqual(ingestor.ingest(self.packet(1, captured_monotonic=float('nan'))).code,
+                         'invalid_monotonic_capture_time')
+        self.assertEqual(ingestor.ingest(self.packet(1, captured_monotonic=99.0)).code,
+                         'out_of_order_monotonic_capture_time')
+        self.assertTrue(ingestor.ingest(self.packet(1, captured_monotonic=101.0)).accepted)
+
+    def test_future_capture_is_rejected_at_receipt(self):
+        ingestor = ObservationIngestor('episode-a')
+        outcome = ingestor.ingest(self.packet(0, captured_monotonic=101.0),
+                                  received_at=100.0)
+        self.assertEqual(outcome.code, 'future_monotonic_capture_time')
+        self.assertEqual(outcome.expected_sequence, 0)
+        self.assertTrue(ingestor.ingest(self.packet(0), received_at=100.0).accepted)
 
 
 class ObservationEpisodeTests(unittest.TestCase):

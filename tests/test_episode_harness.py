@@ -3,6 +3,7 @@
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 
 from episode_harness import EpisodeConfig, ObservationPacket, StepResult, run_episode
 from run_smolvla_episode import parse_args
@@ -34,7 +35,7 @@ class ReplayEnvironment:
         self.sequence = 0
         self.capture_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         return ObservationPacket(episode_id, 0, self.capture_start,
-                                 'initial observation')
+                                 'initial observation', monotonic())
 
     def step(self, action):
         self.actions.append(action)
@@ -43,7 +44,7 @@ class ReplayEnvironment:
         return replace(result, observation=ObservationPacket(
             self.episode_id, self.sequence,
             self.capture_start + timedelta(seconds=self.sequence),
-            result.observation))
+            result.observation, monotonic()))
 
 
 class ReplayRecorder:
@@ -102,6 +103,9 @@ class EpisodeHarnessTests(unittest.TestCase):
         self.assertEqual((outcome.success, outcome.steps, outcome.stop_reason,
                           outcome.sum_rewards), (True, 2, 'success', 1.25))
         self.assertGreaterEqual(outcome.rollout_seconds, 0)
+        self.assertEqual(outcome.cumulative_wait_seconds, 0.0)
+        self.assertEqual([t.decision_latency_seconds for t in outcome.step_timings],
+                         [0.0, 0.0])
         self.assertEqual(outcome.artifacts['video_path'], 'replay/episode.mp4')
         self.assertEqual(outcome.artifacts['steps_path'], 'replay/steps.jsonl')
 

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Sequence
+from time import monotonic
+from typing import Any, Callable, Sequence
 
 from episode_harness import (EpisodeConfig, IngestionOutcome, ObservationPacket,
                              StepResult)
@@ -50,12 +51,14 @@ class ReplayPolicy:
 
 class ReplayEnvironment:
     def __init__(self, seed: int, initial_observation: Any,
-                 turns: Sequence[tuple[Any, ReplayStep]]):
+                 turns: Sequence[tuple[Any, ReplayStep]],
+                 clock: Callable[[], float] = monotonic):
         self._seed = seed
         self._initial_observation = initial_observation
         self._turns = tuple(turns)
         self.actions: list[Any] = []
         self._episode_id = ''
+        self._clock = clock
 
     def reset(self, seed: int, episode_id: str) -> ObservationPacket:
         if seed != self._seed:
@@ -63,7 +66,7 @@ class ReplayEnvironment:
         self.actions.clear()
         self._episode_id = episode_id
         return ObservationPacket(episode_id, 0, _CAPTURE_START,
-                                 self._initial_observation)
+                                 self._initial_observation, self._clock())
 
     def step(self, action: Any) -> StepResult:
         index = len(self.actions)
@@ -77,7 +80,7 @@ class ReplayEnvironment:
             observation=ObservationPacket(
                 self._episode_id, index + 1,
                 _CAPTURE_START + timedelta(seconds=index + 1),
-                result.observation),
+                result.observation, self._clock()),
             reward=result.reward,
             success=result.success,
             terminated=result.terminated,
@@ -117,7 +120,7 @@ class ReplayFixture:
     recorder: ReplayRecorder
 
 
-def successful_replay() -> ReplayFixture:
+def successful_replay(clock: Callable[[], float] = monotonic) -> ReplayFixture:
     """Return a fresh two-action synthetic episode ending in task success."""
     initial = 'item visible'
     after_reach = 'item held'
@@ -130,6 +133,6 @@ def successful_replay() -> ReplayFixture:
         environment=ReplayEnvironment(17, initial, (
             (reach, ReplayStep(after_reach, 0.0, False, False, False)),
             (place, ReplayStep(terminal, 1.0, True, True, False)),
-        )),
+        ), clock),
         recorder=ReplayRecorder(),
     )

@@ -22,10 +22,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import asdict
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
-from time import perf_counter
+from time import monotonic
 
 from episode_harness import EpisodeConfig, ObservationPacket, StepResult, run_episode
 
@@ -90,7 +91,7 @@ def main():
         'video_path': str(video_path.resolve()), 'steps': 0, 'success': False,
     }
     env = recorder = None
-    start = perf_counter()
+    start = monotonic()
     try:
         print('Loading policy...', flush=True)
         # Device override also controls initial checkpoint loading.
@@ -144,17 +145,22 @@ def main():
                 self.episode_id = episode_id
                 self.sequence = 0
                 observation, _ = env.reset(seed=[seed])
+                captured_monotonic = monotonic()
+                captured_at = datetime.now(timezone.utc)
                 return ObservationPacket(episode_id, self.sequence,
-                                         datetime.now(timezone.utc), observation)
+                                         captured_at, observation,
+                                         captured_monotonic)
 
             def step(self, action):
                 observation, reward, terminated, truncated, info = env.step(action)
+                captured_monotonic = monotonic()
+                captured_at = datetime.now(timezone.utc)
                 self.sequence += 1
                 success_info = info.get('final_info', info)
                 return StepResult(
                     observation=ObservationPacket(
                         self.episode_id, self.sequence,
-                        datetime.now(timezone.utc), observation),
+                        captured_at, observation, captured_monotonic),
                     reward=float(reward[0]),
                     success=bool(np.asarray(success_info.get('is_success', [False])).reshape(-1)[0]),
                     terminated=bool(terminated[0]),
@@ -185,7 +191,13 @@ def main():
                 def identity(packet):
                     return {'episode_id': packet.episode_id,
                             'sequence': packet.sequence,
-                            'captured_at': packet.captured_at.isoformat()}
+                            'captured_at': packet.captured_at.isoformat(),
+                            'captured_monotonic': packet.captured_monotonic}
+
+                timing = asdict(result.timing)
+                timing.update(observation_age_seconds=result.timing.observation_age_seconds,
+                              decision_latency_seconds=result.timing.decision_latency_seconds,
+                              execution_seconds=result.timing.execution_seconds)
 
                 row = {'step': step, 'action': action[0].tolist(),
                        'source_observation': identity(source),
@@ -193,6 +205,7 @@ def main():
                                               if isinstance(result.observation,
                                                             ObservationPacket) else None),
                        'observation_ingestion': ingestion.code,
+                       'timing': timing,
                        'reward': result.reward, 'success': result.success,
                        'terminated': result.terminated, 'truncated': result.truncated}
                 self.log.write(json.dumps(row) + '\n')
@@ -230,13 +243,14 @@ def main():
                        episode_id=outcome.episode_id,
                        success=outcome.success, sum_rewards=outcome.sum_rewards,
                        stop_reason=outcome.stop_reason,
-                       rollout_seconds=outcome.rollout_seconds)
+                       rollout_seconds=outcome.rollout_seconds,
+                       cumulative_wait_seconds=outcome.cumulative_wait_seconds)
     except BaseException as exc:
         summary.update(status='interrupted' if isinstance(exc, KeyboardInterrupt) else 'error',
                        error=f'{type(exc).__name__}: {exc}')
         raise
     finally:
-        summary['total_seconds'] = perf_counter() - start
+        summary['total_seconds'] = monotonic() - start
         # Save diagnostics even if simulation or encoding fails.
         try:
             if recorder is not None:

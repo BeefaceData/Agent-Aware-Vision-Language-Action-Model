@@ -21,8 +21,8 @@ progress automatically. The existing Codex 50-issue queue is imported when it
 has no legacy worker run; its original deadline and active issue are preserved.
 Keep the same target/backend after starting a queue.
 
-To check installation, login, repository access, the validation image and base
-commit without launching models or changing GitHub:
+To check installation, login, repository access, the validation image, base
+commit and Windows sandbox file access without launching models or changing GitHub:
 
 ```powershell
 & "C:\Program Files\Git\bin\bash.exe" ralph/codex-afk.sh 50 --doctor

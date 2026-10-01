@@ -14,6 +14,7 @@ provider_preflight() {
   local auth
   auth=$(without_keys codex login status 2>&1) || die 'Run codex login using your personal subscription.'
   [[ $auth == *ChatGPT* ]] || die 'Codex must use personal ChatGPT login, not an API key.'
+  case "$(uname -s)" in MINGW*|MSYS*) windows_sandbox_probe ;; esac
   case "$BACKEND" in
     codex) ;;
     cursor)
@@ -28,9 +29,28 @@ provider_preflight() {
         die 'Claude needs a personal subscription login; the client API key cannot be used.' ;;
   esac
 }
+windows_sandbox_probe() {
+  local probe="$RUN/preflight-$(date +%s)-$$"
+  mkdir -p "$probe"
+  printf 'ralph-sandbox-input\n' > "$probe/input.txt"
+  cat > "$probe/probe.ps1" <<'POWERSHELL'
+$ErrorActionPreference = 'Stop'
+if ((Get-Content -LiteralPath 'input.txt' -Raw).Trim() -ne 'ralph-sandbox-input') { throw 'Sandbox read failed' }
+[System.IO.File]::WriteAllText((Join-Path $PWD.Path 'output.txt'), 'ralph-sandbox-ok')
+POWERSHELL
+  say '[preflight] Checking Windows sandbox reads and writes (no model call).'
+  MSYS_NO_PATHCONV=1 without_keys timeout --kill-after=10s 60s codex sandbox \
+    --include-managed-config --permission-profile :workspace --cd "$(native_path "$probe")" \
+    -c 'windows.sandbox="elevated"' -- powershell.exe -NoLogo -NoProfile -NonInteractive \
+    -Command "$(cat "$probe/probe.ps1")" 2>&1 | tee "$probe/sandbox.log"
+  [[ -f $probe/output.txt ]] && grep -qx 'ralph-sandbox-ok' "$probe/output.txt" ||
+    die "Windows sandbox cannot read/write its workspace. See $probe/sandbox.log."
+}
 invoke_model() {
   local role=$1 context=$2 output=$3 seconds model effort provider log
-  local -a cmd=(codex --ask-for-approval never)
+  # exec has its own configuration scope. Root-level -c values are lost when
+  # --ignore-user-config is used by Codex 0.159.3 on Windows.
+  local -a cmd=(codex exec --ignore-user-config --ephemeral -c 'approval_policy="never"')
   check_deadline
   provider=$BACKEND; model=$(jqtext --arg p "$BACKEND" '.workers[$p].model' "$POLICY")
   effort=$(jqtext --arg p "$BACKEND" '.workers[$p].effort' "$POLICY")
@@ -43,7 +63,7 @@ invoke_model() {
   case "$provider" in
     codex)
       case "$(uname -s)" in MINGW*|MSYS*) cmd+=(-c 'windows.sandbox="elevated"');; esac
-      cmd+=(exec --ignore-user-config --ephemeral --sandbox "$([[ $role == review ]] && echo read-only || echo workspace-write)"
+      cmd+=(--sandbox "$([[ $role == review ]] && echo read-only || echo workspace-write)"
         --model "$model" -c "model_reasoning_effort=\"$effort\"" --cd "$(native_path "$WORK")"
         --json --output-last-message "$(native_path "$output")" -)
       without_keys timeout --kill-after=15s "${seconds}s" "${cmd[@]}" < "$context" \

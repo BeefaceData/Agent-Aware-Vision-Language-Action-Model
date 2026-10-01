@@ -186,16 +186,32 @@ test_provider_command() {
   source "$RALPH_DIR/providers.sh"
   mkdir -p "$RUN/bin" "$WORK/.ralph-run"
   export TEST_CAPTURE_DIR="$RUN"
+  export TEST_REQUIRE_WINDOWS_PERMISSIONS=1
+  uname() { printf 'MINGW64_NT\n'; }
   cat > "$RUN/bin/codex" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ -z ${ANTHROPIC_API_KEY:-} && -z ${OPENAI_API_KEY:-} && -z ${GH_TOKEN:-} ]]
 printf '%s\n' "$@" > "$TEST_CAPTURE_DIR/provider-args"
-output=''; work=''
+output=''; work=''; exec_seen=0; windows_sandbox=0; approval_never=0
 while (( $# )); do
-  case "$1" in --output-last-message) output=$2; shift;; --cd) work=$2; shift;; esac
+  case "$1" in
+    exec) exec_seen=1 ;;
+    -c)
+      if (( exec_seen )); then
+        [[ $2 != 'windows.sandbox="elevated"' ]] || windows_sandbox=1
+        [[ $2 != 'approval_policy="never"' ]] || approval_never=1
+      fi
+      shift ;;
+    --output-last-message) output=$2; shift ;;
+    --cd) work=$2; shift ;;
+  esac
   shift
 done
+if [[ ${TEST_REQUIRE_WINDOWS_PERMISSIONS:-0} == 1 ]] && (( !windows_sandbox || !approval_never )); then
+  printf 'effective sandbox: read-only; exec-scoped Windows configuration missing\n' >&2
+  exit 41
+fi
 cat >/dev/null
 printf '{}' > "$output"
 printf '{}' > "$work/.ralph-run/worker.json"

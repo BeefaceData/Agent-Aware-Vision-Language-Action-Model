@@ -1,2 +1,3 @@
 ralph/*.sh text eol=lf
+ralph/*.jq text eol=lf
 ralph/tests/*.sh text eol=lf

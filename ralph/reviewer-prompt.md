@@ -32,4 +32,4 @@ supplied base and head SHAs. Return only this JSON object (no fences or surround
 Use `revise` for actionable defects, `blocked` for missing evidence or uncertainty
 that prevents approval. Each finding contains `severity` (`blocking` or `advisory`),
 `location`, `problem` and `required_change`. A pass requires every criterion to
-pass and no blocking findings. Advisory findings remain visible to the human.
+pass and no blocking findings. Advisory findings remain visible in the PR.

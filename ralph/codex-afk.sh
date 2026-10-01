@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-set -euo pipefail
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/launcher.sh"
-ralph_launch codex "$@"
+set -Eeuo pipefail
+source "$(cd "$(dirname "$0")" && pwd)/common.sh"
+source "$RALPH_DIR/providers.sh"
+source "$RALPH_DIR/checks.sh"
+source "$RALPH_DIR/queue.sh"
+source "$RALPH_DIR/publish.sh"
+ralph_main codex "$@"

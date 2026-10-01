@@ -1,13 +1,77 @@
 {
-  "name": "simulation-supervisor-v1",
-  "repository": "BeefaceData/Agent-Aware-Vision-Language-Action-Model",
-  "objective": "Implement the observation-only simulation supervisor, pin its VLM identity, demonstrate both bounded correction paths in replay, and enforce frozen assets. This 50-issue batch does not authorize active corrective evaluation or prove a 10-point improvement. Use deterministic public module and episode tests. For future live simulation supervision integrate SupervisorAPI.from_worktree from ralph/supervisor_api.py; never bypass its shared USD 50 ledger. Use claude-sonnet-5-5 with ANTHROPIC_API_KEY for supervision only. AFK coding and CI use injected transports and make no paid calls. Keep heavy simulator/model imports lazy so replay tests run without GPU or network.",
-  "issues": [2, 6, 14, 22, 17, 15, 19, 16, 20, 21, 32, 33, 34, 35, 36, 38, 39, 41, 40, 50, 63, 3, 4, 5, 10, 42, 8, 7, 11, 66, 67, 51, 65, 71, 72, 74, 78, 79, 82, 37, 68, 69, 87, 75, 73, 77, 83, 88, 89, 92],
-  "required_checks": ["Ralph checks (ubuntu-latest)", "Ralph checks (windows-latest)"],
-  "ci_timeout_seconds": 1800,
-  "validation": {
-    "image": "python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
-    "commands": [["python", "-m", "unittest", "discover", "-s", "tests", "-v"]],
-    "timeout_seconds": 300
-  }
+    "name":  "simulation-supervisor-v1",
+    "repository":  "BeefaceData/Agent-Aware-Vision-Language-Action-Model",
+    "objective":  "Implement the observation-only simulation supervisor, pin its VLM identity, demonstrate both bounded correction paths in replay, and enforce frozen assets. This 50-issue batch does not authorize active corrective evaluation or prove a 10-point improvement. Use deterministic public module and episode tests. Configure claude-sonnet-5-5 with ANTHROPIC_API_KEY for supervision only. AFK workers and CI use injected transports and make zero paid calls. A future live application adapter must enforce the shared USD 50 allowance before enabling requests. Keep heavy simulator/model imports lazy so replay tests run without GPU or network.",
+    "issues":  [
+                   2,
+                   6,
+                   14,
+                   22,
+                   17,
+                   15,
+                   19,
+                   16,
+                   20,
+                   21,
+                   32,
+                   33,
+                   34,
+                   35,
+                   36,
+                   38,
+                   39,
+                   41,
+                   40,
+                   50,
+                   63,
+                   3,
+                   4,
+                   5,
+                   10,
+                   42,
+                   8,
+                   7,
+                   11,
+                   66,
+                   67,
+                   51,
+                   65,
+                   71,
+                   72,
+                   74,
+                   78,
+                   79,
+                   82,
+                   37,
+                   68,
+                   69,
+                   87,
+                   75,
+                   73,
+                   77,
+                   83,
+                   88,
+                   89,
+                   92
+               ],
+    "required_checks":  [
+                            "Ralph checks (ubuntu-latest)",
+                            "Ralph checks (windows-latest)"
+                        ],
+    "ci_timeout_seconds":  1800,
+    "validation":  {
+                       "image":  "python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
+                       "commands":  [
+                                        [
+                                            "python",
+                                            "-m",
+                                            "unittest",
+                                            "discover",
+                                            "-s",
+                                            "tests",
+                                            "-v"
+                                        ]
+                                    ],
+                       "timeout_seconds":  300
+                   }
 }

@@ -17,7 +17,8 @@
    or read the changed files with file tools. Check error paths, concurrency and timing,
    API compatibility, provenance, secret exposure and evaluation leakage where
    applicable. Explain each acceptance criterion with concrete file/test evidence.
-   For a repair attempt, address supplied findings and re-run checks;
+   For a repair attempt, read the preceding test log and independent findings,
+   fix the concrete failure within this issue, and re-run relevant checks;
    old reviews no longer apply after an edit.
 4. Write `.ralph-run/worker.json` with the schema below, then stop. Every numbered
    criterion must appear exactly once for `ready_for_review`. Use `blocked` for

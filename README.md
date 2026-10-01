@@ -126,6 +126,21 @@ The script also prints progress and output paths to the terminal. It does not au
 
 `episode_harness.run_episode(EpisodeConfig(seed, max_steps), policy, environment, recorder)` runs one baseline attempt and returns `EpisodeOutcome` with success, executed step count, stop reason, reward total, rollout time, and artifact paths. The policy adapter supplies `reset()` and `act(observation)`; the environment adapter supplies `reset(seed)` and `step(action)` returning a `StepResult`; the recorder supplies `begin(observation)`, `record_step(step, action, result)`, and `finish()` returning artifact references. The caller releases any adapter resources after completion or failure. The existing CLI supplies the LeRobot/LIBERO and file-recording adapters; the interface itself imports no simulator or model packages.
 
+For a synthetic successful replay without a model, simulator, or files, call the same interface with the public fixture:
+
+```python
+from episode_harness import run_episode
+from replay_adapters import successful_replay
+
+fixture = successful_replay()
+outcome = run_episode(fixture.config, fixture.policy,
+                      fixture.environment, fixture.recorder)
+assert outcome.success and fixture.environment.actions == [
+    ('reach', 0.25), ('place', 0.75)]
+```
+
+Each fixture starts a scripted attempt; its in-memory recorder returns no artifact paths. The replay outcome verifies software behavior, not physical or LIBERO task performance.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

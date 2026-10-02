@@ -64,7 +64,23 @@ gh_call() {
         jq -n --arg head "$HEAD" '[{number:99,state:"OPEN",headRefOid:$head,baseRefName:"main"}]'
       else printf '[]\n'; fi ;;
     'pr create') touch "$EVIDENCE/pr-created" ;;
-    'pr checks') printf '[{"name":"fixture","bucket":"pass","state":"SUCCESS"}]\n' ;;
+    'pr checks')
+      local count=0 mode=${MOCK_CI:-pass}
+      [[ ! -f $RUN/ci-polls ]] || count=$(cat "$RUN/ci-polls")
+      printf '%s\n' "$((count+1))" > "$RUN/ci-polls"
+      if [[ $mode == registration ]]; then
+        case $count in 0) mode=absent ;; 1) mode=pending ;; *) mode=pass ;; esac
+      fi
+      case $mode in
+        absent) printf "no checks reported on the '%s' branch\r\n" "$BRANCH" >&2; return 1 ;;
+        pending) printf '[{"name":"fixture","bucket":"pending","state":"IN_PROGRESS"}]\n'; return 8 ;;
+        network) printf 'error connecting to api.github.com\n' >&2; return 1 ;;
+        auth) printf 'authentication required\n' >&2; return 4 ;;
+        malformed) printf '{broken\n'; return ;;
+        empty) return ;;
+        failed) printf '[{"name":"fixture","bucket":"fail","state":"FAILURE"}]\n'; return 1 ;;
+        *) printf '[{"name":"fixture","bucket":"pass","state":"SUCCESS"}]\n' ;;
+      esac ;;
     'pr view')
       if [[ $(git --git-dir="$ROOT/.ralph-origin.git" rev-parse main) == "$HEAD" ]]; then
         local count=0
@@ -132,6 +148,39 @@ test_check_repair() {
   }
   work_issue
   jq -e '.attempts == 2 and .reviews == 1 and .phase == "complete"' "$ACTIVE" >/dev/null
+}
+test_ci_registration() {
+  setup; ISSUE=2; state_update '.active=2'; MOCK_CI=registration
+  sleep() {
+    jq -e '.completed == [] and .active == 2' "$STATE" >/dev/null
+    jq -e '.phase == "published"' "$ACTIVE" >/dev/null
+    [[ $(git --git-dir="$ROOT/.ralph-origin.git" rev-parse main) == "$BASE" ]]
+    printf 'waiting\n' >> "$RUN/waits"
+  }
+  work_issue
+  jq -e '.completed == [2] and .active == null' "$STATE" >/dev/null
+  jq -e '.attempts == 1 and .checks == 1 and .reviews == 1' "$ACTIVE" >/dev/null
+  [[ $(wc -l < "$RUN/waits") == 2 ]]
+  [[ $(cat "$RUN/ci-polls") == 3 ]]
+  [[ $(grep -c 'api --method PATCH' "$RUN/gh-calls") == 1 ]]
+}
+ci_error() {
+  setup; ISSUE=2; prepare_issue; MOCK_CI=$1
+  # Errors must stop immediately, never become a polling loop or a merge.
+  sleep() { die 'Unexpected retry of a CI error.'; }
+  wait_ci 99
+  die 'Unreachable: CI error was accepted.'
+}
+test_ci_network() { ci_error network; }
+test_ci_auth() { ci_error auth; }
+test_ci_malformed() { ci_error malformed; }
+test_ci_empty() { ci_error empty; }
+test_ci_failed() { ci_error failed; }
+test_ci_registration_timeout() {
+  setup; ISSUE=2; prepare_issue; MOCK_CI=absent
+  jq '.ci_timeout_seconds=0' "$QUEUE" > "$QUEUE.tmp"; mv "$QUEUE.tmp" "$QUEUE"
+  wait_ci 99
+  die 'Unreachable: absent checks exceeded their timeout.'
 }
 test_merge_propagation() {
   setup; ISSUE=2; state_update '.active=2'
@@ -301,7 +350,7 @@ test_container() {
 
 if [[ $# -gt 0 ]]; then "$1"; exit; fi
 for script in "$RALPH_DIR"/*.sh "$TEST_DIR"/*.sh; do bash -n "$script"; done
-for test in lifecycle resume check_repair merge_propagation merge_resume legacy_resume check_gate local_commit keys provider_command; do
+for test in lifecycle resume check_repair ci_registration merge_propagation merge_resume legacy_resume check_gate local_commit keys provider_command; do
   bash "$0" "test_$test" > "${TMPDIR:-/tmp}/ralph-$test.log" 2>&1 || { cat "${TMPDIR:-/tmp}/ralph-$test.log"; exit 1; }
   printf 'PASS: %s\n' "$test"
 done
@@ -309,6 +358,9 @@ for item in 'stale_review:Independent review blocked' 'main_moved:Merge gate cha
   'revision_limit:Two worker attempts exhausted' 'protected_change:Worker changed protected path' \
   'dependency_failure:Cannot read native dependencies' 'upload_mismatch:GitHub blob differs' \
   'merge_never_confirms:Timed out waiting for GitHub merge confirmation' \
+  'ci_network:Invalid CI response' 'ci_auth:Cannot read CI checks' \
+  'ci_malformed:Invalid CI response' 'ci_empty:Invalid CI response' \
+  'ci_failed:CI failed' 'ci_registration_timeout:CI did not complete within its time limit' \
   'merged_head_changed:PR head changed during merge confirmation' \
   'wrong_merge_commit:PR merged at a different commit'; do
   test=${item%%:*}; expected=${item#*:}

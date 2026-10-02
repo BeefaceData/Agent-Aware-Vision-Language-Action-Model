@@ -61,6 +61,9 @@ not the loop controller.
    and actual test evidence. One repair attempt is available for failing candidate
    tests or actionable review.
 6. Push the issue branch, create its PR using `gh`, and wait for required CI.
+   Checks may take time to appear after PR creation. The known `no checks reported`
+   response remains pending within the 30-minute CI wait and the issue deadline;
+   it never counts as passing. API errors, malformed responses and failed checks stop.
 7. Auto-merge only when the reviewed head, base and checks still match.
    A non-forced GitHub ref update fast-forwards main to the exact reviewed commit;
    branch protection and a concurrent main update can reject it.

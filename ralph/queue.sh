@@ -94,11 +94,19 @@ checks_pass() {
     all(.[]; .bucket == "pass" or .bucket == "skipping")' "$1" >/dev/null
 }
 wait_ci() {
-  local pr=$1 result until=$(( $(date +%s) + $(jqtext '.ci_timeout_seconds' "$QUEUE") ))
+  local pr=$1 result diagnostic until=$(( $(date +%s) + $(jqtext '.ci_timeout_seconds' "$QUEUE") ))
   while :; do
     check_deadline
     result=0
-    gh_call pr checks "$pr" --repo "$REPO" --json name,bucket,state > "$EVIDENCE/ci.json" || result=$?
+    diagnostic=$(gh_call pr checks "$pr" --repo "$REPO" --json name,bucket,state 2>&1 > "$EVIDENCE/ci.json") || result=$?
+    printf '%s\n' "$diagnostic" > "$EVIDENCE/ci.stderr.log"
+    [[ -z $diagnostic ]] || printf '%s\n' "$diagnostic" >&2
+    # gh emits no JSON until GitHub registers checks for a newly created PR.
+    # Only this known response is pending; other empty/error responses stop.
+    if [[ $result == 1 && ! -s $EVIDENCE/ci.json ]] &&
+      tr -d '\r' < "$EVIDENCE/ci.stderr.log" | grep -Fxq "no checks reported on the '$BRANCH' branch"; then
+      printf '[]\n' > "$EVIDENCE/ci.json"
+    fi
     [[ $result == 0 || $result == 8 || $result == 1 ]] || die 'Cannot read CI checks.'
     jq -e 'type == "array"' "$EVIDENCE/ci.json" >/dev/null || die 'Invalid CI response.'
     if checks_pass "$EVIDENCE/ci.json"; then return; fi

@@ -38,11 +38,21 @@ class ObservationPacket:
     observation: Any
     captured_monotonic: float | None = None
     frame_references: tuple[FrameReference, ...] = ()
+    robot_state_capture: RobotStateCapture | None = None
 
 
 @dataclass(frozen=True)
 class ViewCapture:
     """A camera capture on the packet's monotonic clock, when known."""
+
+    observation_sequence: int
+    captured_at: datetime
+    captured_monotonic: float
+
+
+@dataclass(frozen=True)
+class RobotStateCapture:
+    """Measured robot-state capture on the packet's monotonic clock."""
 
     observation_sequence: int
     captured_at: datetime
@@ -141,6 +151,150 @@ def frame_references_for_observation(
             'available', status,
             'camera_capture' if capture else 'observation_return'))
     return tuple(references)
+
+
+@dataclass(frozen=True)
+class InputFreshness:
+    """One required input's availability and age at a decision time.
+
+    An ``observation_return`` age is only a lower bound on sensor age, so an
+    input with that time basis cannot be called fresh. ``sensor_capture``
+    measures age since capture. Status does not establish valid geometry.
+    """
+
+    name: Literal['main', 'wrist', 'robot_state']
+    available: bool
+    age_seconds: float | None
+    max_age_seconds: float
+    status: Literal['fresh', 'unverified', 'missing', 'stale', 'invalid_metadata']
+    diagnostic: str
+    captured_monotonic: float | None
+    observation_sequence: int | None
+    time_basis: Literal['sensor_capture', 'observation_return'] | None
+
+
+def check_observation_freshness(
+    packet: ObservationPacket, now_monotonic: float,
+    max_age_seconds: Mapping[str, float],
+) -> tuple[InputFreshness, ...]:
+    """Assess configured required inputs without accepting absent data as fresh.
+
+    Limits must name one or more of ``main``, ``wrist``, and ``robot_state``.
+    A missing input has no age. An explicit capture from an older observation
+    retains that older sequence and timestamp. Invalid or future metadata is
+    reported as invalid, rather than being clamped to age zero.
+    """
+    names = ('main', 'wrist', 'robot_state')
+    if not isinstance(packet, ObservationPacket) or (
+        not isinstance(now_monotonic, (int, float)) or
+        isinstance(now_monotonic, bool) or not isfinite(now_monotonic)
+    ):
+        raise ValueError('packet and finite decision time required')
+    if (not isinstance(packet.captured_at, datetime) or
+        packet.captured_at.utcoffset() is None or
+        packet.captured_monotonic is None or
+        not isinstance(packet.captured_monotonic, (int, float)) or
+        isinstance(packet.captured_monotonic, bool) or
+        not isfinite(packet.captured_monotonic) or
+        packet.captured_monotonic > now_monotonic):
+        raise ValueError('packet capture must precede the decision')
+    if not isinstance(max_age_seconds, Mapping) or not max_age_seconds or (
+        set(max_age_seconds) - set(names)
+    ):
+        raise ValueError('freshness limits require known input names')
+    for limit in max_age_seconds.values():
+        if (not isinstance(limit, (int, float)) or isinstance(limit, bool) or
+            not isfinite(limit) or limit < 0):
+            raise ValueError('freshness limits must be finite and nonnegative')
+
+    observation = packet.observation if isinstance(packet.observation, Mapping) else {}
+    pixels = observation.get('pixels')
+    pixels = pixels if isinstance(pixels, Mapping) else {}
+    refs = {ref.camera: ref for ref in packet.frame_references
+            if isinstance(ref, FrameReference)}
+    results = []
+    for name in names:
+        if name not in max_age_seconds:
+            continue
+        limit = max_age_seconds[name]
+        if name == 'robot_state':
+            state = observation.get('robot_state')
+            def present(value: Any) -> bool:
+                if value is None:
+                    return False
+                if isinstance(value, Mapping):
+                    return bool(value) and all(present(v) for v in value.values())
+                if isinstance(value, (list, tuple)):
+                    return bool(value) and all(present(v) for v in value)
+                if isinstance(value, bool):
+                    return True
+                if isinstance(value, (int, float)):
+                    return isfinite(value)
+                if hasattr(value, 'tolist'):
+                    try:
+                        return present(value.tolist())
+                    except (TypeError, ValueError, RuntimeError):
+                        return False
+                return True
+            available = isinstance(state, Mapping) and present(state)
+            capture = packet.robot_state_capture
+            captured = (capture.captured_monotonic if isinstance(capture, RobotStateCapture)
+                        else packet.captured_monotonic if capture is None else None)
+            sequence = (capture.observation_sequence if isinstance(capture, RobotStateCapture)
+                        else packet.sequence if capture is None else None)
+            basis = 'sensor_capture' if capture is not None else 'observation_return'
+            metadata_valid = (capture is None or (
+                isinstance(capture, RobotStateCapture) and
+                type(capture.observation_sequence) is int and
+                0 <= capture.observation_sequence <= packet.sequence and
+                isinstance(capture.captured_at, datetime) and
+                capture.captured_at.utcoffset() is not None and
+                capture.captured_at <= packet.captured_at))
+        else:
+            key = 'image' if name == 'main' else 'image2'
+            ref = refs.get(name)
+            available = pixels.get(key) is not None
+            captured = ref.captured_monotonic if ref is not None else None
+            sequence = ref.observation_sequence if ref is not None else None
+            basis = (('sensor_capture' if ref.time_basis == 'camera_capture'
+                      else 'observation_return') if ref is not None and
+                     ref.time_basis is not None else None)
+            metadata_valid = (ref is not None and
+                ref.image_key == f'pixels.{key}' and
+                ref.availability == ('available' if available else 'missing') and
+                type(ref.observation_sequence) is int and
+                0 <= ref.observation_sequence <= packet.sequence and
+                (not available or (
+                    isinstance(ref.captured_at, datetime) and
+                    ref.captured_at.utcoffset() is not None and
+                    ref.captured_at <= packet.captured_at and
+                    ref.time_basis in ('camera_capture', 'observation_return'))))
+        if not available:
+            status, diagnostic = 'missing', f'{name}: obtain a new observation with this input'
+            age = None
+            captured = None
+            sequence = None
+            basis = None
+        elif (not metadata_valid or not isinstance(captured, (int, float)) or
+              isinstance(captured, bool) or not isfinite(captured) or
+              captured > packet.captured_monotonic):
+            status, diagnostic = 'invalid_metadata', f'{name}: repair capture metadata before use'
+            age = None
+        else:
+            age = now_monotonic - captured
+            if age > limit:
+                status = 'stale'
+                diagnostic = (f'{name}: age {age:.3f}s exceeds {limit:.3f}s; '
+                              'obtain a new capture')
+            elif basis == 'observation_return':
+                status = 'unverified'
+                diagnostic = (f'{name}: sensor capture time unavailable; '
+                              'obtain timestamped input before claiming freshness')
+            else:
+                status, diagnostic = 'fresh', f'{name}: within configured age limit'
+        results.append(InputFreshness(name, available, age, limit, status,
+                                      diagnostic, captured, sequence, basis))
+    return tuple(results)
 
 
 @dataclass(frozen=True)

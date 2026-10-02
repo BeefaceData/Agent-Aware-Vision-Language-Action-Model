@@ -13,7 +13,7 @@ from time import monotonic
 from typing import Any, Callable, Mapping, Sequence
 
 from episode_harness import (EpisodeConfig, IngestionOutcome, ObservationPacket,
-                             StepFailure, StepResult, ViewCapture,
+                             RobotStateCapture, StepFailure, StepResult, ViewCapture,
                              frame_references_for_observation)
 
 
@@ -30,6 +30,7 @@ class ReplayStep:
     terminated: bool
     truncated: bool
     camera_captures: Mapping[str, ViewCapture] | None = None
+    robot_state_capture: RobotStateCapture | None = None
 
 
 class ReplayPolicy:
@@ -56,7 +57,8 @@ class ReplayEnvironment:
                  turns: Sequence[tuple[Any, ReplayStep]],
                  clock: Callable[[], float] = monotonic,
                  initial_camera_captures: Mapping[str, ViewCapture] | None = None,
-                 max_camera_skew_seconds: float | None = None):
+                 max_camera_skew_seconds: float | None = None,
+                 initial_robot_state_capture: RobotStateCapture | None = None):
         self._seed = seed
         self._initial_observation = initial_observation
         self._turns = tuple(turns)
@@ -65,16 +67,19 @@ class ReplayEnvironment:
         self._clock = clock
         self._initial_camera_captures = initial_camera_captures
         self._max_camera_skew_seconds = max_camera_skew_seconds
+        self._initial_robot_state_capture = initial_robot_state_capture
 
     def _packet(self, episode_id: str, sequence: int, captured_at: datetime,
-                observation: Any, captured_monotonic: float,
-                camera_captures: Mapping[str, ViewCapture] | None) -> ObservationPacket:
+                 observation: Any, captured_monotonic: float,
+                 camera_captures: Mapping[str, ViewCapture] | None,
+                 robot_state_capture: RobotStateCapture | None) -> ObservationPacket:
         references = (frame_references_for_observation(
             observation, sequence, captured_at, captured_monotonic,
             camera_captures, self._max_camera_skew_seconds)
             if isinstance(observation, Mapping) else ())
         return ObservationPacket(episode_id, sequence, captured_at,
-                                 observation, captured_monotonic, references)
+                                 observation, captured_monotonic, references,
+                                 robot_state_capture)
 
     def reset(self, seed: int, episode_id: str) -> ObservationPacket:
         if seed != self._seed:
@@ -83,7 +88,8 @@ class ReplayEnvironment:
         self._episode_id = episode_id
         return self._packet(episode_id, 0, _CAPTURE_START,
                             self._initial_observation, self._clock(),
-                            self._initial_camera_captures)
+                            self._initial_camera_captures,
+                            self._initial_robot_state_capture)
 
     def step(self, action: Any) -> StepResult:
         index = len(self.actions)
@@ -97,7 +103,8 @@ class ReplayEnvironment:
             observation=self._packet(
                 self._episode_id, index + 1,
                 _CAPTURE_START + timedelta(seconds=index + 1),
-                result.observation, self._clock(), result.camera_captures),
+                result.observation, self._clock(), result.camera_captures,
+                result.robot_state_capture),
             reward=result.reward,
             success=result.success,
             terminated=result.terminated,

@@ -173,6 +173,24 @@ class InputFreshness:
     time_basis: Literal['sensor_capture', 'observation_return'] | None
 
 
+def _camera_payload_present(value: Any) -> bool:
+    """Check for data without testing pixel truthiness or importing array libraries."""
+    if value is None or isinstance(value, Mapping):
+        return False
+    if isinstance(value, (list, tuple)):
+        return bool(value) and all(_camera_payload_present(v) for v in value)
+    if isinstance(value, (int, float)):
+        return isfinite(value)  # Zero-valued pixels are still measurements.
+    try:
+        shape = getattr(value, 'shape', None)
+        if shape is not None:
+            # len(array) alone misses zero elements on a later axis.
+            return len(shape) > 0 and all(dimension > 0 for dimension in shape)
+        return len(value) > 0
+    except (TypeError, ValueError, RuntimeError):
+        return False
+
+
 def check_observation_freshness(
     packet: ObservationPacket, now_monotonic: float,
     max_age_seconds: Mapping[str, float],
@@ -235,7 +253,7 @@ def check_observation_freshness(
                         return present(value.tolist())
                     except (TypeError, ValueError, RuntimeError):
                         return False
-                return True
+                return False
             available = isinstance(state, Mapping) and present(state)
             capture = packet.robot_state_capture
             captured = (capture.captured_monotonic if isinstance(capture, RobotStateCapture)
@@ -253,7 +271,7 @@ def check_observation_freshness(
         else:
             key = 'image' if name == 'main' else 'image2'
             ref = refs.get(name)
-            available = pixels.get(key) is not None
+            available = _camera_payload_present(pixels.get(key))
             captured = ref.captured_monotonic if ref is not None else None
             sequence = ref.observation_sequence if ref is not None else None
             basis = (('sensor_capture' if ref.time_basis == 'camera_capture'

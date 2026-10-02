@@ -1,6 +1,7 @@
 """Required-input freshness through the public packet and episode interfaces."""
 
 import unittest
+from array import array
 from datetime import datetime, timedelta, timezone
 
 from episode_harness import (EpisodeConfig, ObservationPacket, RobotStateCapture,
@@ -23,6 +24,46 @@ def observation(main=None, wrist=None, state=None):
 
 
 class ObservationFreshnessTests(unittest.TestCase):
+    def test_empty_camera_payload_cannot_be_fresh_with_recent_metadata(self):
+        for payload in ([], (), '', b'', [[], []], array('f'), memoryview(b'')):
+            for camera, key in (('main', 'image'), ('wrist', 'image2')):
+                with self.subTest(camera=camera, payload=repr(payload)):
+                    raw = {'pixels': {key: payload}}
+                    refs = frame_references_for_observation(
+                        raw, 0, START, 10.0,
+                        {camera: ViewCapture(0, START, 10.0)}, 0.1)
+                    packet = ObservationPacket('episode', 0, START, raw, 10.0, refs)
+                    report = check_observation_freshness(packet, 10.1, {camera: 0.5})[0]
+                    self.assertFalse(report.available)
+                    self.assertEqual(report.status, 'missing')
+                    self.assertIsNone(report.age_seconds)
+
+    def test_unsupported_state_leaves_cannot_be_fresh_with_recent_metadata(self):
+        for payload in ('', 'unknown', b'', object(), set(), array('f')):
+            with self.subTest(payload=repr(payload)):
+                raw = {'robot_state': {'eef': {'pos': payload}}}
+                packet = ObservationPacket(
+                    'episode', 0, START, raw, 10.0,
+                    robot_state_capture=RobotStateCapture(0, START, 10.0))
+                report = check_observation_freshness(packet, 10.1, {'robot_state': 0.5})[0]
+                self.assertFalse(report.available)
+                self.assertEqual(report.status, 'missing')
+                self.assertIsNone(report.age_seconds)
+
+    def test_zero_measurements_and_black_frames_remain_available(self):
+        raw = {'pixels': {'image': [[0, 0]], 'image2': array('B', [0, 0])},
+               'robot_state': {'eef': {'pos': array('f', [0.0, 0.0])},
+                               'gripper': {'qpos': 0.0, 'closed': False}}}
+        refs = frame_references_for_observation(
+            raw, 0, START, 10.0,
+            {name: ViewCapture(0, START, 10.0) for name in ('main', 'wrist')}, 0.1)
+        packet = ObservationPacket('episode', 0, START, raw, 10.0, refs,
+                                   RobotStateCapture(0, START, 10.0))
+        for report in check_observation_freshness(packet, 10.1, LIMITS):
+            self.assertTrue(report.available)
+            self.assertEqual(report.status, 'fresh')
+            self.assertAlmostEqual(report.age_seconds, 0.1)
+
     def test_nonfinite_or_empty_state_measurements_are_missing(self):
         for measurement in (float('nan'), float('inf'), []):
             with self.subTest(measurement=measurement):

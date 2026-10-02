@@ -37,6 +37,110 @@ class ObservationPacket:
     captured_at: datetime
     observation: Any
     captured_monotonic: float | None = None
+    frame_references: tuple[FrameReference, ...] = ()
+
+
+@dataclass(frozen=True)
+class ViewCapture:
+    """A camera capture on the packet's monotonic clock, when known."""
+
+    observation_sequence: int
+    captured_at: datetime
+    captured_monotonic: float
+
+
+@dataclass(frozen=True)
+class FrameReference:
+    """Reference to one view in an observation's ``pixels`` mapping.
+
+    A missing view has no capture time. ``observation_return`` timestamps mark
+    when the paired simulator observation returned, not camera exposure time.
+    ``co_observed`` therefore does not claim measured camera synchronization.
+    """
+
+    camera: Literal['main', 'wrist']
+    observation_sequence: int
+    image_key: str
+    captured_at: datetime | None
+    captured_monotonic: float | None
+    availability: Literal['available', 'missing']
+    synchronization: Literal['co_observed', 'verified', 'unsynchronized',
+                             'unpaired', 'unavailable']
+    time_basis: Literal['observation_return', 'camera_capture'] | None
+
+
+def frame_references_for_observation(
+    observation: Mapping[str, Any], sequence: int,
+    captured_at: datetime, captured_monotonic: float,
+    camera_captures: Mapping[str, ViewCapture] | None = None,
+    max_skew_seconds: float | None = None,
+) -> tuple[FrameReference, FrameReference]:
+    """Describe LIBERO's main/wrist views without filling a missing view.
+
+    Explicit camera capture metadata verifies association and skew. When the
+    environment only supplies a paired observation, both times are the shared
+    observation-return timestamp and synchronization remains unverified.
+    """
+    if (type(sequence) is not int or sequence < 0 or
+        not isinstance(captured_at, datetime) or captured_at.utcoffset() is None or
+        isinstance(captured_monotonic, bool) or
+        not isinstance(captured_monotonic, (int, float)) or
+        not isfinite(captured_monotonic)):
+        raise ValueError('valid observation identity and timestamps required')
+    if camera_captures is not None and (
+        isinstance(max_skew_seconds, bool) or
+        not isinstance(max_skew_seconds, (int, float)) or
+        not isfinite(max_skew_seconds) or max_skew_seconds < 0
+    ):
+        raise ValueError('explicit camera captures require a finite skew limit')
+    if not isinstance(observation, Mapping):
+        raise ValueError('observation must be a mapping')
+    if camera_captures is not None and set(camera_captures) - {'main', 'wrist'}:
+        raise ValueError('unknown camera capture')
+    pixels = observation.get('pixels')
+    if not isinstance(pixels, Mapping):
+        pixels = {}
+    available = {camera: pixels.get(key) is not None
+                 for camera, key in (('main', 'image'), ('wrist', 'image2'))}
+    if camera_captures is not None:
+        for camera, capture in camera_captures.items():
+            if not isinstance(capture, ViewCapture) or not available[camera]:
+                raise ValueError('camera capture requires a present view')
+            if (type(capture.observation_sequence) is not int or
+                not isinstance(capture.captured_at, datetime) or
+                capture.captured_at.utcoffset() is None or
+                not isinstance(capture.captured_monotonic, (int, float)) or
+                isinstance(capture.captured_monotonic, bool) or
+                not isfinite(capture.captured_monotonic) or
+                capture.captured_monotonic > captured_monotonic or
+                capture.captured_at > captured_at):
+                raise ValueError('invalid camera capture metadata')
+    captures = camera_captures or {}
+    pair_verified = (all(available.values()) and len(captures) == 2 and
+                     all(captures[camera].observation_sequence == sequence
+                         for camera in ('main', 'wrist')) and
+                     abs(captures['main'].captured_monotonic -
+                         captures['wrist'].captured_monotonic) <= max_skew_seconds and
+                     abs((captures['main'].captured_at -
+                          captures['wrist'].captured_at).total_seconds()) <=
+                     max_skew_seconds)
+    references = []
+    for camera, key in (('main', 'image'), ('wrist', 'image2')):
+        if not available[camera]:
+            references.append(FrameReference(camera, sequence, f'pixels.{key}',
+                                             None, None, 'missing', 'unavailable', None))
+            continue
+        capture = captures.get(camera)
+        status = ('verified' if pair_verified else
+                  'unsynchronized' if camera_captures is not None else
+                  'co_observed' if all(available.values()) else 'unpaired')
+        references.append(FrameReference(
+            camera, capture.observation_sequence if capture else sequence,
+            f'pixels.{key}', capture.captured_at if capture else captured_at,
+            capture.captured_monotonic if capture else captured_monotonic,
+            'available', status,
+            'camera_capture' if capture else 'observation_return'))
+    return tuple(references)
 
 
 @dataclass(frozen=True)

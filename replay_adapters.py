@@ -10,10 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from episode_harness import (EpisodeConfig, IngestionOutcome, ObservationPacket,
-                             StepFailure, StepResult)
+                             StepFailure, StepResult, ViewCapture,
+                             frame_references_for_observation)
 
 
 _CAPTURE_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -28,6 +29,7 @@ class ReplayStep:
     success: bool
     terminated: bool
     truncated: bool
+    camera_captures: Mapping[str, ViewCapture] | None = None
 
 
 class ReplayPolicy:
@@ -52,21 +54,36 @@ class ReplayPolicy:
 class ReplayEnvironment:
     def __init__(self, seed: int, initial_observation: Any,
                  turns: Sequence[tuple[Any, ReplayStep]],
-                 clock: Callable[[], float] = monotonic):
+                 clock: Callable[[], float] = monotonic,
+                 initial_camera_captures: Mapping[str, ViewCapture] | None = None,
+                 max_camera_skew_seconds: float | None = None):
         self._seed = seed
         self._initial_observation = initial_observation
         self._turns = tuple(turns)
         self.actions: list[Any] = []
         self._episode_id = ''
         self._clock = clock
+        self._initial_camera_captures = initial_camera_captures
+        self._max_camera_skew_seconds = max_camera_skew_seconds
+
+    def _packet(self, episode_id: str, sequence: int, captured_at: datetime,
+                observation: Any, captured_monotonic: float,
+                camera_captures: Mapping[str, ViewCapture] | None) -> ObservationPacket:
+        references = (frame_references_for_observation(
+            observation, sequence, captured_at, captured_monotonic,
+            camera_captures, self._max_camera_skew_seconds)
+            if isinstance(observation, Mapping) else ())
+        return ObservationPacket(episode_id, sequence, captured_at,
+                                 observation, captured_monotonic, references)
 
     def reset(self, seed: int, episode_id: str) -> ObservationPacket:
         if seed != self._seed:
             raise ValueError(f'Replay requires seed {self._seed}')
         self.actions.clear()
         self._episode_id = episode_id
-        return ObservationPacket(episode_id, 0, _CAPTURE_START,
-                                 self._initial_observation, self._clock())
+        return self._packet(episode_id, 0, _CAPTURE_START,
+                            self._initial_observation, self._clock(),
+                            self._initial_camera_captures)
 
     def step(self, action: Any) -> StepResult:
         index = len(self.actions)
@@ -77,10 +94,10 @@ class ReplayEnvironment:
         if action != expected_action:
             raise AssertionError(f'Unexpected action at step {index + 1}')
         return StepResult(
-            observation=ObservationPacket(
+            observation=self._packet(
                 self._episode_id, index + 1,
                 _CAPTURE_START + timedelta(seconds=index + 1),
-                result.observation, self._clock()),
+                result.observation, self._clock(), result.camera_captures),
             reward=result.reward,
             success=result.success,
             terminated=result.terminated,

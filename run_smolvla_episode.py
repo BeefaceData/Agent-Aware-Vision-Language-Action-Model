@@ -28,7 +28,9 @@ from importlib.metadata import version
 from pathlib import Path
 from time import monotonic
 
-from episode_harness import EpisodeConfig, ObservationPacket, StepResult, run_episode
+from camera_evidence import CameraEvidenceRecorder
+from episode_harness import (EpisodeConfig, ObservationPacket, StepResult,
+                             frame_references_for_observation, run_episode)
 
 
 def parse_args(argv=None):
@@ -82,13 +84,16 @@ def main():
     )
     out.mkdir(parents=True, exist_ok=False)
     video_path = out / 'episode.mp4'
+    wrist_video_path = out / 'episode_wrist.mp4'
+    frames_path = out / 'frames.jsonl'
     summary = {
         'status': 'initializing', 'suite': args.suite, 'task_id': args.task_id,
         'seed': args.seed, 'initial_state_index': 0, 'policy': args.policy,
         'device': args.device, 'video_fps': args.video_fps,
         'render_backend': os.environ['MUJOCO_GL'],
         'versions': {p: version(p) for p in ['lerobot', 'torch', 'gymnasium', 'hf-libero']},
-        'video_path': str(video_path.resolve()), 'steps': 0, 'success': False,
+        'video_path': None, 'wrist_video_path': None, 'frames_path': None,
+        'steps': 0, 'success': False,
     }
     env = recorder = None
     start = monotonic()
@@ -149,7 +154,10 @@ def main():
                 captured_at = datetime.now(timezone.utc)
                 return ObservationPacket(episode_id, self.sequence,
                                          captured_at, observation,
-                                         captured_monotonic)
+                                         captured_monotonic,
+                                         frame_references_for_observation(
+                                             observation, self.sequence,
+                                             captured_at, captured_monotonic))
 
             def step(self, action):
                 observation, reward, terminated, truncated, info = env.step(action)
@@ -160,7 +168,10 @@ def main():
                 return StepResult(
                     observation=ObservationPacket(
                         self.episode_id, self.sequence,
-                        captured_at, observation, captured_monotonic),
+                        captured_at, observation, captured_monotonic,
+                        frame_references_for_observation(
+                            observation, self.sequence,
+                            captured_at, captured_monotonic)),
                     reward=float(reward[0]),
                     success=bool(np.asarray(success_info.get('is_success', [False])).reshape(-1)[0]),
                     terminated=bool(terminated[0]),
@@ -169,21 +180,24 @@ def main():
 
         class BaselineRecorder:
             def __init__(self):
-                self.writer = None
+                self.camera_evidence = None
                 self.log = None
                 self.cumulative_wait_seconds = 0.0
 
             def record_frame(self, packet):
-                # The wrapper may reset internally on success; returned pixels
-                # preserve the terminal observation instead of env.render().
-                frame = packet.observation['pixels']['image'][0]
-                self.writer.append_data(np.ascontiguousarray(frame[::-1, ::-1]))
+                # Returned pixels preserve the terminal observation even if the
+                # wrapper resets internally. Never replace a missing view.
+                self.camera_evidence.record(packet)
 
             def begin(self, packet):
-                self.writer = imageio.get_writer(str(video_path), fps=args.video_fps,
-                                                 codec='libx264', macro_block_size=1)
-                self.record_frame(packet)
+                self.camera_evidence = CameraEvidenceRecorder(
+                    video_path, wrist_video_path, frames_path,
+                    lambda path: imageio.get_writer(
+                        str(path), fps=args.video_fps, codec='libx264',
+                        macro_block_size=1),
+                    lambda pixels: np.ascontiguousarray(pixels[0][::-1, ::-1]))
                 self.log = (out / 'steps.jsonl').open('w', encoding='utf-8')
+                self.record_frame(packet)
 
             @staticmethod
             def action_evidence(record):
@@ -210,7 +224,9 @@ def main():
                     return {'episode_id': packet.episode_id,
                             'sequence': packet.sequence,
                             'captured_at': packet.captured_at.isoformat(),
-                            'captured_monotonic': packet.captured_monotonic}
+                            'captured_monotonic': packet.captured_monotonic,
+                            'cameras': {ref.camera: ref.synchronization
+                                        for ref in packet.frame_references}}
 
                 timing = asdict(result.timing)
                 timing.update(observation_age_seconds=result.timing.observation_age_seconds,
@@ -248,6 +264,8 @@ def main():
                         'sequence': source.sequence,
                         'captured_at': source.captured_at.isoformat(),
                         'captured_monotonic': source.captured_monotonic,
+                        'cameras': {ref.camera: ref.synchronization
+                                    for ref in source.frame_references},
                     },
                     'result_observation': None, 'timing': timing,
                 }
@@ -256,8 +274,9 @@ def main():
 
             def finish(self):
                 self.close()
-                return {'video_path': str(video_path.resolve()),
-                        'steps_path': str((out / 'steps.jsonl').resolve())}
+                artifacts = {'steps_path': str((out / 'steps.jsonl').resolve()),
+                             **self.camera_evidence.artifacts}
+                return artifacts
 
             def close(self):
                 try:
@@ -265,9 +284,8 @@ def main():
                         self.log.close()
                         self.log = None
                 finally:
-                    if self.writer is not None:
-                        self.writer.close()
-                        self.writer = None
+                    if self.camera_evidence is not None:
+                        self.camera_evidence.close()
 
         recorder = BaselineRecorder()
         reward_total = 0.0
@@ -287,7 +305,10 @@ def main():
                        success=outcome.success, sum_rewards=outcome.sum_rewards,
                        stop_reason=outcome.stop_reason,
                        rollout_seconds=outcome.rollout_seconds,
-                       cumulative_wait_seconds=outcome.cumulative_wait_seconds)
+                       cumulative_wait_seconds=outcome.cumulative_wait_seconds,
+                       video_path=outcome.artifacts.get('video_path'),
+                       wrist_video_path=outcome.artifacts.get('wrist_video_path'),
+                       frames_path=outcome.artifacts.get('frames_path'))
     except BaseException as exc:
         summary.update(status='interrupted' if isinstance(exc, KeyboardInterrupt) else 'error',
                        error=f'{type(exc).__name__}: {exc}')
@@ -300,6 +321,11 @@ def main():
         try:
             if recorder is not None:
                 recorder.close()
+            for key, path in (('video_path', video_path),
+                              ('wrist_video_path', wrist_video_path),
+                              ('frames_path', frames_path)):
+                if path.exists():
+                    summary[key] = str(path.resolve())
         finally:
             try:
                 if env is not None:
@@ -308,7 +334,7 @@ def main():
                 (out / 'result.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
                 print('Result:', out.resolve() / 'result.json', flush=True)
     print(f"Finished: success={summary['success']}, steps={summary['steps']}", flush=True)
-    print('Video:', video_path.resolve(), flush=True)
+    print('Videos:', summary['video_path'], summary['wrist_video_path'], flush=True)
 
 
 if __name__ == '__main__':

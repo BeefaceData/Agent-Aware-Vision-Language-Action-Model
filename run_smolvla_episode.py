@@ -31,6 +31,8 @@ from time import monotonic
 from camera_evidence import CameraEvidenceRecorder
 from episode_harness import (EpisodeConfig, ObservationPacket, StepResult,
                              frame_references_for_observation, run_episode)
+from robot_state_evidence import (LIBERO_STATE_SPECS,
+                                  state_fields_for_observation)
 
 
 def parse_args(argv=None):
@@ -157,6 +159,9 @@ def main():
                                          captured_monotonic,
                                          frame_references_for_observation(
                                              observation, self.sequence,
+                                             captured_at, captured_monotonic),
+                                         state_fields=state_fields_for_observation(
+                                             observation, LIBERO_STATE_SPECS,
                                              captured_at, captured_monotonic))
 
             def step(self, action):
@@ -171,6 +176,9 @@ def main():
                         captured_at, observation, captured_monotonic,
                         frame_references_for_observation(
                             observation, self.sequence,
+                            captured_at, captured_monotonic),
+                        state_fields=state_fields_for_observation(
+                            observation, LIBERO_STATE_SPECS,
                             captured_at, captured_monotonic)),
                     reward=float(reward[0]),
                     success=bool(np.asarray(success_info.get('is_success', [False])).reshape(-1)[0]),

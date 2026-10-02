@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 from episode_harness import (EpisodeConfig, IngestionOutcome, ObservationPacket,
                              RobotStateCapture, StepFailure, StepResult, ViewCapture,
                              frame_references_for_observation)
+from robot_state_evidence import StateSpec, state_fields_for_observation
 
 
 _CAPTURE_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -58,7 +59,8 @@ class ReplayEnvironment:
                  clock: Callable[[], float] = monotonic,
                  initial_camera_captures: Mapping[str, ViewCapture] | None = None,
                  max_camera_skew_seconds: float | None = None,
-                 initial_robot_state_capture: RobotStateCapture | None = None):
+                 initial_robot_state_capture: RobotStateCapture | None = None,
+                 state_specs: Sequence[StateSpec] = ()):
         self._seed = seed
         self._initial_observation = initial_observation
         self._turns = tuple(turns)
@@ -68,6 +70,7 @@ class ReplayEnvironment:
         self._initial_camera_captures = initial_camera_captures
         self._max_camera_skew_seconds = max_camera_skew_seconds
         self._initial_robot_state_capture = initial_robot_state_capture
+        self._state_specs = tuple(state_specs)
 
     def _packet(self, episode_id: str, sequence: int, captured_at: datetime,
                  observation: Any, captured_monotonic: float,
@@ -79,7 +82,11 @@ class ReplayEnvironment:
             if isinstance(observation, Mapping) else ())
         return ObservationPacket(episode_id, sequence, captured_at,
                                  observation, captured_monotonic, references,
-                                 robot_state_capture)
+                                 robot_state_capture,
+                                 state_fields_for_observation(
+                                     observation, self._state_specs, captured_at,
+                                     captured_monotonic)
+                                 if self._state_specs else ())
 
     def reset(self, seed: int, episode_id: str) -> ObservationPacket:
         if seed != self._seed:

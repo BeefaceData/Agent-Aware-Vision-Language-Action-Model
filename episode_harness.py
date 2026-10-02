@@ -39,6 +39,26 @@ class ObservationPacket:
     captured_monotonic: float | None = None
     frame_references: tuple[FrameReference, ...] = ()
     robot_state_capture: RobotStateCapture | None = None
+    state_fields: tuple[StateField, ...] = ()
+
+
+@dataclass(frozen=True)
+class StateField:
+    """Deployable state for one arm, timed at observation return unless verified.
+
+    A missing measurement has no value or timestamp. ``observation_return`` is
+    not a claim of sensor capture time or synchronized robot and camera clocks.
+    """
+
+    arm: str
+    name: str
+    frame: str
+    units: str
+    availability: Literal['available', 'missing']
+    value: tuple[float, ...] | None
+    captured_at: datetime | None
+    captured_monotonic: float | None
+    time_basis: Literal['observation_return'] | None
 
 
 @dataclass(frozen=True)

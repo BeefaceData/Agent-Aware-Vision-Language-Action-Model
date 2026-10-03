@@ -228,6 +228,40 @@ retains the source ID separately and preserves historical capture timestamps;
 its synthetic clock does not reproduce source inference latency or establish
 performance. This replays recorded decisions, not the original model's reasoning.
 
+### Recover execution progress after a process crash
+
+New CLI recordings also write `replay/execution.jsonl`. Each returned environment
+step is recorded with its proposed, selected and acknowledged action. The journal
+flushes and calls `os.fsync` after its header and every action, before writing the
+full observation or invoking downstream video/log sinks. Read a stopped recording:
+
+```powershell
+python execution_progress.py outputs/my_episode/replay/execution.jsonl
+```
+
+The same public API is `read_execution_progress(path)` in `execution_progress.py`.
+It checks record digests, ordering, chain links and acknowledgement semantics,
+retaining the valid prefix and reporting the first incomplete or invalid record
+with its line number. `valid_bytes` marks the end of that prefix; readback never
+repairs or overwrites evidence. Unsupported journal versions are rejected in the
+diagnostic. Missing files raise an I/O error; older bundles have no journal.
+
+The guarantee begins when the journal append returns after a successful disk sync,
+subject to the filesystem/device honoring that operation. A crash between an
+environment action and that sync can leave execution unknown. A returned adapter
+step acknowledges the call, not independently measured physical actuation.
+Rejected proposals and calls that never return are not counted as executed.
+Disk-sync failures propagate as recording failures rather than silently continuing.
+The abrupt-process-exit tests bypass cleanup and verify readback, including a torn
+final record; they do not simulate power loss or certify storage hardware.
+
+This separate journal is partial execution evidence, not a full observation trace,
+an episode-completion marker, or authority to resume robot execution. Even a clean
+EOF reports completion and later execution as unknown. Use the sealed replay
+manifest for completed-episode verification; its existing format is unchanged and
+does not include this auxiliary journal. Checksums detect damage, not malicious
+rewriting. Keep the journal with private episode evidence under the same access rules.
+
 To inspect the intervention timeline locally, generate a standalone HTML report
 and open the resulting file in a browser:
 

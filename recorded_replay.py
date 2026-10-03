@@ -18,6 +18,7 @@ from episode_harness import (
     supervisor_observation,
 )
 from replay_adapters import ReplayRecorder
+from execution_progress import ExecutionJournal
 
 
 class TraceError(ValueError):
@@ -78,6 +79,7 @@ class TraceRecorder:
         self._finished = False
         self._failed = False
         self._episode_id = None
+        self._journal = None
 
     def _write(self, name, value):
         self._files[name].write(_json(value) + '\n')
@@ -85,12 +87,18 @@ class TraceRecorder:
 
     def begin(self, observation):
         self._episode_id = observation.episode_id
+        self._journal = ExecutionJournal(self.directory / 'execution.jsonl',
+                                         self._episode_id, asdict(self.config))
         for name in ('observations.jsonl', 'decisions.jsonl'):
             self._files[name] = (self.directory / name).open('x', encoding='utf-8', newline='\n')
         self._write('observations.jsonl', asdict(observation))
         self.recorder.begin(observation)
 
     def record_step(self, step, source, action, result, ingestion):
+        # Preserve the acknowledgement before writing bulky observations or
+        # invoking video/other sinks, which can fail independently.
+        self._journal.acknowledge(step, source.episode_id, source.sequence,
+                                  _plain(asdict(result.action_record)))
         if not ingestion.accepted:
             self._failed = True
         self._write('observations.jsonl', asdict(result.observation))
@@ -121,7 +129,10 @@ class TraceRecorder:
             artifacts = dict(self.recorder.finish())
         except BaseException as exc:
             errors.append(exc)
-        for stream in self._files.values():
+        streams = list(self._files.values())
+        if self._journal is not None:
+            streams.append(self._journal)
+        for stream in streams:
             try:
                 stream.close()
             except BaseException as exc:

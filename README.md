@@ -464,6 +464,38 @@ Version-1 sealed bundles retain their existing outcome fields (`success` and
 fixtures need no rewriting. Public checks are in
 `tests/test_episode_termination.py` and `tests/test_episode_interruption.py`.
 
+### Recorded recovery request interface
+
+`supervisor_recovery.RecoveryRequestDecoder` decodes a JSON object into an
+immutable `SupervisorRecoveryRequest`. The caller supplies the allowed tool
+name and inclusive scalar `RecoveryParameter` bounds from trusted configuration;
+the response cannot supply code, definitions, limits or extra fields. For example:
+
+```python
+from supervisor_recovery import RecoveryParameter, RecoveryRequestDecoder
+
+# Synthetic interface example only; these are not calibrated robot limits.
+decoder = RecoveryRequestDecoder("reopen_and_retreat", (
+    RecoveryParameter("retreat_m", 0.0, 0.03),
+))
+request = decoder.decode(recorded_response, current_proposal)
+```
+
+The recorded JSON fixture is [recovery_response.json](tests/fixtures/recovery_response.json).
+It carries episode, observation, proposal and decision identities, the tool name,
+required numeric parameters and bounded evidence references. The decoder checks
+the current proposal identity and rejects nonfinite/out-of-range numbers, booleans,
+future/duplicate references and unknown fields. References identify observation
+sequences and named sources; their existence and diagnostic validity remain for
+the evidence resolver to establish.
+
+This interface returns data only. It neither executes a recovery nor establishes
+robot compatibility, calibration, eligibility or physical readiness. The current
+`run_episode` decision callback accepts only pass and abstention; returning a recovery
+request there fails before execution. Tool registry and execution integration are
+separate work. Run the public recorded-response and no-execution checks with
+`python -m unittest discover -s tests -p test_supervisor_recovery.py -v`.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

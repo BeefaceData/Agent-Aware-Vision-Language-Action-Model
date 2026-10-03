@@ -1,0 +1,11 @@
+{
+  "kind": "recovery",
+  "episode_id": "fixture-episode",
+  "observation_sequence": 2,
+  "proposal_id": "fixture-proposal",
+  "decision_id": "fixture-decision",
+  "tool_name": "reopen_and_retreat",
+  "parameters": {"retreat_m": 0.02},
+  "evidence": [{"observation_sequence": 1, "source": "main_camera"},
+               {"observation_sequence": 2, "source": "robot_state"}]
+}

@@ -216,11 +216,32 @@ contract. Free-text descriptions remain model claims, not evaluator truth.
 The shared decoder and harness validate the structure and category/decision
 consistency. The trace retains the diagnosis and sealed replay validates it.
 Legacy pass/abstention responses without a temporal diagnosis remain supported;
-absence is not synthesized into a progress assessment. Evidence references are
-currently structurally checked claims: resolving them against the active bounded
-window is tracked in #51, and contradiction/persistence gates in #52/#53.
-No active intervention eligibility or calibrated detector quality is established
-by this change.
+absence is not synthesized into a progress assessment.
+
+The chronological adapter returns a `WindowedSupervisorResponse` containing the
+model JSON and the detached observation window used for that request. This is
+adapter-owned context, never a field accepted from model JSON. The bounded
+provider's shared decoder resolves every temporal reference against that exact
+window, including references attached to an unknown assessment. References are
+episode-scoped by the response identity; the window and all its packets must
+belong to the current episode and end at the current observation. Evicted,
+missing, future, and foreign-episode evidence cannot support a diagnosis.
+Camera references require matching metadata and supplied pixels; state references
+require a supplied deployable measurement and matching capture identity when
+capture metadata is present. This checks existence, not the truth of a model's
+description or sensor freshness (which has its separate eligibility gate).
+
+Direct `SupervisorResponseDecoder.decode(response, proposal)` calls have only
+the current observation available. Callers that actually supply history can pass
+`window=builder.snapshot()` explicitly; a recorded model response cannot supply
+its own history. Unresolved references raise `SupervisorResponseError`. The
+bounded provider reports `rejected` with no decision, and the harness retains the
+reference index and reason in a finalized failed-attempt trace before terminating
+without executing that proposal. It does not fabricate an observation or silently
+replace a diagnosis. Failed attempts are retained but not sealed as successful
+replays. Existing correction request decoders still return request data only;
+resolving a diagnosis does not grant intervention authority. Contradiction and
+persistence gates remain in #52/#53; no calibrated detector quality is claimed.
 
 `tests/fixtures/temporal_diagnoses.json` contains synthetic responses for every
 category. Run `python -m unittest discover -s tests -p test_temporal_diagnosis.py -v`
@@ -228,3 +249,7 @@ for public decoding, malformed-field rejection, missing-evidence uncertainty and
 complete sealed episode checks through the mocked chronological VLM adapter.
 These offline examples are contract fixtures, not human-reviewed development
 labels or measured model performance.
+
+Run `python -m unittest discover -s tests -p test_diagnosis_evidence.py -v`
+for bounded-window resolution, absent sources, episode isolation and retained
+rejected-attempt checks.

@@ -1,7 +1,7 @@
 """Structural contract for observation-only temporal assessments.
 
 References are model claims, not verified observations or correction authority.
-Active-window reference resolution is a separate eligibility responsibility.
+The shared response decoder resolves references against caller-owned context.
 """
 
 CATEGORIES = ('progress', 'suspected_missed_grasp', 'suspected_lost_grasp',

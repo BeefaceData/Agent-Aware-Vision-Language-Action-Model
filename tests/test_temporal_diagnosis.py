@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from episode_harness import EpisodeConfig, SupervisorResponseError, run_episode
+from observation_window import ObservationWindowBuilder
 from recorded_replay import TraceRecorder, load_recorded_replay
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
 from supervisor_provider import BoundedSupervisorProvider
@@ -22,7 +23,11 @@ class TemporalDiagnosisTests(unittest.TestCase):
             with self.subTest(category=fixture['temporal_diagnosis']['category']):
                 response = deepcopy(fixture)
                 response['proposal_id'] = 'fixture:1'
-                result = SupervisorResponseDecoder().decode(response, proposal(1, 'fixture'))
+                history = ObservationWindowBuilder('fixture', 'place item')
+                for sequence in (0, 1):
+                    history.append(proposal(sequence, 'fixture').observation)
+                result = SupervisorResponseDecoder().decode(
+                    response, proposal(1, 'fixture'), window=history.snapshot())
                 self.assertEqual(result.temporal_diagnosis, fixture['temporal_diagnosis'])
                 response['temporal_diagnosis']['evidence'].clear()
                 self.assertEqual(len(result.temporal_diagnosis['evidence']), 2)

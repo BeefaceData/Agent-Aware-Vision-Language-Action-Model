@@ -14,6 +14,7 @@ from time import monotonic
 
 from observation_window import ObservationWindowBuilder, WindowSettings
 from model_usage import ModelReply
+from supervisor_response import WindowedSupervisorResponse
 
 
 @dataclass(frozen=True)
@@ -187,4 +188,4 @@ class ChronologicalVlmAdapter:
                 type(blocks[0].get('text')) is not str):
             raise ValueError('provider must return one structured text response')
         # The bounded provider applies the shared strict decision decoder next.
-        return json.loads(blocks[0]['text'])
+        return WindowedSupervisorResponse(json.loads(blocks[0]['text']), window)

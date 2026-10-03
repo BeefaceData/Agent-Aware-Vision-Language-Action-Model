@@ -588,6 +588,7 @@ class SupervisorPass:
     observation_sequence: int
     proposal_id: str
     temporal_diagnosis: dict | None = None
+    suppressed_correction: Literal['recovery', 'adjustment'] | None = None
     kind: Literal['pass'] = field(default='pass', init=False)
 
 
@@ -947,6 +948,9 @@ def run_episode(
                                 'supervisor response must reference the current proposal')
                         if not valid_temporal_diagnosis(response.temporal_diagnosis, response.kind):
                             raise SupervisorResponseError('invalid temporal diagnosis')
+                        if (type(response) is SupervisorPass and
+                                response.suppressed_correction not in (None, 'recovery', 'adjustment')):
+                            raise SupervisorResponseError('invalid suppressed correction kind')
                         if type(response) is SupervisorAbstention:
                             if (response.kind != 'abstain' or response.diagnosis != 'unknown' or
                                 not valid_abstention_details(response.reason,

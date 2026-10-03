@@ -15,6 +15,10 @@ calls. The caller must retain the review, outputs and original trace to reproduc
 the report. Report digests bind all three inputs; they do not authenticate a
 reviewer or prove that declared outputs came from the named configuration.
 
+For unchanged-policy episodes, the [observation-only workflow](observation-only.md)
+exports recorded temporal diagnoses directly into this evaluation format with a
+fixed event segmentation rule and no executed intervention events.
+
 ## Output record
 
 The evaluation JSON has exactly these fields:

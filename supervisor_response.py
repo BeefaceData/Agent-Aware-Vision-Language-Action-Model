@@ -1,7 +1,7 @@
 """Strict structured-response boundary shared by recorded/provider adapters."""
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from temporal_diagnosis import valid_temporal_diagnosis
 from observation_window import ObservationWindow
@@ -90,12 +90,18 @@ class SupervisorResponseDecoder:
     Errors contain schema reasons, never raw provider payloads. Recovery and
     adjustment results remain request data and cannot authorize execution.
     Pass/abstain results can be returned from run_episode's supervisor_decider.
+    With observation_only=True, configured valid correction requests become
+    unchanged-policy passes with a suppressed-kind marker. Temporal conflicts
+    still force abstention; malformed or stale responses remain errors.
     """
 
     recovery: RecoveryRequestDecoder | None = None
     adjustment: AdjustmentRequestDecoder | None = None
+    observation_only: bool = False
 
     def __post_init__(self):
+        if type(self.observation_only) is not bool:
+            raise ValueError('observation_only must be bool')
         if ((self.recovery is not None and type(self.recovery) is not RecoveryRequestDecoder) or
                 (self.adjustment is not None and
                  type(self.adjustment) is not AdjustmentRequestDecoder)):
@@ -130,6 +136,18 @@ class SupervisorResponseDecoder:
                     {key: value for key, value in response.items()
                      if key != 'temporal_diagnosis'}, proposal)
                 temporal = response.get('temporal_diagnosis')
+                if self.observation_only:
+                    # Validate diagnosis against the actual request window as usual.
+                    # No correction data can reach the action selection seam.
+                    assessment = self.decode({
+                        'kind': 'pass', 'episode_id': request.episode_id,
+                        'observation_sequence': request.observation_sequence,
+                        'proposal_id': request.proposal_id,
+                        'temporal_diagnosis': temporal,
+                    }, proposal, window=window)
+                    if type(assessment) is SupervisorPass:
+                        return replace(assessment, suppressed_correction=kind)
+                    return assessment
                 if temporal is not None:
                     if not valid_temporal_diagnosis(temporal, 'pass'):
                         raise SupervisorResponseError('invalid temporal diagnosis')

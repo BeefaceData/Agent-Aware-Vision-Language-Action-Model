@@ -16,7 +16,7 @@ from pathlib import Path
 
 from episode_harness import (
     ActionResolution, EpisodeConfig, FrameReference, ObservationIngestor,
-    ObservationPacket, RobotStateCapture, StepResult, run_episode,
+    ObservationPacket, RobotStateCapture, StepResult, StepTiming, run_episode,
     supervisor_observation, valid_abstention_details,
 )
 from replay_adapters import ReplayRecorder
@@ -108,6 +108,7 @@ class TraceRecorder:
             'step': step, 'source_episode_id': source.episode_id,
             'source_sequence': source.sequence,
             'action_record': asdict(result.action_record),
+            'timing': asdict(result.timing),
             'result': {key: getattr(result, key) for key in
                        ('reward', 'success', 'terminated', 'truncated')},
         })
@@ -242,7 +243,9 @@ def _load(directory, manifest):
             _require(type(response) is dict and
                      type(response.get('observation_sequence')) is int and
                      valid_temporal_diagnosis(response.get('temporal_diagnosis'), 'pass') and
-                     {k: v for k, v in response.items() if k != 'temporal_diagnosis'} ==
+                     response.get('suppressed_correction') in (None, 'recovery', 'adjustment') and
+                     {k: v for k, v in response.items()
+                      if k not in ('temporal_diagnosis', 'suppressed_correction')} ==
                      {'kind': 'pass', 'episode_id': episode_id,
                       'observation_sequence': index,
                       'proposal_id': record['proposal_id']} and
@@ -266,6 +269,10 @@ def _load(directory, manifest):
                      record['disposition'] == 'unmodified',
                      'invalid supervisor abstention evidence')
         result = row['result']
+        if 'timing' in row:
+            timing = StepTiming(**row['timing'])
+            _require(timing.capture_at == packets[index].captured_monotonic,
+                     'timing does not reference source capture')
         last = index == len(decisions) - 1
         if record['disposition'] == 'rejected':
             _require(last and result is None and bool(record['rejection_reason']) and

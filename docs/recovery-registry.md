@@ -62,3 +62,7 @@ python -m unittest discover -s tests -p test_recovery_registry.py -v
 It resolves an eligible synthetic contract, rejects incompatible robot/tool
 pairs and executable overrides, verifies per-tool bounds and immutable
 declarations, and establishes interface behavior only.
+
+Use the [executor parameter boundary](correction-validation.md) to revalidate
+wire or decoded correction requests against executor-owned limits for both
+recovery and adjustment modes.

@@ -579,6 +579,33 @@ class SupervisorPass:
 
 
 @dataclass(frozen=True)
+class SupervisorAbstention:
+    """Unknown diagnosis; continue the unchanged proposal while execution is healthy.
+
+    Evidence availability is the supervisor's reported assessment, not a sensor
+    verification or permission for a correction. Name each assessed input and
+    mark unassessed availability explicitly as unknown.
+    """
+
+    episode_id: str
+    observation_sequence: int
+    proposal_id: str
+    reason: str
+    evidence_availability: dict[str, Literal['available', 'missing', 'stale', 'unknown']]
+    kind: Literal['abstain'] = field(default='abstain', init=False)
+    diagnosis: Literal['unknown'] = field(default='unknown', init=False)
+
+
+def valid_abstention_details(reason, evidence_availability):
+    """Validate inspectable uncertainty evidence at execution and trace loading."""
+    return (type(reason) is str and bool(reason.strip()) and
+            type(evidence_availability) is dict and bool(evidence_availability) and
+            all(type(name) is str and bool(name.strip()) and
+                type(status) is str and status in ('available', 'missing', 'stale', 'unknown')
+                for name, status in evidence_availability.items()))
+
+
+@dataclass(frozen=True)
 class ActionResolution:
     """A deterministic execution choice; rejection does not call the environment."""
 
@@ -616,6 +643,7 @@ class ActionRecord:
     disposition: Literal['unmodified', 'overridden', 'rejected', 'unconfirmed']
     rejection_reason: str | None = None
     supervisor_pass: SupervisorPass | None = None
+    supervisor_abstention: SupervisorAbstention | None = None
 
 
 @dataclass(frozen=True)
@@ -752,7 +780,7 @@ def run_episode(
     action_selector: Callable[[ActionProposal], ActionResolution] | None = None,
     window_supervisor: Callable[[ObservationWindow, Any], None] | None = None,
     window_settings: WindowSettings | None = None,
-    supervisor_decider: Callable[[ActionProposal], SupervisorPass] | None = None,
+    supervisor_decider: Callable[[ActionProposal], SupervisorPass | SupervisorAbstention] | None = None,
 ) -> EpisodeOutcome:
     """Run one attempt and return task outcome and artifact finalization status.
 
@@ -781,9 +809,11 @@ def run_episode(
     actions, using ``window_settings`` (defaults to eight packets/eight actions).
     Both callbacks are observation-only and cannot be configured together.
     ``supervisor_decider`` instead receives a sanitized, detached ActionProposal
-    and must return a SupervisorPass matching its episode, observation and proposal.
+    and must return a SupervisorPass or SupervisorAbstention matching its episode,
+    observation and proposal. Abstention records uncertainty and continues the
+    unchanged baseline proposal; any execution/observation fault ends the attempt.
     It cannot be combined with other supervision or action selection callbacks.
-    A valid pass is retained in action evidence, including execution failures.
+    Accepted responses are retained in action evidence, including execution failures.
     """
     if type(config.max_steps) is not int or config.max_steps <= 0:
         raise ValueError('max_steps must be a positive integer')
@@ -849,6 +879,7 @@ def run_episode(
             proposed_action = deepcopy(action)
             proposal_id = f'{episode_id}:{step}'
             pass_response = None
+            abstention_response = None
             proposal_for_supervisor = (deepcopy(proposed_action)
                                        if supervisor is not None or window_supervisor is not None
                                        else None)
@@ -859,15 +890,23 @@ def run_episode(
                 supervisor_decider is not None):
                 try:
                     if supervisor_decider is not None:
-                        pass_response = supervisor_decider(ActionProposal(
+                        response = supervisor_decider(ActionProposal(
                             proposal_id, supervisor_observation(observation),
                             deepcopy(proposed_action)))
-                        if (type(pass_response) is not SupervisorPass or
-                            type(pass_response.observation_sequence) is not int or
-                            pass_response.episode_id != episode_id or
-                            pass_response.observation_sequence != observation.sequence or
-                            pass_response.proposal_id != proposal_id):
-                            raise ValueError('supervisor pass must reference the current proposal')
+                        if (type(response) not in (SupervisorPass, SupervisorAbstention) or
+                            type(response.observation_sequence) is not int or
+                            response.episode_id != episode_id or
+                            response.observation_sequence != observation.sequence or
+                            response.proposal_id != proposal_id):
+                            raise ValueError('supervisor response must reference the current proposal')
+                        if type(response) is SupervisorAbstention:
+                            if (response.kind != 'abstain' or response.diagnosis != 'unknown' or
+                                not valid_abstention_details(response.reason,
+                                                             response.evidence_availability)):
+                                raise ValueError('invalid supervisor abstention evidence')
+                            abstention_response = deepcopy(response)
+                        else:
+                            pass_response = response
                     elif window_supervisor is not None:
                         if history is None:
                             task = supervisor_observation(observation).observation.get('task')
@@ -948,7 +987,8 @@ def run_episode(
                         cumulative_wait),
                         ActionRecord(proposal_id, deepcopy(proposed_action),
                                      deepcopy(selected_action), None, None,
-                                     'unconfirmed', supervisor_pass=pass_response)))
+                                     'unconfirmed', supervisor_pass=pass_response,
+                                     supervisor_abstention=abstention_response)))
                 raise
             execution_finished_at = clock()
             timing = StepTiming(observation.captured_monotonic, request_at,
@@ -963,7 +1003,8 @@ def run_episode(
             result = replace(result, timing=timing, action_record=ActionRecord(
                 proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
                 deepcopy(selected_action), acknowledgement, disposition,
-                supervisor_pass=pass_response))
+                supervisor_pass=pass_response,
+                supervisor_abstention=abstention_response))
             acknowledged_actions.append(deepcopy(result.action_record))
             reward_sum += result.reward
             steps = step

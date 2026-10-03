@@ -15,7 +15,7 @@ from pathlib import Path
 from episode_harness import (
     ActionResolution, EpisodeConfig, FrameReference, ObservationIngestor,
     ObservationPacket, RobotStateCapture, StepResult, run_episode,
-    supervisor_observation,
+    supervisor_observation, valid_abstention_details,
 )
 from replay_adapters import ReplayRecorder
 from execution_progress import ExecutionJournal
@@ -244,6 +244,22 @@ def _load(directory, manifest):
                                   'proposal_id': record['proposal_id']} and
                      record['disposition'] == 'unmodified',
                      'invalid supervisor pass evidence')
+        abstention = record.get('supervisor_abstention')
+        if abstention is not None:
+            _require(type(abstention) is dict and response is None and
+                     set(abstention) == {'kind', 'diagnosis', 'episode_id',
+                                         'observation_sequence', 'proposal_id',
+                                         'reason', 'evidence_availability'} and
+                     abstention['kind'] == 'abstain' and
+                     abstention['diagnosis'] == 'unknown' and
+                     abstention['episode_id'] == episode_id and
+                     type(abstention['observation_sequence']) is int and
+                     abstention['observation_sequence'] == index and
+                     abstention['proposal_id'] == record['proposal_id'] and
+                     valid_abstention_details(abstention['reason'],
+                                              abstention['evidence_availability']) and
+                     record['disposition'] == 'unmodified',
+                     'invalid supervisor abstention evidence')
         result = row['result']
         last = index == len(decisions) - 1
         if record['disposition'] == 'rejected':

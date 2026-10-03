@@ -227,7 +227,33 @@ and recorded trace evidence, including when the subsequent environment call
 fails; acknowledgement still requires a returned step result. Baseline execution
 leaves this field `None`. Sealed replay validates and retains historical pass
 evidence; replay execution uses the recorded action choices without calling a
-supervisor model. This pass-only interface makes no active-correction claim.
+supervisor model. This interface makes no active-correction claim.
+
+For an uncertain diagnosis, return `SupervisorAbstention` through the same
+callback. It requires the same three identities, a nonempty `reason`, and a
+nonempty `evidence_availability` dictionary mapping assessed input names to
+`available`, `missing`, `stale`, or `unknown`. For example:
+
+```python
+from episode_harness import SupervisorAbstention
+
+def abstain_current(proposal):
+    return SupervisorAbstention(
+        proposal.observation.episode_id, proposal.observation.sequence,
+        proposal.proposal_id, 'Grasp is occluded; insufficient temporal evidence',
+        {'main': 'available', 'wrist': 'missing', 'history': 'unknown'},
+    )
+```
+
+Abstention records `kind='abstain'` and `diagnosis='unknown'` in the separate
+`ActionRecord.supervisor_abstention` field, with a detached snapshot of its reason
+and reported evidence availability. Availability is the supervisor's assessment,
+not independently verified sensor freshness. Abstention requests no correction:
+the declared healthy-baseline behavior executes the original proposal unchanged
+within the usual horizon and terminal checks. Execution or observation faults end
+the attempt; abstention does not retry or bypass those faults. Malformed responses
+are supervisor failures before execution, not valid abstentions. Sealed traces
+validate uncertainty evidence and retain it for inspection and model-free replay.
 
 For temporal supervision, pass `window_supervisor(window, proposed_action)` and
 optionally `window_settings=WindowSettings(max_observations=8, max_actions=8)`

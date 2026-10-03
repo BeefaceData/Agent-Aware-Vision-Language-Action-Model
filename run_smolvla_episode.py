@@ -319,6 +319,8 @@ def main():
                            artifact_status=partial.artifact_status,
                            success=partial.task_status == 'success')
             summary['artifact_diagnostics'].extend(partial.artifact_diagnostics)
+            if partial.pre_start_failure is not None:
+                summary['status'] = 'pre_start_failure'
         raise
     finally:
         summary['total_seconds'] = monotonic() - start

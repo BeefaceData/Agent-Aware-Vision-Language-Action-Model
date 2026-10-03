@@ -141,6 +141,27 @@ The script also prints progress and output paths to the terminal. It does not au
 
 `episode_harness.run_episode(EpisodeConfig(seed, max_steps), policy, environment, recorder)` runs one attempt and returns `EpisodeOutcome` with success, executed step count, stop reason, reward total, rollout time, cumulative supervisor wait, per-step timing, and artifact paths. The policy adapter supplies `reset()` and `act(observation)`; the environment adapter supplies `reset(seed, episode_id)` and `step(action)` returning a `StepResult`; the recorder supplies `begin(observation)`, `record_step(step, source, action, result, ingestion)`, `record_failure(step, source, action, failure)`, and `finish()` returning artifact references. The caller releases any adapter resources after completion or failure. The existing CLI supplies the LeRobot/LIBERO and file-recording adapters; the interface itself imports no simulator or model packages.
 
+Every call creates a fresh attempt identity, including calls that fail during
+reset. The harness calls `policy.reset()` first, then
+`environment.reset(seed, episode_id)`, and accepts only a valid sequence-zero
+observation for that new identity before starting recording or inference.
+Policy adapters must discard queued actions and other per-attempt state on
+reset; environment adapters must replace terminal state. The LIBERO adapter
+disables stepping before reset and enables it only after successful initial
+packet capture. A failed reset therefore cannot resume the previous attempt.
+
+Reset failures re-raise the original exception with an `episode_interruption`
+record containing `pre_start_failure`: the stage (`policy_reset`,
+`environment_reset`, or `initial_observation`), requested seed, and flags
+acknowledging which reset contracts returned. These failures have zero executed
+actions, no accepted observation, unknown task status and incomplete artifacts.
+The CLI persists this record in `result.json` under `partial_evidence` and uses
+`status: "pre_start_failure"`; its stop reason still distinguishes timeout,
+interruption and infrastructure failure. Recording never begins for an invalid
+initial packet. Retry by calling `run_episode` again, which resets both adapters
+and allocates another identity. Adapter implementations remain responsible for
+actually clearing their internal state; the harness cannot inspect hidden queues.
+
 `libero_adapter.LiberoEnvironmentAdapter` handles a single vector environment. On same-step automatic reset it selects the unbatched `final_observation` or `final_obs` envelope, restores the one-environment batch dimension, and copies the terminal payload before recording. The returned reset frame is discarded. Terminal evaluator information comes only from `final_info`; reset-episode success fields cannot determine the ending outcome. Missing or masked terminal evidence raises an error instead of producing a completed outcome. Next-step reset environments supply the terminal observation directly. Custom wrappers must expose one of these contracts; an undocumented reset cannot be detected from pixels alone.
 
 `EpisodeOutcome.terminal_observation` and the CLI's `result.json` contain the ending packet's `episode_id` and `sequence`, linking to `steps.jsonl` and `frames.jsonl`. This reference is set for success, termination, or truncation; it is null for a harness step limit or rejected proposal without an environment terminal signal. The adapter refuses further steps after termination until explicitly reset. Capture timestamps describe when the adapter receives the evidence, not camera exposure time.

@@ -70,11 +70,14 @@ class LiberoEnvironmentAdapter:
             frame_references_for_observation(observation, self.sequence, wall, captured))
 
     def reset(self, seed, episode_id):
+        # Invalidate the previous attempt even if reset or packet capture fails.
+        self.ended = True
         self.episode_id = episode_id
         self.sequence = 0
         observation, _ = self.environment.reset(seed=[seed])
+        packet = self._packet(observation)
         self.ended = False
-        return self._packet(observation)
+        return packet
 
     def step(self, action):
         import numpy as np

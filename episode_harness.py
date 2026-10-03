@@ -655,6 +655,20 @@ def exception_stop_reason(error: BaseException) -> str:
 
 
 @dataclass(frozen=True)
+class PreStartFailure:
+    """Reset/initial-observation failure before an episode can start.
+
+    Completion flags acknowledge contract returns, not a verified simulator
+    state. A failed reset must be retried through a new run_episode call.
+    """
+
+    stage: Literal['policy_reset', 'environment_reset', 'initial_observation']
+    seed: int
+    policy_reset_completed: bool
+    environment_reset_completed: bool
+
+
+@dataclass(frozen=True)
 class EpisodeInterruption:
     """Partial evaluator evidence attached to the original raised exception.
 
@@ -672,15 +686,22 @@ class EpisodeInterruption:
     artifact_diagnostics: tuple[str, ...]
     task_status: str = 'unknown'
     artifact_status: str = 'incomplete'
+    pre_start_failure: PreStartFailure | None = None
 
 
 class PolicyAdapter(Protocol):
+    """Reset must discard queued actions and all per-attempt policy state."""
+
     def reset(self) -> None: ...
     def act(self, observation: ObservationPacket) -> Any: ...
 
 
 class EnvironmentAdapter(Protocol):
-    """A returned StepResult acknowledges completion of the adapter step call."""
+    """Reset replaces terminal state and returns sequence zero for the new ID.
+
+    A failed reset must disable stepping until a successful reset. A returned
+    StepResult acknowledges completion of the adapter step call.
+    """
 
     def reset(self, seed: int, episode_id: str) -> ObservationPacket: ...
     def step(self, action: Any) -> StepResult: ...
@@ -759,6 +780,9 @@ def run_episode(
     steps = 0
     interruption_diagnostics = []
     task_status = 'unknown'
+    startup_stage = 'policy_reset'
+    policy_reset_completed = False
+    environment_reset_completed = False
 
     def record_failure(*args):
         try:
@@ -769,11 +793,16 @@ def run_episode(
 
     try:
         policy.reset()
+        policy_reset_completed = True
+        startup_stage = 'environment_reset'
         observation = environment.reset(config.seed, episode_id)
+        environment_reset_completed = True
+        startup_stage = 'initial_observation'
         initial_ingestion = ingestor.ingest(observation, clock())
         if not initial_ingestion.accepted:
             raise ObservationRejected(initial_ingestion)
         last_observation = deepcopy(observation)
+        startup_stage = None
         recorder_started = True
         recorder.begin(observation)
         rollout_start = clock()
@@ -930,7 +959,10 @@ def run_episode(
         exc.episode_interruption = EpisodeInterruption(
             episode_id, exception_stop_reason(exc),
             type(exc).__name__, steps, reward_sum, last_observation,
-            tuple(acknowledged_actions), tuple(interruption_diagnostics), task_status)
+            tuple(acknowledged_actions), tuple(interruption_diagnostics), task_status,
+            pre_start_failure=(PreStartFailure(
+                startup_stage, config.seed, policy_reset_completed,
+                environment_reset_completed) if startup_stage is not None else None))
         raise
 
     rollout_seconds = clock() - rollout_start

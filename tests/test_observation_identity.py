@@ -113,7 +113,7 @@ class ObservationEpisodeTests(unittest.TestCase):
                 self.assertEqual(fixture.recorder.steps[0][1],
                                  fixture.policy.observations[0])
                 self.assertEqual(fixture.recorder.steps[0][4].code, diagnostic)
-                self.assertFalse(fixture.recorder.finalized)
+                self.assertTrue(fixture.recorder.finalized)
 
 
 if __name__ == '__main__':

@@ -172,7 +172,7 @@ class ObservationWindowTests(unittest.TestCase):
         self.assertEqual(environment.actions, [])
         self.assertEqual(recorder.failures[0][3].stage, 'supervisor')
         self.assertEqual(recorder.failures[0][3].timing.cumulative_wait_seconds, 2.0)
-        self.assertFalse(recorder.finalized)
+        self.assertTrue(recorder.finalized)
 
 
 if __name__ == '__main__':

@@ -114,7 +114,7 @@ class TerminalObservationTests(unittest.TestCase):
                     run_episode(EpisodeConfig(0, 3), Policy(),
                                 LiberoEnvironmentAdapter(wrapper), recorder)
                 self.assertEqual(len(recorder.observations), 1)
-                self.assertFalse(recorder.finalized)
+                self.assertTrue(recorder.finalized)
                 self.assertEqual(len(recorder.failures), 1)
 
     def test_reset_info_cannot_supply_terminal_success(self):

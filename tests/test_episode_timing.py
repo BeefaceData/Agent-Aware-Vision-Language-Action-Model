@@ -36,7 +36,7 @@ class EpisodeTimingTests(unittest.TestCase):
         self.assertEqual(len(fixture.recorder.steps), 1)
         self.assertEqual(fixture.recorder.steps[0][3].timing.cumulative_wait_seconds,
                          3.0)
-        self.assertFalse(fixture.recorder.finalized)
+        self.assertTrue(fixture.recorder.finalized)
         self.assertEqual(len(fixture.recorder.failures), 1)
         step, source, action, failure = fixture.recorder.failures[0]
         self.assertEqual((step, source.sequence, action, failure.stage,
@@ -78,7 +78,7 @@ class EpisodeTimingTests(unittest.TestCase):
         self.assertEqual(fixture.environment.actions, [('reach', 0.25)])
         self.assertEqual(attempted_actions, [('place', 0.75)])
         self.assertEqual(len(fixture.recorder.steps), 1)
-        self.assertFalse(fixture.recorder.finalized)
+        self.assertTrue(fixture.recorder.finalized)
         self.assertEqual(len(fixture.recorder.failures), 1)
         step, source, action, failure = fixture.recorder.failures[0]
         self.assertEqual((step, source.sequence, action, failure.stage,

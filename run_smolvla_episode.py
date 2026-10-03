@@ -34,6 +34,15 @@ from libero_adapter import LiberoEnvironmentAdapter
 from episode_harness import EpisodeConfig, run_episode
 
 
+def evidence_json(value):
+    """Encode retained timestamps and native array evidence without repr fallback."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, 'tolist'):
+        return value.tolist()
+    raise TypeError(f'Unsupported evidence type: {type(value).__name__}')
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -281,8 +290,16 @@ def main():
                        wrist_video_path=outcome.artifacts.get('wrist_video_path'),
                        frames_path=outcome.artifacts.get('frames_path'))
     except BaseException as exc:
-        summary.update(status='interrupted' if isinstance(exc, KeyboardInterrupt) else 'error',
-                       error=f'{type(exc).__name__}: {exc}')
+        summary.update(status='interrupted' if not isinstance(exc, Exception) else 'error',
+                       error=f'{type(exc).__name__}: {exc}',
+                       error_type=type(exc).__name__,
+                       stop_reason='interrupted' if not isinstance(exc, Exception) else 'error')
+        partial = getattr(exc, 'episode_interruption', None)
+        if partial is not None:
+            summary.update(episode_id=partial.episode_id, steps=partial.steps,
+                           sum_rewards=partial.sum_rewards,
+                           partial_evidence=asdict(partial))
+            summary['artifact_diagnostics'].extend(partial.artifact_diagnostics)
         raise
     finally:
         summary['total_seconds'] = monotonic() - start
@@ -293,7 +310,7 @@ def main():
             if recorder is not None:
                 try:
                     recorder.close()
-                except Exception as exc:
+                except BaseException as exc:
                     diagnostic = f'{type(exc).__name__}: {exc}'
                     if diagnostic not in summary['artifact_diagnostics']:
                         summary['artifact_diagnostics'].append(diagnostic)
@@ -308,9 +325,16 @@ def main():
         finally:
             try:
                 if env is not None:
-                    env.close()
+                    try:
+                        env.close()
+                    except BaseException as cleanup_error:
+                        summary['artifact_diagnostics'].append(
+                            f'{type(cleanup_error).__name__}: {cleanup_error}')
+                        summary['artifact_status'] = 'incomplete'
+                        if summary['status'] == 'completed':
+                            summary['status'] = 'error'
             finally:
-                (out / 'result.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+                (out / 'result.json').write_text(json.dumps(summary, indent=2, default=evidence_json), encoding='utf-8')
                 print('Result:', out.resolve() / 'result.json', flush=True)
     if summary['artifact_status'] != 'completed':
         raise RuntimeError('Episode artifacts incomplete; see result.json diagnostics')

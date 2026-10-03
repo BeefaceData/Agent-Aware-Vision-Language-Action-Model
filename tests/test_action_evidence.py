@@ -117,7 +117,7 @@ class ActionEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.disposition, 'unconfirmed')
         self.assertIsNone(evidence.executed_action)
         self.assertIsNone(evidence.execution_acknowledgement)
-        self.assertFalse(fixture.recorder.finalized)
+        self.assertTrue(fixture.recorder.finalized)
 
     def test_rejected_selection_wait_is_accounted_without_execution(self):
         class Clock:

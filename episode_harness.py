@@ -640,6 +640,24 @@ class EpisodeOutcome:
     artifact_diagnostics: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class EpisodeInterruption:
+    """Partial evaluator evidence attached to the original raised exception.
+
+    Acknowledgements confirm adapter returns, not independent physical actuation.
+    This is never a completed episode, even when evidence cleanup succeeds.
+    """
+
+    episode_id: str
+    stop_reason: str
+    error_type: str
+    steps: int
+    sum_rewards: float
+    last_observation: ObservationPacket | None
+    acknowledged_actions: tuple[ActionRecord, ...]
+    artifact_diagnostics: tuple[str, ...]
+
+
 class PolicyAdapter(Protocol):
     def reset(self) -> None: ...
     def act(self, observation: ObservationPacket) -> Any: ...
@@ -686,7 +704,9 @@ def run_episode(
     diagnostics without erasing task success, failure or terminal identity.
     Rejected result packets and failed calls are recorded
     before raising; failures do not produce a completed outcome.
-    The caller releases adapter resources on any exception. ``clock`` must be
+    On failure, recorder finalization is attempted and the original exception is
+    re-raised with ``episode_interruption`` containing detached partial evidence.
+    Cleanup errors never replace that exception. The caller releases adapters. ``clock`` must be
     monotonic and share a timebase with each packet's ``captured_monotonic``.
     ``supervisor`` observes an allowlisted packet and a copy of the proposed action before
     execution; it has no execution authority here. ``action_selector`` is an
@@ -716,146 +736,179 @@ def run_episode(
 
     episode_id = uuid4().hex
     ingestor = ObservationIngestor(episode_id)
-    policy.reset()
-    observation = environment.reset(config.seed, episode_id)
-    initial_ingestion = ingestor.ingest(observation, clock())
-    if not initial_ingestion.accepted:
-        raise ObservationRejected(initial_ingestion)
-    recorder.begin(observation)
-    rollout_start = clock()
+    last_observation = None
+    acknowledged_actions = []
+    recorder_started = False
     reward_sum = 0.0
-    stop_reason = 'step_limit'
-    success = False
     steps = 0
-    cumulative_wait = 0.0
-    step_timings: list[StepTiming] = []
-    terminal_observation = None
+    interruption_diagnostics = []
 
-    for step in range(1, config.max_steps + 1):
-        action = policy.act(observation)
-        proposed_action = deepcopy(action)
-        proposal_id = f'{episode_id}:{step}'
-        proposal_for_supervisor = (deepcopy(proposed_action)
-                                   if supervisor is not None or window_supervisor is not None
-                                   else None)
-        request_at = clock()
-        if observation.captured_monotonic > request_at:
-            raise ValueError('observation capture is in the future of the episode clock')
-        if supervisor is not None or window_supervisor is not None:
-            try:
-                if window_supervisor is not None:
-                    if history is None:
-                        task = supervisor_observation(observation).observation.get('task')
-                        history = ObservationWindowBuilder(episode_id, task, settings)
-                    history.append(observation)
-                    window_supervisor(history.snapshot(), proposal_for_supervisor)
-                else:
-                    supervisor(supervisor_observation(observation), proposal_for_supervisor)
-            except BaseException as exc:
-                request_finished_at = clock()
-                cumulative_wait += request_finished_at - request_at
-                recorder.record_failure(
-                    step, observation, deepcopy(proposed_action),
-                    StepFailure('supervisor', type(exc).__name__, FailedStepTiming(
-                        observation.captured_monotonic, request_at,
-                        request_finished_at, None, None, None, cumulative_wait),
-                        ActionRecord(proposal_id, deepcopy(proposed_action), None,
-                                     None, None, 'unconfirmed')))
-                raise
-            response_at = clock()
-        else:
-            response_at = request_at
-        cumulative_wait += response_at - request_at
-        if action_selector is None:
-            resolution = ActionResolution('pass')
-        else:
-            try:
-                resolution = action_selector(ActionProposal(
-                    proposal_id, observation, deepcopy(proposed_action)))
-                if not isinstance(resolution, ActionResolution) or resolution.kind not in (
-                    'pass', 'override', 'reject'
-                ) or (resolution.kind == 'reject' and not resolution.reason) or (
-                    resolution.kind != 'reject' and resolution.reason is not None
-                ) or (resolution.kind != 'override' and resolution.action is not None):
-                    raise ValueError('invalid action resolution')
-            except BaseException as exc:
+    def record_failure(*args):
+        try:
+            recorder.record_failure(*args)
+        except BaseException as recording_error:
+            interruption_diagnostics.append(
+                f'{type(recording_error).__name__}: {recording_error}')
+
+    try:
+        policy.reset()
+        observation = environment.reset(config.seed, episode_id)
+        initial_ingestion = ingestor.ingest(observation, clock())
+        if not initial_ingestion.accepted:
+            raise ObservationRejected(initial_ingestion)
+        last_observation = deepcopy(observation)
+        recorder_started = True
+        recorder.begin(observation)
+        rollout_start = clock()
+        reward_sum = 0.0
+        stop_reason = 'step_limit'
+        success = False
+        steps = 0
+        cumulative_wait = 0.0
+        step_timings: list[StepTiming] = []
+        terminal_observation = None
+
+        for step in range(1, config.max_steps + 1):
+            action = policy.act(observation)
+            proposed_action = deepcopy(action)
+            proposal_id = f'{episode_id}:{step}'
+            proposal_for_supervisor = (deepcopy(proposed_action)
+                                       if supervisor is not None or window_supervisor is not None
+                                       else None)
+            request_at = clock()
+            if observation.captured_monotonic > request_at:
+                raise ValueError('observation capture is in the future of the episode clock')
+            if supervisor is not None or window_supervisor is not None:
+                try:
+                    if window_supervisor is not None:
+                        if history is None:
+                            task = supervisor_observation(observation).observation.get('task')
+                            history = ObservationWindowBuilder(episode_id, task, settings)
+                        history.append(observation)
+                        window_supervisor(history.snapshot(), proposal_for_supervisor)
+                    else:
+                        supervisor(supervisor_observation(observation), proposal_for_supervisor)
+                except BaseException as exc:
+                    request_finished_at = clock()
+                    cumulative_wait += request_finished_at - request_at
+                    record_failure(
+                        step, observation, deepcopy(proposed_action),
+                        StepFailure('supervisor', type(exc).__name__, FailedStepTiming(
+                            observation.captured_monotonic, request_at,
+                            request_finished_at, None, None, None, cumulative_wait),
+                            ActionRecord(proposal_id, deepcopy(proposed_action), None,
+                                         None, None, 'unconfirmed')))
+                    raise
+                response_at = clock()
+            else:
+                response_at = request_at
+            cumulative_wait += response_at - request_at
+            if action_selector is None:
+                resolution = ActionResolution('pass')
+            else:
+                try:
+                    resolution = action_selector(ActionProposal(
+                        proposal_id, observation, deepcopy(proposed_action)))
+                    if not isinstance(resolution, ActionResolution) or resolution.kind not in (
+                        'pass', 'override', 'reject'
+                    ) or (resolution.kind == 'reject' and not resolution.reason) or (
+                        resolution.kind != 'reject' and resolution.reason is not None
+                    ) or (resolution.kind != 'override' and resolution.action is not None):
+                        raise ValueError('invalid action resolution')
+                except BaseException as exc:
+                    selection_finished_at = clock()
+                    cumulative_wait += selection_finished_at - response_at
+                    record_failure(
+                        step, observation, deepcopy(proposed_action),
+                        StepFailure('selection', type(exc).__name__, FailedStepTiming(
+                            observation.captured_monotonic, request_at,
+                            selection_finished_at, selection_finished_at,
+                            None, None, cumulative_wait),
+                            ActionRecord(proposal_id, deepcopy(proposed_action), None,
+                                         None, None, 'unconfirmed')))
+                    raise
                 selection_finished_at = clock()
                 cumulative_wait += selection_finished_at - response_at
+                response_at = selection_finished_at
+            if resolution.kind == 'reject':
                 recorder.record_failure(
                     step, observation, deepcopy(proposed_action),
-                    StepFailure('selection', type(exc).__name__, FailedStepTiming(
-                        observation.captured_monotonic, request_at,
-                        selection_finished_at, selection_finished_at,
-                        None, None, cumulative_wait),
+                    StepFailure('selection', 'ProposalRejected', FailedStepTiming(
+                        observation.captured_monotonic, request_at, response_at,
+                        response_at, None, None, cumulative_wait),
                         ActionRecord(proposal_id, deepcopy(proposed_action), None,
-                                     None, None, 'unconfirmed')))
+                                     None, None, 'rejected', resolution.reason)))
+                stop_reason = 'proposal_rejected'
+                break
+            selected_action = deepcopy(proposed_action if resolution.kind == 'pass'
+                                       else resolution.action)
+            disposition = 'unmodified' if resolution.kind == 'pass' else 'overridden'
+            execution_started_at = clock()
+            try:
+                result = environment.step(deepcopy(selected_action))
+            except BaseException as exc:
+                execution_finished_at = clock()
+                record_failure(
+                    step, observation, deepcopy(proposed_action),
+                    StepFailure('execution', type(exc).__name__, FailedStepTiming(
+                        observation.captured_monotonic, request_at, response_at,
+                        response_at, execution_started_at, execution_finished_at,
+                        cumulative_wait),
+                        ActionRecord(proposal_id, deepcopy(proposed_action),
+                                     deepcopy(selected_action), None, None,
+                                     'unconfirmed')))
                 raise
-            selection_finished_at = clock()
-            cumulative_wait += selection_finished_at - response_at
-            response_at = selection_finished_at
-        if resolution.kind == 'reject':
-            recorder.record_failure(
-                step, observation, deepcopy(proposed_action),
-                StepFailure('selection', 'ProposalRejected', FailedStepTiming(
-                    observation.captured_monotonic, request_at, response_at,
-                    response_at, None, None, cumulative_wait),
-                    ActionRecord(proposal_id, deepcopy(proposed_action), None,
-                                 None, None, 'rejected', resolution.reason)))
-            stop_reason = 'proposal_rejected'
-            break
-        selected_action = deepcopy(proposed_action if resolution.kind == 'pass'
-                                   else resolution.action)
-        disposition = 'unmodified' if resolution.kind == 'pass' else 'overridden'
-        execution_started_at = clock()
-        try:
-            result = environment.step(deepcopy(selected_action))
-        except BaseException as exc:
             execution_finished_at = clock()
-            recorder.record_failure(
-                step, observation, deepcopy(proposed_action),
-                StepFailure('execution', type(exc).__name__, FailedStepTiming(
-                    observation.captured_monotonic, request_at, response_at,
-                    response_at, execution_started_at, execution_finished_at,
-                    cumulative_wait),
-                    ActionRecord(proposal_id, deepcopy(proposed_action),
-                                 deepcopy(selected_action), None, None,
-                                 'unconfirmed')))
-            raise
-        execution_finished_at = clock()
-        timing = StepTiming(observation.captured_monotonic, request_at,
-                            response_at, execution_started_at,
-                            execution_finished_at, cumulative_wait)
-        acknowledgement = ExecutionAcknowledgement(
-            proposal_id,
-            result.observation.episode_id if isinstance(result.observation,
-                                                        ObservationPacket) else None,
-            result.observation.sequence if isinstance(result.observation,
-                                                      ObservationPacket) else None)
-        result = replace(result, timing=timing, action_record=ActionRecord(
-            proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
-            deepcopy(selected_action), acknowledgement, disposition))
-        step_timings.append(timing)
-        ingestion = ingestor.ingest(result.observation, execution_finished_at)
-        recorder.record_step(step, observation, deepcopy(selected_action), result,
-                             ingestion)
-        if not ingestion.accepted:
-            raise ObservationRejected(ingestion)
-        if history is not None:
-            history.record_action(WindowAction(
-                observation.sequence, proposal_id, proposed_action,
-                selected_action, execution_finished_at))
-        reward_sum += result.reward
-        steps = step
-        success = result.success
-        if on_step is not None:
-            on_step(step, result)
-        if success or result.terminated or result.truncated:
-            terminal_observation = ObservationReference(
-                result.observation.episode_id, result.observation.sequence)
-            stop_reason = ('success' if success else
-                           'terminated' if result.terminated else 'truncated')
-            break
-        observation = result.observation
+            timing = StepTiming(observation.captured_monotonic, request_at,
+                                response_at, execution_started_at,
+                                execution_finished_at, cumulative_wait)
+            acknowledgement = ExecutionAcknowledgement(
+                proposal_id,
+                result.observation.episode_id if isinstance(result.observation,
+                                                            ObservationPacket) else None,
+                result.observation.sequence if isinstance(result.observation,
+                                                          ObservationPacket) else None)
+            result = replace(result, timing=timing, action_record=ActionRecord(
+                proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
+                deepcopy(selected_action), acknowledgement, disposition))
+            acknowledged_actions.append(deepcopy(result.action_record))
+            reward_sum += result.reward
+            steps = step
+            step_timings.append(timing)
+            ingestion = ingestor.ingest(result.observation, execution_finished_at)
+            if ingestion.accepted:
+                last_observation = deepcopy(result.observation)
+            recorder.record_step(step, observation, deepcopy(selected_action), result,
+                                 ingestion)
+            if not ingestion.accepted:
+                raise ObservationRejected(ingestion)
+            if history is not None:
+                history.record_action(WindowAction(
+                    observation.sequence, proposal_id, proposed_action,
+                    selected_action, execution_finished_at))
+            success = result.success
+            if on_step is not None:
+                on_step(step, result)
+            if success or result.terminated or result.truncated:
+                terminal_observation = ObservationReference(
+                    result.observation.episode_id, result.observation.sequence)
+                stop_reason = ('success' if success else
+                               'terminated' if result.terminated else 'truncated')
+                break
+            observation = result.observation
+
+    except BaseException as exc:
+        if recorder_started:
+            try:
+                recorder.finish()
+            except BaseException as cleanup_error:
+                interruption_diagnostics.append(
+                    f'{type(cleanup_error).__name__}: {cleanup_error}')
+        exc.episode_interruption = EpisodeInterruption(
+            episode_id, 'interrupted' if not isinstance(exc, Exception) else 'error',
+            type(exc).__name__, steps, reward_sum, last_observation,
+            tuple(acknowledged_actions), tuple(interruption_diagnostics))
+        raise
 
     rollout_seconds = clock() - rollout_start
     artifacts = {}

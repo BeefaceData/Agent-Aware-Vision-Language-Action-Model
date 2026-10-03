@@ -57,7 +57,7 @@ class SuccessfulReplayTests(unittest.TestCase):
                         fixture.recorder)
 
         self.assertEqual(fixture.environment.actions, [('retreat', 0.25)])
-        self.assertFalse(fixture.recorder.finalized)
+        self.assertTrue(fixture.recorder.finalized)
 
 
 if __name__ == '__main__':

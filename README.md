@@ -184,6 +184,19 @@ assert outcome.success and fixture.environment.actions == [
 
 Each fixture starts a scripted attempt; its in-memory recorder returns no artifact paths. The replay outcome verifies software behavior, not physical or LIBERO task performance.
 
+Interrupted attempts re-raise the original exception with an
+`episode_interruption` (`EpisodeInterruption`) record. It retains the episode ID,
+termination reason (`interrupted` for cancellation, `error` for ordinary exceptions),
+exception category, acknowledged action count and records, reward sum, and a detached
+copy of the last accepted observation. A command whose environment call raises is
+not acknowledged. Recorder finalization is attempted on failure; recording and
+cleanup diagnostics cannot replace the initiating exception. Successful cleanup
+does not make the interrupted attempt a completed episode. The CLI saves this
+partial evidence in `result.json`, including native actions and observation data;
+these are raw evaluator artifacts, not supervisor inputs or a shareable report.
+The caller still owns environment/policy teardown. This covers caught exceptions
+and cancellation, not process kill, power loss, or incremental crash durability.
+
 Task outcome and evidence completion are independent. `EpisodeOutcome.artifact_status`
 is `completed` only after the recorder's `finish()` returns successfully; an ordinary
 finalization exception returns `incomplete`, empty finalized artifact references and

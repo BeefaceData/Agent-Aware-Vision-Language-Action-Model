@@ -159,7 +159,7 @@ class EpisodeHarnessTests(unittest.TestCase):
                          ['initial observation'])
         self.assertEqual(len(recorder.failures), 1)
         self.assertEqual(recorder.failures[0][3].stage, 'execution')
-        self.assertFalse(recorder.finalized)
+        self.assertTrue(recorder.finalized)
 
 
 class BaselineCliTests(unittest.TestCase):

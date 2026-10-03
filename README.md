@@ -138,6 +138,37 @@ LIBERO camera references use `pixels.image` (main) and `pixels.image2` (wrist). 
 
 `supervisor_observation(packet)` constructs a detached supervisor packet and is always applied by `run_episode` before the supervisor callback. Its allowlist includes a string `task`, numeric `pixels.image`/`image2`, and numeric robot measurements: `position`, `orientation`, `joint_positions`, `joint_velocities`, `eef.pos`/`quat`, and `gripper.qpos`/`qvel`/`closed`. Numeric arrays become plain lists; invalid measurement payloads become unavailable (`None`). Unknown fields and nested metadata are omitted, including simulator object poses, rewards, and success predicates. Identity, capture times, and typed camera/state references remain available for freshness checks. Adapters must explicitly map additional deployable sensors to this contract; arbitrary raw observations are not supervisor inputs. The policy and recorder retain the original packet, and evaluator-only `StepResult` fields still control scoring and termination. This boundary trusts adapters to provide actual camera/state measurements and the declared task instruction; it cannot detect truth deliberately encoded as pixels or mislabeled measurements.
 
+For temporal supervision, pass `window_supervisor(window, proposed_action)` and
+optionally `window_settings=WindowSettings(max_observations=8, max_actions=8)`
+from `observation_window` to `run_episode`. Choose either this callback or the
+single-packet `supervisor`. Both are observation-only and share the same wait and
+failure accounting. The temporal callback requires a nonempty string `task` in
+the initial observation; subsequent missing task fields retain that instruction,
+and a changed instruction is rejected.
+
+`ObservationWindow.observations` contains the most recent N allowlisted packets,
+oldest first by sequence, with at most 2*N camera payloads and N robot-state
+samples. Capture times and missing/stale view references remain attached; views
+are never filled from other observations. `actions` independently retains the
+most recent M acknowledged executions with their source sequence, proposal ID,
+proposed and executed values, and execution completion time. The current proposal
+is supplied separately; neither unconfirmed actions nor evaluator outcomes enter
+the history. M may be zero. Limits bound sample counts, not image bytes or model
+tokens; image resizing and provider budgets belong to the consuming adapter.
+
+Each window declares its settings and ordering. `omitted_prefix` is the inclusive
+sequence range before the oldest retained packet, whether unavailable or evicted;
+`missing_intervals` identifies gaps between retained packets, and
+`omitted_action_count` counts acknowledged actions evicted by the action limit.
+The public `ObservationWindowBuilder(episode_id, task, settings)` supports offline
+history through `append(packet)`, `record_action(WindowAction(...))`, and
+`snapshot()`. It accepts forward sequence gaps explicitly but rejects duplicates,
+reversed sequences, regressing timestamps, and foreign episodes without changing
+the history. The live harness retains its stricter contiguous-stream requirement.
+Builder inputs and returned snapshots are detached, and each episode gets a new
+builder. These windows provide evidence; they do not establish detector readiness
+or measured task improvement.
+
 For a synthetic successful replay without a model, simulator, or files, call the same interface with the public fixture:
 
 ```python

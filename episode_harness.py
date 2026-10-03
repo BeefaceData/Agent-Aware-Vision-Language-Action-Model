@@ -13,8 +13,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from math import isfinite
 from time import monotonic
-from typing import Any, Callable, Literal, Mapping, Protocol
+from typing import Any, Callable, Literal, Mapping, Protocol, TYPE_CHECKING
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from observation_window import ObservationWindow, WindowSettings
 
 
 @dataclass(frozen=True)
@@ -668,6 +671,8 @@ def run_episode(
     supervisor: Callable[[ObservationPacket, Any], None] | None = None,
     clock: Callable[[], float] = monotonic,
     action_selector: Callable[[ActionProposal], ActionResolution] | None = None,
+    window_supervisor: Callable[[ObservationWindow, Any], None] | None = None,
+    window_settings: WindowSettings | None = None,
 ) -> EpisodeOutcome:
     """Run one attempt and return its outcome after artifacts are finalized.
 
@@ -687,9 +692,23 @@ def run_episode(
     ends the attempt without an environment call. Supervisor and selector wait is
     measured. Overrides must come from a separately validated executor.
     Policy inference, recorder and ``on_step`` time are excluded from that wait.
+    ``window_supervisor(window, proposed_action)`` is the temporal alternative to
+    ``supervisor``. It receives bounded sanitized history and acknowledged prior
+    actions, using ``window_settings`` (defaults to eight packets/eight actions).
+    Both callbacks are observation-only and cannot be configured together.
     """
     if config.max_steps <= 0:
         raise ValueError('max_steps must be positive')
+    if supervisor is not None and window_supervisor is not None:
+        raise ValueError('choose one supervisor callback')
+    if window_settings is not None and window_supervisor is None:
+        raise ValueError('window_settings requires window_supervisor')
+
+    from observation_window import ObservationWindowBuilder, WindowAction, WindowSettings
+    settings = window_settings if window_settings is not None else WindowSettings()
+    if not isinstance(settings, WindowSettings):
+        raise ValueError('WindowSettings required')
+    history = None
 
     episode_id = uuid4().hex
     ingestor = ObservationIngestor(episode_id)
@@ -712,13 +731,22 @@ def run_episode(
         action = policy.act(observation)
         proposed_action = deepcopy(action)
         proposal_id = f'{episode_id}:{step}'
-        proposal_for_supervisor = deepcopy(proposed_action) if supervisor is not None else None
+        proposal_for_supervisor = (deepcopy(proposed_action)
+                                   if supervisor is not None or window_supervisor is not None
+                                   else None)
         request_at = clock()
         if observation.captured_monotonic > request_at:
             raise ValueError('observation capture is in the future of the episode clock')
-        if supervisor is not None:
+        if supervisor is not None or window_supervisor is not None:
             try:
-                supervisor(supervisor_observation(observation), proposal_for_supervisor)
+                if window_supervisor is not None:
+                    if history is None:
+                        task = supervisor_observation(observation).observation.get('task')
+                        history = ObservationWindowBuilder(episode_id, task, settings)
+                    history.append(observation)
+                    window_supervisor(history.snapshot(), proposal_for_supervisor)
+                else:
+                    supervisor(supervisor_observation(observation), proposal_for_supervisor)
             except BaseException as exc:
                 request_finished_at = clock()
                 cumulative_wait += request_finished_at - request_at
@@ -808,6 +836,10 @@ def run_episode(
                              ingestion)
         if not ingestion.accepted:
             raise ObservationRejected(ingestion)
+        if history is not None:
+            history.record_action(WindowAction(
+                observation.sequence, proposal_id, proposed_action,
+                selected_action, execution_finished_at))
         reward_sum += result.reward
         steps = step
         success = result.success

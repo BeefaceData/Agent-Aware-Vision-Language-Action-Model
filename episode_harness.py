@@ -818,6 +818,11 @@ def run_episode(
     unchanged baseline proposal; any execution/observation fault ends the attempt.
     It cannot be combined with other supervision or action selection callbacks.
     Accepted responses are retained in action evidence, including execution failures.
+    Simulation scheduling is synchronous: one proposal waits for its decision
+    before any environment step or next policy call. The environment must advance
+    only on step(); this is not a physical-controller hold/stop implementation.
+    Use a bounded decider to impose a deadline; callback failures retain waiting
+    time and terminate the attempt without executing the pending proposal.
     """
     if type(config.max_steps) is not int or config.max_steps <= 0:
         raise ValueError('max_steps must be a positive integer')

@@ -604,6 +604,29 @@ resource allowance. Provider-specific transports must enforce their own limits.
 Public controlled-provider and complete-episode checks:
 `python -m unittest discover -s tests -p test_supervisor_provider.py -v`.
 
+### Synchronous simulation scheduling
+
+`run_episode(..., supervisor_decider=BoundedSupervisorProvider(provider, 2.0))`
+waits for one decision on the current proposal before calling `environment.step`
+or requesting another policy action. The decider has exclusive decision ownership;
+other supervision callbacks and action selectors cannot be combined with it.
+The simulation adapter must advance only when stepped. This path does not issue
+physical hold/stop commands or pause an independently advancing environment.
+
+A validated pass or abstention resumes through the normal execution interface.
+`StepTiming.decision_latency_seconds` records each wait, and the outcome records
+their sum in `cumulative_wait_seconds`. A timeout retains failed-step wait and
+rejection evidence, finalizes the recorder, and raises `ProviderRequestError`
+without executing the pending action. The incomplete trace remains unsealed;
+late responses cannot resume it.
+
+Run the controlled-delay fixture with
+`python -m unittest discover -s tests -p test_synchronous_supervision.py -v`.
+It holds both decisions of a two-action episode, verifies no simulation progress
+while pending and rejects competing provider requests, then seals and replays the
+successful branch. Its timeout branch preserves the first action and records the
+second proposal's rejection, including waiting time and no late execution.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

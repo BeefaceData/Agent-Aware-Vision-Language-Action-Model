@@ -655,6 +655,34 @@ Run `python -m unittest discover -s tests -p test_assessment_schedule.py -v`
 for a 20-action quiet episode, extra/overlapping events, pending-call ordering,
 episode reset, configuration validation, and complete sealed replay.
 
+### Repeated proposal evidence
+
+`RepeatedProposalTrigger(RepetitionSettings(window=4, action_tolerance=0.0,
+position_tolerance=0.0))` from `repeated_proposals` plugs into
+`assessment_trigger`. It requests inspection when a full consecutive window
+has action and observed position spans at or below the configured tolerances
+in every coordinate. Position uses sanitized `robot_state.eef.pos`, falling
+back to `robot_state.position` when absent. Configure tolerances in the
+adapter's declared units and consistent frame; defaults are exact equality,
+not calibrated detector-readiness evidence.
+
+The callable returns a boolean and exposes an immutable `signal` on the
+emitting call: episode, supporting proposal IDs, observation sequences,
+action/position vectors, criterion and settings. A caller wrapping the trigger
+can retain that signal in its evidence sink before returning the boolean.
+The signal is cleared on the next call; only bounded history is retained.
+The existing sealed episode records the resulting assessments and actions,
+not this optional signal sink. Proposals are not proof of executed actions.
+
+One signal is emitted per continuous matching period. Observed motion beyond
+the threshold suppresses the signal; invalid/missing vectors, dimensional
+changes and sequence gaps break the window, and a new episode resets history.
+Stationary productive work can still match: repetition requests assessment,
+never declares task failure or executes a correction. Periodic assessments
+remain available when this evidence is missing. Verify boundary cases,
+productive motion, episode isolation and complete sealed replay with
+`python -m unittest discover -s tests -p test_repeated_proposals.py -v`.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

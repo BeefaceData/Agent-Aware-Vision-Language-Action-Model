@@ -759,6 +759,37 @@ These synthetic fixtures verify software behavior, not model diagnosis quality.
 Verify with
 `python -m unittest discover -s tests -p test_supervisor_replay.py -v`.
 
+## Gripper transition assessment
+
+`GripperTransitionTrigger()` from `gripper_transitions` plugs into
+`run_episode(..., assessment_trigger=trigger, supervisor_decider=decide)`.
+It requests inspection on contiguous observed open-to-closed and closed-to-open
+changes. It accepts only the adapter-mapped scalar `robot_state.gripper.closed`
+boolean or numeric 0/1; native joint positions and action commands do not define
+closure automatically. The adapter owns the mapping for its gripper contract.
+
+Inspect `trigger.evidence` after every call and retain it in the caller's
+evidence sink, including calls that return false. The immutable record contains
+up to two samples with proposal/observation identities, packet capture times,
+available robot-state capture metadata, observed states, transition direction,
+and missing-state limitations. The trigger retains only the current record and
+previous valid sample; it does not automatically append evidence to the episode
+bundle. Missing/invalid state, observation sequence gaps and episode changes
+break continuity. Missing sensor capture metadata is explicitly unverified;
+packet timestamps alone do not establish sensor freshness. Use the required
+sensing gate described above when fresh sensor evidence is necessary.
+
+A normal grasp and a missed grasp can have identical closure transitions, and
+opening alone cannot establish object loss. All such transitions request temporal
+assessment without asserting success, failure, or intervention eligibility.
+Stable closure produces no repeated event. Periodic assessment continues during
+missing gripper state; this trigger does not change action execution authority.
+
+Verify suspected missed grasps, normal grasps, unavailable state and complete
+sealed replay with
+`python -m unittest discover -s tests -p test_gripper_transitions.py -v`.
+These synthetic cases establish software behavior, not detector calibration.
+
 ## Supervisor roadmap
 
 The [chronological VLM adapter guide](docs/supervisor-vlm.md) describes the

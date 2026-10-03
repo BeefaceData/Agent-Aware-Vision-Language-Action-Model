@@ -3,6 +3,8 @@
 from copy import deepcopy
 from dataclasses import dataclass
 
+from temporal_diagnosis import valid_temporal_diagnosis
+
 from episode_harness import (ActionProposal, SupervisorAbstention, SupervisorPass,
                              SupervisorResponseError, valid_abstention_details)
 from supervisor_adjustment import AdjustmentRequestDecoder, SupervisorAdjustmentRequest
@@ -52,6 +54,11 @@ class SupervisorResponseDecoder:
         fields = {'kind', 'episode_id', 'observation_sequence', 'proposal_id'}
         if kind == 'abstain':
             fields |= {'diagnosis', 'reason', 'evidence_availability'}
+        if 'temporal_diagnosis' in response:
+            fields.add('temporal_diagnosis')
+        temporal = response.get('temporal_diagnosis')
+        if not valid_temporal_diagnosis(temporal, kind):
+            raise SupervisorResponseError('invalid temporal diagnosis')
         if set(response) != fields:
             raise SupervisorResponseError(f'invalid {kind} response fields')
         sequence = response['observation_sequence']
@@ -64,9 +71,10 @@ class SupervisorResponseDecoder:
             raise SupervisorResponseError(f'{kind} response must reference the current proposal')
         identity = (response['episode_id'], sequence, response['proposal_id'])
         if kind == 'pass':
-            return SupervisorPass(*identity)
+            return SupervisorPass(*identity, temporal_diagnosis=deepcopy(temporal))
         if (response['diagnosis'] != 'unknown' or
                 not valid_abstention_details(response['reason'], response['evidence_availability'])):
             raise SupervisorResponseError('invalid abstention diagnosis or evidence availability')
         return SupervisorAbstention(*identity, response['reason'],
-                                    deepcopy(response['evidence_availability']))
+                                    deepcopy(response['evidence_availability']),
+                                    temporal_diagnosis=deepcopy(temporal))

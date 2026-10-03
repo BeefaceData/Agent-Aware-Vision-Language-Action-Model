@@ -132,8 +132,8 @@ VLA inference or infer its resource use.
 Verify offline with
 `python -m unittest discover -s tests -p test_model_usage.py -v`.
 
-The fixed prompt requests pass or explicit uncertain abstention as one JSON
-object. Responses must be one text block with `end_turn`; truncated output,
+The fixed prompt requests a temporal diagnosis with pass or explicit uncertain
+abstention as one JSON object. Responses must be one text block with `end_turn`; truncated output,
 provider errors, invalid JSON and unsupported blocks fail safely. The shared
 decoder validates the decision's fields and current request identity. Correction
 execution is not enabled by this adapter. Transport exceptions are reduced to a
@@ -194,3 +194,37 @@ Offline verification:
 The sealed replay covers required camera loss, stale robot state, restored
 assessment, and unchanged baseline actions. These fixtures establish interface
 behavior, not empirical detection quality.
+
+## Temporal progress diagnosis
+
+The prompt asks for `temporal_diagnosis` with `category`, a nonempty `summary`,
+and an `evidence` list. Categories are `progress`, `suspected_missed_grasp`,
+`suspected_lost_grasp`, `stall`, and `unknown`. Each evidence entry names an
+`observation_sequence`, a deployable `source` (`main`, `wrist`, or `robot_state`),
+and a description of the observed cue. Non-unknown assessments require at least
+one reference; an unknown assessment can leave the list empty when no useful
+observation is available. Summaries and descriptions are capped at 2,000
+characters each and evidence lists at 32 entries.
+
+Non-unknown categories accompany `kind="pass"`: even a suspected failure only
+reports an assessment and continues the unchanged policy proposal. Unknown
+accompanies `kind="abstain"` and retains its reason and evidence availability.
+Neither case authorizes correction or changes the frozen VLA task instruction.
+There is no task-success, reward, hidden object-pose or confidence field in this
+contract. Free-text descriptions remain model claims, not evaluator truth.
+
+The shared decoder and harness validate the structure and category/decision
+consistency. The trace retains the diagnosis and sealed replay validates it.
+Legacy pass/abstention responses without a temporal diagnosis remain supported;
+absence is not synthesized into a progress assessment. Evidence references are
+currently structurally checked claims: resolving them against the active bounded
+window is tracked in #51, and contradiction/persistence gates in #52/#53.
+No active intervention eligibility or calibrated detector quality is established
+by this change.
+
+`tests/fixtures/temporal_diagnoses.json` contains synthetic responses for every
+category. Run `python -m unittest discover -s tests -p test_temporal_diagnosis.py -v`
+for public decoding, malformed-field rejection, missing-evidence uncertainty and
+complete sealed episode checks through the mocked chronological VLM adapter.
+These offline examples are contract fixtures, not human-reviewed development
+labels or measured model performance.

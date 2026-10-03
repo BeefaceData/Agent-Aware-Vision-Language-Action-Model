@@ -5,6 +5,8 @@ private evaluator evidence. No pickle, video decoding, inference or simulator is
 needed. Only normally returned episodes (including rejected proposals) are sealed.
 """
 
+from temporal_diagnosis import valid_temporal_diagnosis
+
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -239,15 +241,18 @@ def _load(directory, manifest):
         if response is not None:
             _require(type(response) is dict and
                      type(response.get('observation_sequence')) is int and
-                     response == {'kind': 'pass', 'episode_id': episode_id,
-                                  'observation_sequence': index,
-                                  'proposal_id': record['proposal_id']} and
+                     valid_temporal_diagnosis(response.get('temporal_diagnosis'), 'pass') and
+                     {k: v for k, v in response.items() if k != 'temporal_diagnosis'} ==
+                     {'kind': 'pass', 'episode_id': episode_id,
+                      'observation_sequence': index,
+                      'proposal_id': record['proposal_id']} and
                      record['disposition'] == 'unmodified',
                      'invalid supervisor pass evidence')
         abstention = record.get('supervisor_abstention')
         if abstention is not None:
             _require(type(abstention) is dict and response is None and
-                     set(abstention) == {'kind', 'diagnosis', 'episode_id',
+                     valid_temporal_diagnosis(abstention.get('temporal_diagnosis'), 'abstain') and
+                     set(abstention) - {'temporal_diagnosis'} == {'kind', 'diagnosis', 'episode_id',
                                          'observation_sequence', 'proposal_id',
                                          'reason', 'evidence_availability'} and
                      abstention['kind'] == 'abstain' and

@@ -1,0 +1,119 @@
+[
+  {
+    "kind": "pass",
+    "episode_id": "fixture",
+    "observation_sequence": 1,
+    "proposal_id": "fixture:2",
+    "temporal_diagnosis": {
+      "category": "progress",
+      "summary": "Hand approaches the target across the supplied views.",
+      "evidence": [
+        {
+          "observation_sequence": 0,
+          "source": "main",
+          "description": "Earlier hand and object view."
+        },
+        {
+          "observation_sequence": 1,
+          "source": "main",
+          "description": "Hand approaches the target across the supplied views."
+        }
+      ]
+    }
+  },
+  {
+    "kind": "pass",
+    "episode_id": "fixture",
+    "observation_sequence": 1,
+    "proposal_id": "fixture:2",
+    "temporal_diagnosis": {
+      "category": "suspected_missed_grasp",
+      "summary": "Closed gripper appears empty after approach.",
+      "evidence": [
+        {
+          "observation_sequence": 0,
+          "source": "main",
+          "description": "Earlier hand and object view."
+        },
+        {
+          "observation_sequence": 1,
+          "source": "main",
+          "description": "Closed gripper appears empty after approach."
+        }
+      ]
+    }
+  },
+  {
+    "kind": "pass",
+    "episode_id": "fixture",
+    "observation_sequence": 1,
+    "proposal_id": "fixture:2",
+    "temporal_diagnosis": {
+      "category": "suspected_lost_grasp",
+      "summary": "Item appears below the hand in the later view.",
+      "evidence": [
+        {
+          "observation_sequence": 0,
+          "source": "main",
+          "description": "Earlier hand and object view."
+        },
+        {
+          "observation_sequence": 1,
+          "source": "main",
+          "description": "Item appears below the hand in the later view."
+        }
+      ]
+    }
+  },
+  {
+    "kind": "pass",
+    "episode_id": "fixture",
+    "observation_sequence": 1,
+    "proposal_id": "fixture:2",
+    "temporal_diagnosis": {
+      "category": "stall",
+      "summary": "Hand remains near the same location across views.",
+      "evidence": [
+        {
+          "observation_sequence": 0,
+          "source": "main",
+          "description": "Earlier hand and object view."
+        },
+        {
+          "observation_sequence": 1,
+          "source": "main",
+          "description": "Hand remains near the same location across views."
+        }
+      ]
+    }
+  },
+  {
+    "kind": "abstain",
+    "episode_id": "fixture",
+    "observation_sequence": 1,
+    "proposal_id": "fixture:2",
+    "temporal_diagnosis": {
+      "category": "unknown",
+      "summary": "Occlusion prevents judging object motion.",
+      "evidence": [
+        {
+          "observation_sequence": 0,
+          "source": "main",
+          "description": "Earlier hand and object view."
+        },
+        {
+          "observation_sequence": 1,
+          "source": "main",
+          "description": "Occlusion prevents judging object motion."
+        }
+      ]
+    },
+    "diagnosis": "unknown",
+    "reason": "Object motion is occluded.",
+    "evidence_availability": {
+      "main": "unknown",
+      "wrist": "missing",
+      "robot_state": "unknown"
+    }
+  }
+]

@@ -16,6 +16,8 @@ from time import monotonic
 from typing import Any, Callable, Literal, Mapping, Protocol, TYPE_CHECKING
 from uuid import uuid4
 
+from temporal_diagnosis import valid_temporal_diagnosis
+
 if TYPE_CHECKING:
     from observation_window import ObservationWindow, WindowSettings
 
@@ -585,6 +587,7 @@ class SupervisorPass:
     episode_id: str
     observation_sequence: int
     proposal_id: str
+    temporal_diagnosis: dict | None = None
     kind: Literal['pass'] = field(default='pass', init=False)
 
 
@@ -606,6 +609,7 @@ class SupervisorAbstention:
     proposal_id: str
     reason: str
     evidence_availability: dict[str, Literal['available', 'missing', 'stale', 'unknown']]
+    temporal_diagnosis: dict | None = None
     kind: Literal['abstain'] = field(default='abstain', init=False)
     diagnosis: Literal['unknown'] = field(default='unknown', init=False)
 
@@ -941,6 +945,8 @@ def run_episode(
                             response.proposal_id != proposal_id):
                             raise SupervisorResponseError(
                                 'supervisor response must reference the current proposal')
+                        if not valid_temporal_diagnosis(response.temporal_diagnosis, response.kind):
+                            raise SupervisorResponseError('invalid temporal diagnosis')
                         if type(response) is SupervisorAbstention:
                             if (response.kind != 'abstain' or response.diagnosis != 'unknown' or
                                 not valid_abstention_details(response.reason,
@@ -948,7 +954,7 @@ def run_episode(
                                 raise ValueError('invalid supervisor abstention evidence')
                             abstention_response = deepcopy(response)
                         else:
-                            pass_response = response
+                            pass_response = deepcopy(response)
                     elif window_supervisor is not None:
                         if history is None:
                             task = supervisor_observation(observation).observation.get('task')

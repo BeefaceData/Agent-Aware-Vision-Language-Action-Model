@@ -11,6 +11,7 @@ The current implementation runs **SmolVLA in LIBERO simulation**, recording an e
 - `run_smolvla_episode.py`: standalone runner for one selected LIBERO task.
 - `README.md`: environment setup, usage, output descriptions, and initial results.
 - `.gitignore`: excludes generated runs, model weights, caches, and local environments.
+- [Client interface handoff packet](docs/client-interface-handoff.md): unsent checklist for Boniface to coordinate the client contract, timing and permissions; missing answers remain explicit.
 
 The runner loads [`HuggingFaceVLA/smolvla_libero`](https://huggingface.co/HuggingFaceVLA/smolvla_libero), freezes its weights, uses LeRobot's observation and action processors, and steps one simulation environment until success, termination, truncation, or the step limit.
 

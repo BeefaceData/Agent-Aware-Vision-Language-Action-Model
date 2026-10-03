@@ -466,6 +466,10 @@ fixtures need no rewriting. Public checks are in
 
 ### Recorded recovery request interface
 
+The [static recovery registry](docs/recovery-registry.md) adds executor-side
+selection against immutable tool declarations and trusted adapter capabilities.
+It resolves bounded requests without granting execution authority.
+
 `supervisor_recovery.RecoveryRequestDecoder` decodes a JSON object into an
 immutable `SupervisorRecoveryRequest`. The caller supplies the allowed tool
 name and inclusive scalar `RecoveryParameter` bounds from trusted configuration;

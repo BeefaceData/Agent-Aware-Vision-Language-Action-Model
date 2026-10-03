@@ -51,6 +51,12 @@ class ReplayPolicy:
         self.observations.append(observation)
         return action
 
+    def resume(self, observation: ObservationPacket) -> None:
+        # Scripted actions have no speculative queue. Preserve the turn cursor.
+        index = len(self.observations)
+        if index >= len(self._turns) or observation.observation != self._turns[index][0]:
+            raise AssertionError('Unexpected resume observation')
+
 
 class ReplayEnvironment:
     def __init__(self, seed: int, initial_observation: Any,

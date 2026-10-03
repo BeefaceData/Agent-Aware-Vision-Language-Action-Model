@@ -696,6 +696,17 @@ class PolicyAdapter(Protocol):
     def act(self, observation: ObservationPacket) -> Any: ...
 
 
+class ResumablePolicyAdapter(PolicyAdapter, Protocol):
+    """Optional override capability; reset is never inferred as a substitute.
+
+    Resume discards obsolete queued actions and synchronizes policy state with
+    the accepted post-override packet. It must not execute an action. The next
+    act receives that same observation. Raise if safe resumption is unavailable.
+    """
+
+    def resume(self, observation: ObservationPacket) -> None: ...
+
+
 class EnvironmentAdapter(Protocol):
     """Reset replaces terminal state and returns sequence zero for the new ID.
 
@@ -861,6 +872,10 @@ def run_episode(
                         resolution.kind != 'reject' and resolution.reason is not None
                     ) or (resolution.kind != 'override' and resolution.action is not None):
                         raise ValueError('invalid action resolution')
+                    if resolution.kind == 'override' and not callable(
+                        getattr(policy, 'resume', None)
+                    ):
+                        raise NotImplementedError('policy does not support override/resume')
                 except BaseException as exc:
                     selection_finished_at = clock()
                     cumulative_wait += selection_finished_at - response_at
@@ -948,6 +963,10 @@ def run_episode(
                                'terminated' if result.terminated else 'truncated')
                 break
             observation = result.observation
+            if resolution.kind == 'override' and step < config.max_steps:
+                # Only accepted, nonterminal evidence can seed the next proposal.
+                # Keep adapter mutation separate from recorded environment evidence.
+                policy.resume(deepcopy(observation))
 
     except BaseException as exc:
         if recorder_started:

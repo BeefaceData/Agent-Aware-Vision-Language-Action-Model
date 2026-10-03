@@ -162,6 +162,34 @@ initial packet. Retry by calling `run_episode` again, which resets both adapters
 and allocates another identity. Adapter implementations remain responsible for
 actually clearing their internal state; the harness cannot inspect hidden queues.
 
+For simulated external overrides, a policy must also implement
+`resume(observation)` (`ResumablePolicyAdapter`). The harness checks this capability
+before executing an override. After the overridden action returns an accepted,
+nonterminal observation, and while action budget remains, it calls `resume` with
+a detached copy of that packet before the next `act`. Resume must invalidate
+obsolete queued actions and synchronize policy state without executing an action.
+It preserves the episode identity, environment state, instruction and consumed
+action budget. Pass decisions do not call resume; terminal, truncated, rejected
+or exhausted episodes do not request another policy action.
+
+The harness never substitutes `reset()` for a missing resume implementation.
+`policy_adapter.ResetOnResumePolicyAdapter(reset, infer)` is an explicit opt-in
+for policies whose declared resumption behavior is to clear policy state and
+infer again from the next packet. The SmolVLA CLI uses this adapter: its native
+reset clears the action queue in the pinned
+[LeRobot v0.4.3 implementation](https://github.com/huggingface/lerobot/blob/v0.4.3/src/lerobot/policies/smolvla/modeling_smolvla.py).
+Other policies can implement a different resume transition. Scripted replay
+adapters validate the next observation while preserving their replay cursor.
+A resume exception stops the episode before another proposal, retaining the
+acknowledged correction and last accepted observation in `episode_interruption`.
+Resume time is included in rollout time, not supervisor decision latency.
+
+Run the adapter and complete queued-policy override fixture without live resources:
+
+```powershell
+python -m unittest discover -s tests -p test_policy_resume.py -v
+```
+
 `libero_adapter.LiberoEnvironmentAdapter` handles a single vector environment. On same-step automatic reset it selects the unbatched `final_observation` or `final_obs` envelope, restores the one-environment batch dimension, and copies the terminal payload before recording. The returned reset frame is discarded. Terminal evaluator information comes only from `final_info`; reset-episode success fields cannot determine the ending outcome. Missing or masked terminal evidence raises an error instead of producing a completed outcome. Next-step reset environments supply the terminal observation directly. Custom wrappers must expose one of these contracts; an undocumented reset cannot be detected from pixels alone.
 
 `EpisodeOutcome.terminal_observation` and the CLI's `result.json` contain the ending packet's `episode_id` and `sequence`, linking to `steps.jsonl` and `frames.jsonl`. This reference is set for success, termination, or truncation; it is null for a harness step limit or rejected proposal without an environment terminal signal. The adapter refuses further steps after termination until explicitly reset. Capture timestamps describe when the adapter receives the evidence, not camera exposure time.

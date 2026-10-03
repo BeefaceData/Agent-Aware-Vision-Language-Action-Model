@@ -33,6 +33,7 @@ from artifact_finalization import ArtifactResources
 from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon
 from episode_harness import EpisodeConfig, exception_stop_reason, run_episode
 from recorded_replay import TraceRecorder
+from policy_adapter import ResetOnResumePolicyAdapter
 
 
 def evidence_json(value):
@@ -142,11 +143,11 @@ def main():
         print(f'Task {args.task_id}: {instruction}', flush=True)
         print(f'Max steps: {limit}; output: {out.resolve()}', flush=True)
 
-        class BaselinePolicy:
-            def reset(self):
-                policy.reset()
+        class BaselinePolicy(ResetOnResumePolicyAdapter):
+            def __init__(self):
+                super().__init__(policy.reset, self.infer)
 
-            def act(self, packet):
+            def infer(self, packet):
                 # Same processing order as LeRobot 0.4.3 rollout().
                 batch = preprocess_observation(packet.observation)
                 batch = add_envs_task(env, batch)

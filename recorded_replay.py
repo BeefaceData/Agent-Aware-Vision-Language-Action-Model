@@ -319,6 +319,11 @@ class RecordedReplay:
             def reset(self):
                 pass
 
+            def resume(self, packet):
+                # Recorded proposals are indexed by accepted observation, not queued.
+                _require(packet.observation == packets[packet.sequence].observation,
+                         'replay resume observation diverged')
+
             def act(self, packet):
                 _require(packet.observation == packets[packet.sequence].observation,
                          'replay observation diverged')

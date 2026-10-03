@@ -78,6 +78,60 @@ are mocked and make no paid requests or uploads.
 
 ## Responses and verification
 
+### Per-episode resource accounting
+
+Create a new `ModelCallJournal` beside the trace and pass it to the adapter:
+
+```python
+from model_usage import ModelCallJournal
+
+# trace is a TraceRecorder with a newly created destination directory.
+journal = ModelCallJournal(trace.directory / 'model_calls.jsonl')
+adapter = ChronologicalVlmAdapter(
+    VlmSettings(model_id), encode_png, transport=transport,
+    call_journal=journal)
+provider = BoundedSupervisorProvider(adapter, timeout_seconds=10)
+# Run the episode with supervisor_decider=provider, then inspect:
+# journal.summary()
+```
+
+Each actual transport invocation records a flushed start and a finish with its
+episode/observation/proposal identity, provider, configured model, elapsed
+monotonic wall time and reported usage. Calls rejected before transport (including
+busy and pre-cancelled requests) are not counted as model calls. `returned` means
+the transport returned; it does not establish a valid supervisor decision or task
+success. Usage is retained even when the subsequent decision parsing fails.
+Transport exceptions produce an `error` finish with unknown usage/cost, without
+recording exception text, images, prompts, credentials or response bodies.
+
+The Anthropic adapter allowlists reported input/output and cache token counters.
+It does not infer prices: cost remains `null`. For another instrumented provider,
+use `journal.call(proposal, provider_id, model_id, operation)`, where `operation()`
+returns `ModelReply(response, usage={...}, cost=..., currency=...)` only for known,
+reported amounts. Identity and metric names must be approved nonsecret metadata.
+Ordinary responses have unknown usage and cost. Every explicit retry must pass
+through `call` separately; optional `retry_of` links to a prior summary call ID.
+Neither this journal nor the existing provider initiates retries.
+
+The summary distinguishes reported subtotals from complete totals. Any unknown
+cost makes the total unknown; currencies are kept separate. Missing unit counters
+produce unknown totals for those units, and `unknown_usage_calls` also exposes
+calls with no usage at all. Call wall time includes transport waiting, not the
+whole episode, and is not a measure of provider billing time.
+
+A start without a finish remains pending after a timeout, process interruption,
+or failed journal write; it is never treated as free. A late worker may append
+usage without changing the already rejected decision. The journal therefore
+remains separate from the immutable replay manifest and its integrity guarantee.
+Retain the JSONL alongside unsuccessful attempts too. Do not present pending
+accounting as final; the existing replay seal does not seal this journal. Use a
+new journal and adapter for each episode; existing paths and foreign episode
+identities are rejected. Accounting is opt-in and does not yet instrument local
+VLA inference or infer its resource use.
+
+Verify offline with
+`python -m unittest discover -s tests -p test_model_usage.py -v`.
+
 The fixed prompt requests pass or explicit uncertain abstention as one JSON
 object. Responses must be one text block with `end_turn`; truncated output,
 provider errors, invalid JSON and unsupported blocks fail safely. The shared

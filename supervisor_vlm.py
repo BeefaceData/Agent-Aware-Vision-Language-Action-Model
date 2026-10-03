@@ -13,6 +13,7 @@ import os
 from time import monotonic
 
 from observation_window import ObservationWindowBuilder, WindowSettings
+from model_usage import ModelReply
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,8 @@ class ChronologicalVlmAdapter:
     A new episode ID resets history; sequence/time reversal is rejected.
     """
 
-    def __init__(self, settings: VlmSettings, encode_png, transport=None):
+    def __init__(self, settings: VlmSettings, encode_png, transport=None, *,
+                 call_journal=None):
         if type(settings) is not VlmSettings or not callable(encode_png):
             raise ValueError('VlmSettings and image encoder required')
         if transport is not None and not callable(transport):
@@ -89,6 +91,7 @@ class ChronologicalVlmAdapter:
         self._encode_png = encode_png
         self._transport = transport if transport is not None else AnthropicMessagesTransport()
         self._history = None
+        self._call_journal = call_journal
 
     def __call__(self, proposal, deadline, cancellation):
         if cancellation.is_set() or monotonic() >= deadline:
@@ -149,7 +152,23 @@ class ChronologicalVlmAdapter:
                        messages=[{'role': 'user', 'content': content}])
         if cancellation.is_set() or monotonic() >= deadline:
             raise RuntimeError('request no longer current')
-        response = self._transport(payload, deadline, cancellation)
+        def send():
+            response = self._transport(payload, deadline, cancellation)
+            if self._call_journal is None:
+                return response
+            # Keep only numeric usage counters, never arbitrary provider fields.
+            usage = response.get('usage') if type(response) is dict else None
+            reported = None
+            if type(usage) is dict:
+                reported = {key: usage[key] for key in (
+                    'input_tokens', 'output_tokens', 'cache_creation_input_tokens',
+                    'cache_read_input_tokens') if key in usage}
+                reported = reported or None
+            return ModelReply(response, usage=reported)
+
+        response = (send() if self._call_journal is None else
+                    self._call_journal.call(proposal, 'anthropic',
+                                            self.settings.model, send))
         if (type(response) is not dict or response.get('type') != 'message' or
                 response.get('stop_reason') != 'end_turn'):
             raise ValueError('provider did not return a complete message')

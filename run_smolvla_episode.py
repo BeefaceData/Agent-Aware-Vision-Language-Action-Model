@@ -32,6 +32,7 @@ from camera_evidence import CameraEvidenceRecorder
 from artifact_finalization import ArtifactResources
 from libero_adapter import LiberoEnvironmentAdapter
 from episode_harness import EpisodeConfig, run_episode
+from recorded_replay import TraceRecorder
 
 
 def evidence_json(value):
@@ -273,8 +274,10 @@ def main():
                 print(f'Step {step}/{limit} | reward={result.reward} | success={result.success}',
                       flush=True)
 
-        outcome = run_episode(EpisodeConfig(args.seed, limit), BaselinePolicy(),
-                              LiberoEnvironmentAdapter(env), recorder, show_progress)
+        episode_config = EpisodeConfig(args.seed, limit)
+        trace_recorder = TraceRecorder(out / 'replay', episode_config, recorder)
+        outcome = run_episode(episode_config, BaselinePolicy(),
+                              LiberoEnvironmentAdapter(env), trace_recorder, show_progress)
         summary.update(status=('completed' if outcome.artifact_status == 'completed'
                                else 'error'), steps=outcome.steps,
                        artifact_status=outcome.artifact_status,
@@ -289,6 +292,13 @@ def main():
                        video_path=outcome.artifacts.get('video_path'),
                        wrist_video_path=outcome.artifacts.get('wrist_video_path'),
                        frames_path=outcome.artifacts.get('frames_path'))
+        if outcome.artifact_status == 'completed':
+            try:
+                summary['replay_manifest'] = trace_recorder.seal(outcome)
+            except Exception as exc:
+                summary.update(status='error', artifact_status='incomplete',
+                               artifact_diagnostics=[f'{type(exc).__name__}: {exc}'])
+                raise
     except BaseException as exc:
         summary.update(status='interrupted' if not isinstance(exc, Exception) else 'error',
                        error=f'{type(exc).__name__}: {exc}',

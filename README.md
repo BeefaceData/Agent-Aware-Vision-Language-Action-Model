@@ -119,6 +119,7 @@ By default, each episode creates `outputs/smolvla_<suite>_task<id>_<timestamp>/`
 | `frames.jsonl` | One reference per camera per observation, including camera identity, observation sequence, capture timestamps, synchronization status, video path, and frame index; missing views have null paths and indices |
 | `steps.jsonl` | One JSON record per action: observation identity, action, outcome, and monotonic step timing |
 | `result.json` | Instruction, configuration, selected package versions, outcome, stop reason, and timing |
+| `replay/` | Full JSON observation payloads and recorded decisions, with a checksum manifest published only after successful finalization |
 
 The script also prints progress and output paths to the terminal. It does not automatically save terminal output to a separate log file.
 
@@ -183,6 +184,49 @@ assert outcome.success and fixture.environment.actions == [
 ```
 
 Each fixture starts a scripted attempt; its in-memory recorder returns no artifact paths. The replay outcome verifies software behavior, not physical or LIBERO task performance.
+
+### Replay a recorded episode
+
+New CLI episodes retain a portable `replay/` directory. Run it without LeRobot,
+NumPy, model downloads, or simulator access:
+
+```bash
+python recorded_replay.py outputs/my_episode/replay
+python recorded_replay.py tests/fixtures/recorded_episode
+```
+
+The bundled synthetic fixture executes an override followed by a pass decision
+and ends unsuccessfully by termination. It verifies recording and execution
+contracts; it is not a measured LIBERO attempt. The command reports the original
+episode identity and reconstructed outcome.
+
+`load_recorded_replay(directory).run(recorder)` uses the public harness with
+fresh replay-only policy/environment adapters and the recorded action selector.
+The optional recorder receives every reconstructed observation, action and result.
+Loading validates all required files and SHA-256 hashes, contiguous observation
+and decision order, capture chronology, source/proposal/acknowledgement identities,
+camera availability, terminal boundaries and outcome consistency before execution.
+Missing/corrupt payloads raise `TraceError`; no frame or state is fabricated.
+Checksums detect artifact changes, not the authenticity of the manifest's author.
+
+To record another public adapter, wrap its recorder with
+`TraceRecorder(new_directory, config, recorder)`, pass that wrapper to
+`run_episode`, then call `trace.seal(outcome)` on the returned outcome. Sealing
+requires completed finalization and a consistent full episode. Success, task
+failure, truncation, step-limit and rejected-proposal episodes are supported.
+Interruptions retain partial files without a manifest and are explicitly refused
+as complete replay inputs. Older video/action-only bundles lack full observations
+and cannot be replayed by this format.
+
+The JSON payloads preserve array values and shapes as lists, not framework dtypes
+or objects. They include both cameras and raw evaluator fields and can occupy
+substantial disk space; keep them in private artifact storage. Videos are auxiliary
+viewing artifacts and are not required by replay because the original pixel values
+are embedded in the observation stream. Unsupported values fail serialization
+instead of falling back to string representations. Replay gets a new episode ID,
+retains the source ID separately and preserves historical capture timestamps;
+its synthetic clock does not reproduce source inference latency or establish
+performance. This replays recorded decisions, not the original model's reasoning.
 
 Interrupted attempts re-raise the original exception with an
 `episode_interruption` (`EpisodeInterruption`) record. It retains the episode ID,

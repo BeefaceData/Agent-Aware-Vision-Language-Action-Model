@@ -1,3 +1,4 @@
 ralph/*.sh text eol=lf
 ralph/*.jq text eol=lf
 ralph/tests/*.sh text eol=lf
+tests/fixtures/recorded_episode/*.jsonl text eol=lf

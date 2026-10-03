@@ -574,6 +574,36 @@ rejections with the same retained failure evidence, before any environment step.
 Verify with
 `python -m unittest discover -s tests -p test_supervisor_response.py -v`.
 
+### Bounded provider requests
+
+`BoundedSupervisorProvider(provider, timeout_seconds)` in `supervisor_provider.py`
+wraps a callable `provider(proposal, deadline, cancellation_event)`. The deadline
+uses `time.monotonic()`; configure the transport's own timeout from its remaining
+time and honor cancellation. Inputs are detached and supervisor-allowlisted, and
+responses pass through `SupervisorResponseDecoder` before acceptance.
+
+`request(proposal, cancellation=None)` returns a typed `ProviderResult` with
+episode/observation/proposal identity, request/deadline/completion times, and a
+`response`, `timeout`, `error`, `cancelled`, `busy`, or `rejected` status. Only
+`response` carries a decoded decision. Supply an Event for external cancellation.
+No automatic retries occur. Each request has a separate result mailbox; expired
+or cancelled replies cannot become a later decision.
+
+Use the adapter directly as `run_episode(..., supervisor_decider=adapter)`.
+Failures raise `ProviderRequestError` carrying the typed result; the harness
+retains their safe status/reason and measured wait in failed-attempt evidence,
+executes no action for that decision, and finalizes through its existing failure
+path. Provider exception text is omitted. This boundary does not implement healthy
+baseline fallback or grant correction execution authority.
+
+Caller waiting is bounded even if a provider ignores cancellation. Such a daemon
+worker cannot be forcibly killed by Python and may continue remote work; the
+adapter returns `busy` for new requests until it exits, preventing worker buildup
+within that adapter. This is not a guarantee of remote request cancellation or a
+resource allowance. Provider-specific transports must enforce their own limits.
+Public controlled-provider and complete-episode checks:
+`python -m unittest discover -s tests -p test_supervisor_provider.py -v`.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

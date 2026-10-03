@@ -682,6 +682,10 @@ Verify with
 
 ## Supervisor roadmap
 
+The [chronological VLM adapter guide](docs/supervisor-vlm.md) describes the
+configurable Anthropic transport, camera ordering, bounded observation history,
+credential isolation and offline verification. Live calls remain resource gated.
+
 1. **Offline observation:** process task instructions and chronological frame windows from recorded episodes.
 2. **Progress detection:** log completed subtasks, remaining work, and evidence of repeated failed attempts. Use only information available up to each observation time.
 3. **Detection evaluation:** inspect failed and successful episodes, measuring false alarms as well as detected failures.

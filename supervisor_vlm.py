@@ -1,0 +1,162 @@
+"""Chronological camera requests for the Anthropic Messages API.
+
+Image conversion and transport are injected. No provider is contacted on import
+or construction; callers remain responsible for resource and data-use gates.
+"""
+
+from base64 import b64encode
+from dataclasses import asdict, dataclass
+from datetime import datetime
+import http.client
+import json
+import os
+from time import monotonic
+
+from observation_window import ObservationWindowBuilder, WindowSettings
+
+
+@dataclass(frozen=True)
+class VlmSettings:
+    model: str
+    max_tokens: int = 512
+    max_observations: int = 8
+
+    def __post_init__(self):
+        if type(self.model) is not str or not self.model.strip():
+            raise ValueError('explicit provider model required')
+        if type(self.max_tokens) is not int or self.max_tokens < 1:
+            raise ValueError('positive output token limit required')
+        WindowSettings(self.max_observations, 0)
+
+
+def _json(value):
+    return json.dumps(value, allow_nan=False, default=lambda item:
+                      item.isoformat() if type(item) is datetime else _unsupported())
+
+
+def _unsupported():
+    raise ValueError('unsupported request value')
+
+
+class AnthropicMessagesTransport:
+    """Single HTTPS request; credentials are read only into the auth header.
+
+    No retries or redirects. Wrap the adapter in BoundedSupervisorProvider:
+    socket timeouts alone do not bound an entire response or cancel remote work.
+    """
+
+    def __call__(self, payload, deadline, cancellation):
+        remaining = deadline - monotonic()
+        if cancellation.is_set() or remaining <= 0:
+            raise RuntimeError('request no longer current')
+        key = os.environ.get('ANTHROPIC_API_KEY')
+        if not key:
+            raise RuntimeError('provider credential unavailable')
+        connection = http.client.HTTPSConnection('api.anthropic.com', timeout=remaining)
+        try:
+            connection.request('POST', '/v1/messages', body=_json(payload).encode(),
+                               headers={'content-type': 'application/json',
+                                        'anthropic-version': '2023-06-01',
+                                        'x-api-key': key})
+            response = connection.getresponse()
+            if response.status != 200:
+                raise RuntimeError('provider request failed')
+            data = response.read(1_048_577)
+            if len(data) > 1_048_576:
+                raise RuntimeError('provider response exceeds limit')
+            if cancellation.is_set() or monotonic() >= deadline:
+                raise RuntimeError('request no longer current')
+            return json.loads(data)
+        finally:
+            connection.close()
+
+
+class ChronologicalVlmAdapter:
+    """Provider callback for BoundedSupervisorProvider, one serial episode stream.
+
+    encode_png receives a sanitized numeric image and returns PNG bytes. Camera
+    dimensions/preprocessing belong to that caller-supplied converter. History
+    contains observations only: past proposals are never labeled executed actions.
+    A new episode ID resets history; sequence/time reversal is rejected.
+    """
+
+    def __init__(self, settings: VlmSettings, encode_png, transport=None):
+        if type(settings) is not VlmSettings or not callable(encode_png):
+            raise ValueError('VlmSettings and image encoder required')
+        if transport is not None and not callable(transport):
+            raise ValueError('transport must be callable')
+        self.settings = settings
+        self._encode_png = encode_png
+        self._transport = transport if transport is not None else AnthropicMessagesTransport()
+        self._history = None
+
+    def __call__(self, proposal, deadline, cancellation):
+        if cancellation.is_set() or monotonic() >= deadline:
+            raise RuntimeError('request no longer current')
+        packet = proposal.observation
+        if self._history is None or self._history.episode_id != packet.episode_id:
+            self._history = ObservationWindowBuilder(
+                packet.episode_id, packet.observation.get('task'),
+                WindowSettings(self.settings.max_observations, 0))
+        self._history.append(packet)
+        window = self._history.snapshot()
+        identity = dict(episode_id=packet.episode_id,
+                        observation_sequence=packet.sequence,
+                        proposal_id=proposal.proposal_id)
+        content = [{'type': 'text', 'text': _json({
+            'request': identity, 'task': window.task,
+            'proposed_action': proposal.action,
+            'ordering': window.ordering,
+            'max_observations': window.settings.max_observations,
+            'omitted_prefix': asdict(window.omitted_prefix) if window.omitted_prefix else None,
+            'missing_intervals': [asdict(gap) for gap in window.missing_intervals],
+            'executed_action_history': 'not supplied',
+        })}]
+        for observation in window.observations:
+            content.append({'type': 'text', 'text': _json({
+                'observation_sequence': observation.sequence,
+                'captured_at': observation.captured_at,
+                'captured_monotonic': observation.captured_monotonic,
+                'robot_state': observation.observation.get('robot_state'),
+                'robot_state_capture': (asdict(observation.robot_state_capture)
+                                        if observation.robot_state_capture else None),
+            })})
+            references = {ref.camera: ref for ref in observation.frame_references}
+            if len(references) != 2 or len(observation.frame_references) != 2:
+                raise ValueError('main and wrist camera metadata required')
+            pixels = observation.observation.get('pixels', {})
+            for camera, key in (('main', 'image'), ('wrist', 'image2')):
+                ref = references[camera]
+                frame = pixels.get(key)
+                if (ref.availability == 'available') != (frame is not None):
+                    raise ValueError('camera availability does not match payload')
+                content.append({'type': 'text', 'text': _json(asdict(ref))})
+                if frame is not None:
+                    encoded = self._encode_png(frame)
+                    if type(encoded) is not bytes or not encoded.startswith(b'\x89PNG\r\n\x1a\n'):
+                        raise ValueError('image encoder must return PNG bytes')
+                    content.append({'type': 'image', 'source': {
+                        'type': 'base64', 'media_type': 'image/png',
+                        'data': b64encode(encoded).decode('ascii')}})
+        payload = dict(model=self.settings.model, max_tokens=self.settings.max_tokens,
+                       system=('Assess only the supplied observations. Return one JSON object, '
+                               'without markdown. Copy the request identity fields exactly. '
+                               'For unchanged execution use kind="pass" with only those fields. '
+                               'For uncertainty use kind="abstain", diagnosis="unknown", '
+                               'a nonempty reason, and evidence_availability mapping main, wrist '
+                               'and robot_state to available, missing, stale or unknown. '
+                               'Do not generate code, corrections or instruction changes.'),
+                       messages=[{'role': 'user', 'content': content}])
+        if cancellation.is_set() or monotonic() >= deadline:
+            raise RuntimeError('request no longer current')
+        response = self._transport(payload, deadline, cancellation)
+        if (type(response) is not dict or response.get('type') != 'message' or
+                response.get('stop_reason') != 'end_turn'):
+            raise ValueError('provider did not return a complete message')
+        blocks = response.get('content')
+        if (type(blocks) is not list or len(blocks) != 1 or
+                type(blocks[0]) is not dict or blocks[0].get('type') != 'text' or
+                type(blocks[0].get('text')) is not str):
+            raise ValueError('provider must return one structured text response')
+        # The bounded provider applies the shared strict decision decoder next.
+        return json.loads(blocks[0]['text'])

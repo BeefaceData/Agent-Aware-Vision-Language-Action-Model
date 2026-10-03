@@ -578,6 +578,10 @@ class SupervisorPass:
     kind: Literal['pass'] = field(default='pass', init=False)
 
 
+class SupervisorResponseError(ValueError):
+    """Structured response rejected before execution; message is safe evidence."""
+
+
 @dataclass(frozen=True)
 class SupervisorAbstention:
     """Unknown diagnosis; continue the unchanged proposal while execution is healthy.
@@ -924,7 +928,11 @@ def run_episode(
                             observation.captured_monotonic, request_at,
                             request_finished_at, None, None, None, cumulative_wait),
                             ActionRecord(proposal_id, deepcopy(proposed_action), None,
-                                         None, None, 'unconfirmed')))
+                                         None, None,
+                                         'rejected' if isinstance(exc, SupervisorResponseError)
+                                         else 'unconfirmed',
+                                         str(exc) if isinstance(exc, SupervisorResponseError)
+                                         else None)))
                     raise
                 response_at = clock()
             else:

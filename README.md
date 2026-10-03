@@ -534,6 +534,39 @@ Executor integration remains separate: returning this request directly from
 recording and rejection checks:
 `python -m unittest discover -s tests -p test_supervisor_adjustment.py -v`.
 
+### Structured supervisor response validation
+
+`supervisor_response.SupervisorResponseDecoder` is the shared boundary for
+JSON-decoded provider/recorded objects. It accepts only `pass`, `abstain`,
+`recovery` and `adjustment`. Pass requires `kind`, `episode_id`,
+`observation_sequence` and `proposal_id`; abstention additionally requires
+`diagnosis: "unknown"`, a nonempty `reason` and `evidence_availability` using
+the statuses documented above. Correction variants use the wire contracts above
+and require caller-supplied `recovery`/`adjustment` decoders with trusted bounds.
+All variants reject missing/unsupported fields and foreign proposal identities;
+numeric parameters reject non-finite values and booleans. Tool code, replacement
+instructions and undeclared action fields are unsupported.
+
+```python
+from supervisor_response import SupervisorResponseDecoder
+
+decoder = SupervisorResponseDecoder()  # pass/abstain only
+# In supervisor_decider(current_proposal):
+# return decoder.decode(recorded_response, current_proposal)
+```
+
+Invalid objects raise `episode_harness.SupervisorResponseError` with a schema
+reason without echoing provider payloads. When decoding in `supervisor_decider`,
+the harness records a supervisor failure and an `ActionRecord` with disposition
+`rejected`, `rejection_reason`, and no selected/executed action or acknowledgement.
+It finalizes the incomplete attempt and re-raises the error; this does not enable
+baseline fallback. Valid recovery/adjustment results remain request data and
+cannot authorize execution through this callback. Failed attempts retain their
+decision records but cannot be sealed as completed replay bundles.
+
+Verify with
+`python -m unittest discover -s tests -p test_supervisor_response.py -v`.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

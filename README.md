@@ -184,6 +184,17 @@ assert outcome.success and fixture.environment.actions == [
 
 Each fixture starts a scripted attempt; its in-memory recorder returns no artifact paths. The replay outcome verifies software behavior, not physical or LIBERO task performance.
 
+Task outcome and evidence completion are independent. `EpisodeOutcome.artifact_status`
+is `completed` only after the recorder's `finish()` returns successfully; an ordinary
+finalization exception returns `incomplete`, empty finalized artifact references and
+`artifact_diagnostics`, while retaining task success, stop reason, reward, timing and
+terminal observation identity. Callers must check this status before treating the
+evidence package as complete. The CLI records these fields in `result.json` and exits
+with an error for incomplete artifacts. Paths retained there after failure identify
+partial evidence, not verified usable files. Video and log close failures are collected
+across all sinks; repeated cleanup cannot clear a failed finalization. A task failure
+can still have a completely finalized evidence package.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

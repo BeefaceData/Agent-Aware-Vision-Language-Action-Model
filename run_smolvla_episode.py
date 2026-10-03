@@ -29,6 +29,7 @@ from pathlib import Path
 from time import monotonic
 
 from camera_evidence import CameraEvidenceRecorder
+from artifact_finalization import ArtifactResources
 from libero_adapter import LiberoEnvironmentAdapter
 from episode_harness import EpisodeConfig, run_episode
 
@@ -94,6 +95,7 @@ def main():
         'versions': {p: version(p) for p in ['lerobot', 'torch', 'gymnasium', 'hf-libero']},
         'video_path': None, 'wrist_video_path': None, 'frames_path': None,
         'steps': 0, 'success': False,
+        'artifact_status': 'incomplete', 'artifact_diagnostics': [],
     }
     env = recorder = None
     start = monotonic()
@@ -150,6 +152,7 @@ def main():
                 self.camera_evidence = None
                 self.log = None
                 self.cumulative_wait_seconds = 0.0
+                self.resources = ArtifactResources()
 
             def record_frame(self, packet):
                 # The adapter selects terminal evidence before recording.
@@ -163,7 +166,9 @@ def main():
                         str(path), fps=args.video_fps, codec='libx264',
                         macro_block_size=1),
                     lambda pixels: np.ascontiguousarray(pixels[0][::-1, ::-1]))
+                self.resources.add('camera evidence', self.camera_evidence.close)
                 self.log = (out / 'steps.jsonl').open('w', encoding='utf-8')
+                self.resources.add('steps log', self.log.close)
                 self.record_frame(packet)
 
             @staticmethod
@@ -246,13 +251,7 @@ def main():
                 return artifacts
 
             def close(self):
-                try:
-                    if self.log is not None:
-                        self.log.close()
-                        self.log = None
-                finally:
-                    if self.camera_evidence is not None:
-                        self.camera_evidence.close()
+                self.resources.close()
 
         recorder = BaselineRecorder()
         reward_total = 0.0
@@ -267,7 +266,10 @@ def main():
 
         outcome = run_episode(EpisodeConfig(args.seed, limit), BaselinePolicy(),
                               LiberoEnvironmentAdapter(env), recorder, show_progress)
-        summary.update(status='completed', steps=outcome.steps,
+        summary.update(status=('completed' if outcome.artifact_status == 'completed'
+                               else 'error'), steps=outcome.steps,
+                       artifact_status=outcome.artifact_status,
+                       artifact_diagnostics=list(outcome.artifact_diagnostics),
                        episode_id=outcome.episode_id,
                        success=outcome.success, sum_rewards=outcome.sum_rewards,
                        stop_reason=outcome.stop_reason,
@@ -289,7 +291,15 @@ def main():
         # Save diagnostics even if simulation or encoding fails.
         try:
             if recorder is not None:
-                recorder.close()
+                try:
+                    recorder.close()
+                except Exception as exc:
+                    diagnostic = f'{type(exc).__name__}: {exc}'
+                    if diagnostic not in summary['artifact_diagnostics']:
+                        summary['artifact_diagnostics'].append(diagnostic)
+                    summary['artifact_status'] = 'incomplete'
+                    if summary['status'] == 'completed':
+                        summary['status'] = 'error'
             for key, path in (('video_path', video_path),
                               ('wrist_video_path', wrist_video_path),
                               ('frames_path', frames_path)):
@@ -302,6 +312,8 @@ def main():
             finally:
                 (out / 'result.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
                 print('Result:', out.resolve() / 'result.json', flush=True)
+    if summary['artifact_status'] != 'completed':
+        raise RuntimeError('Episode artifacts incomplete; see result.json diagnostics')
     print(f"Finished: success={summary['success']}, steps={summary['steps']}", flush=True)
     print('Videos:', summary['video_path'], summary['wrist_video_path'], flush=True)
 

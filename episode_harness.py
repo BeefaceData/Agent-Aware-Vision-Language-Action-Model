@@ -1,7 +1,7 @@
 """Baseline episode orchestration with injectable policy, environment and recorder.
 
-The caller owns the adapters and releases any resources they hold. The recorder
-finalizes its artifacts on success; the caller handles cleanup on failure.
+The caller owns the adapters and releases any resources they hold. Artifact
+finalization failures are returned separately from the observed task outcome.
 Environment step results contain evaluator outcomes, which are never sent to the
 policy through this interface.
 """
@@ -636,6 +636,8 @@ class EpisodeOutcome:
     cumulative_wait_seconds: float = 0.0
     step_timings: tuple[StepTiming, ...] = ()
     terminal_observation: ObservationReference | None = None
+    artifact_status: Literal['incomplete', 'completed'] = 'incomplete'
+    artifact_diagnostics: tuple[str, ...] = ()
 
 
 class PolicyAdapter(Protocol):
@@ -674,13 +676,15 @@ def run_episode(
     window_supervisor: Callable[[ObservationWindow, Any], None] | None = None,
     window_settings: WindowSettings | None = None,
 ) -> EpisodeOutcome:
-    """Run one attempt and return its outcome after artifacts are finalized.
+    """Run one attempt and return task outcome and artifact finalization status.
 
     ``policy`` provides reset/act(packet); ``environment`` provides
     reset(seed, episode_id)/step(action); ``recorder`` provides begin(packet),
     record_step(step, source_packet, action, result, ingestion),
     record_failure(step, source_packet, action, failure), and finish()
-    -> artifact references. Rejected result packets and failed calls are recorded
+    -> artifact references. A finish exception returns incomplete artifacts and
+    diagnostics without erasing task success, failure or terminal identity.
+    Rejected result packets and failed calls are recorded
     before raising; failures do not produce a completed outcome.
     The caller releases adapter resources on any exception. ``clock`` must be
     monotonic and share a timebase with each packet's ``captured_monotonic``.
@@ -854,7 +858,17 @@ def run_episode(
         observation = result.observation
 
     rollout_seconds = clock() - rollout_start
-    artifacts = recorder.finish()
+    artifacts = {}
+    artifact_status = 'incomplete'
+    diagnostics = ()
+    try:
+        artifacts = dict(recorder.finish())
+        artifact_status = 'completed'
+    except Exception as exc:
+        # Task outcome is already known. Encoding failure must not erase it or
+        # present partial paths as a successfully finalized evidence package.
+        diagnostics = (f'{type(exc).__name__}: {exc}',)
     return EpisodeOutcome(episode_id, success, steps, stop_reason, reward_sum,
                           rollout_seconds, artifacts, cumulative_wait,
-                          tuple(step_timings), terminal_observation)
+                          tuple(step_timings), terminal_observation,
+                          artifact_status, diagnostics)

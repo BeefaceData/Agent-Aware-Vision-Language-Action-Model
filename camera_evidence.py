@@ -8,7 +8,7 @@ the writers it creates and the index file; close it after success or failure.
 from __future__ import annotations
 
 import json
-from contextlib import ExitStack
+from artifact_finalization import ArtifactResources
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -32,8 +32,9 @@ class CameraEvidenceRecorder:
         self._convert_frame = convert_frame
         self._writers: dict[str, FrameWriter] = {}
         self._counts = {'main': 0, 'wrist': 0}
-        self._resources = ExitStack()
-        self._index = self._resources.enter_context(index_path.open('w', encoding='utf-8'))
+        self._resources = ArtifactResources()
+        self._index = index_path.open('w', encoding='utf-8')
+        self._resources.add('frames index', self._index.close)
         self._closed = False
         self._finalized = False
 
@@ -64,7 +65,7 @@ class CameraEvidenceRecorder:
                 if camera not in self._writers:
                     writer = self._writer_factory(path)
                     self._writers[camera] = writer
-                    self._resources.callback(writer.close)
+                    self._resources.add(f'{camera} video', writer.close)
                 index = self._counts[camera]
                 self._writers[camera].append_data(
                     self._convert_frame(pixels[key]))
@@ -89,10 +90,9 @@ class CameraEvidenceRecorder:
         self._index.flush()
 
     def close(self) -> None:
-        if not self._closed:
-            self._closed = True
-            self._resources.close()
-            self._finalized = True
+        self._closed = True
+        self._resources.close()
+        self._finalized = True
 
     @property
     def artifacts(self) -> dict[str, str]:

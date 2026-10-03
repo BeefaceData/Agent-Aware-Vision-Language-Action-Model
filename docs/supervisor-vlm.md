@@ -153,3 +153,44 @@ pass/abstention parsing, stale/malformed/error responses, pre-send cancellation,
 and complete sealed episode replay plus a retained failed attempt. Mocked image
 encoding uses a tiny PNG fixture; these tests establish software contracts, not
 live model compatibility, diagnosis quality or manipulation performance.
+
+## Required observation eligibility
+
+Wrap a synchronous supervisor (including `BoundedSupervisorProvider`) before
+passing it to `run_episode`:
+
+```python
+from supervisor_eligibility import ObservationEligibleSupervisor
+
+eligible_supervisor = ObservationEligibleSupervisor(
+    provider, {"main": 0.5, "wrist": 0.5, "robot_state": 0.5})
+# run_episode(..., supervisor_decider=eligible_supervisor)
+```
+
+These age limits are illustrative, caller-owned configuration, not calibrated
+readiness thresholds. Every listed input must have a present deployable payload
+and verified sensor capture age within its limit at assessment time. Inputs
+omitted from the mapping are optional: for example, a main-camera-only assessment
+can proceed without a wrist view. Choose required inputs for the intended
+diagnosis/correction capabilities before operation, never from a model reply.
+
+Missing or stale required evidence yields a proposal-bound `SupervisorAbstention`
+with named evidence statuses and reasons. Unknown sensor capture times (including
+observation-return timestamps) and invalid capture metadata also abstain. No
+supervisor/provider call occurs on ineligible observations. Each new proposal is
+checked independently, so restored evidence resumes assessment without carrying
+an old abstention or correction forward. Skipped observations are not appended to
+the chronological adapter; its next request exposes the resulting sequence gaps.
+
+The gate uses the same monotonic time basis as observation capture and copies the
+configured limits. Its abstention records uncertainty, not task failure or a
+hold/stop command. Existing harness behavior may continue the unchanged baseline
+proposal; execution health checks and correction-time validation remain separate
+requirements. This adapter is opt-in, and return-time-only adapters must supply
+actual sensor timestamps before satisfying these strict required-input rules.
+
+Offline verification:
+`python -m unittest discover -s tests -p test_supervisor_eligibility.py -v`.
+The sealed replay covers required camera loss, stale robot state, restored
+assessment, and unchanged baseline actions. These fixtures establish interface
+behavior, not empirical detection quality.

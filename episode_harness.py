@@ -721,8 +721,8 @@ def run_episode(
     actions, using ``window_settings`` (defaults to eight packets/eight actions).
     Both callbacks are observation-only and cannot be configured together.
     """
-    if config.max_steps <= 0:
-        raise ValueError('max_steps must be positive')
+    if type(config.max_steps) is not int or config.max_steps <= 0:
+        raise ValueError('max_steps must be a positive integer')
     if supervisor is not None and window_supervisor is not None:
         raise ValueError('choose one supervisor callback')
     if window_settings is not None and window_supervisor is None:

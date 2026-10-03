@@ -7,10 +7,50 @@ batched. Reset observations from same-step autoreset are never ingested.
 
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from operator import index
 from time import monotonic
 
 from episode_harness import ObservationPacket, StepResult, frame_references_for_observation
+
+
+@dataclass(frozen=True)
+class ActionHorizon:
+    """Environment readback and the optional explicitly requested action limit."""
+
+    effective: int
+    requested_override: int | None
+    source: str
+
+
+def read_action_horizon(environment, requested_override=None) -> ActionHorizon:
+    """Read the configured single-vector horizon; refuse an ignored override.
+
+    Call after environment creation and before reset or execution. Never coerce
+    a fractional or missing limit into a usable budget.
+    """
+    def positive_integer(value):
+        try:
+            result = index(value)
+        except TypeError as exc:
+            raise ValueError('action horizon must be a positive integer') from exc
+        if isinstance(value, bool) or result <= 0:
+            raise ValueError('action horizon must be a positive integer')
+        return result
+
+    if environment.num_envs != 1:
+        raise ValueError('exactly one environment is required')
+    requested = (None if requested_override is None
+                 else positive_integer(requested_override))
+    limits = environment.call('_max_episode_steps')
+    if len(limits) != 1:
+        raise ValueError('expected exactly one environment horizon')
+    effective = positive_integer(limits[0])
+    if requested is not None and effective != requested:
+        raise ValueError(f'environment horizon {effective} differs from override {requested}')
+    return ActionHorizon(effective, requested,
+                         'environment_default' if requested is None else 'explicit_override')
 
 
 class LiberoEnvironmentAdapter:

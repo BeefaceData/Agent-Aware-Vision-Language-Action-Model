@@ -105,6 +105,17 @@ The destination must not already exist, preventing accidental overwrites. Relati
 
 Supported suites: `libero_spatial`, `libero_object`, `libero_goal`, `libero_10`, and `libero_90`. Video FPS changes playback speed, not simulation control frequency. The script defaults `MUJOCO_GL` to `egl` before simulator imports, while respecting an existing setting.
 
+Before reset, the runner reads the created environment's action horizon and
+requires a positive integer. An explicit `--max-steps` must match that readback;
+an ignored override fails startup. `result.json` records `requested_max_steps`
+(null for the default), `max_steps` (the effective limit), and `action_horizon`
+with `effective`, `requested_override`, and `source` (`environment_default` or
+`explicit_override`). The replay manifest retains the effective `config.max_steps`.
+No action beyond this limit is proposed or executed. Success returned by the
+last allowed action takes precedence over simultaneous terminal/truncation flags;
+otherwise an environment terminal signal retains its reason, or exhaustion is
+reported as `step_limit` with `success: false`.
+
 ```bash
 python run_smolvla_episode.py --help
 ```

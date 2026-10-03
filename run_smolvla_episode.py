@@ -30,7 +30,7 @@ from time import monotonic
 
 from camera_evidence import CameraEvidenceRecorder
 from artifact_finalization import ArtifactResources
-from libero_adapter import LiberoEnvironmentAdapter
+from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon
 from episode_harness import EpisodeConfig, run_episode
 from recorded_replay import TraceRecorder
 
@@ -105,6 +105,7 @@ def main():
         'versions': {p: version(p) for p in ['lerobot', 'torch', 'gymnasium', 'hf-libero']},
         'video_path': None, 'wrist_video_path': None, 'frames_path': None,
         'steps': 0, 'success': False,
+        'requested_max_steps': args.max_steps,
         'artifact_status': 'incomplete', 'artifact_diagnostics': [],
     }
     env = recorder = None
@@ -132,7 +133,9 @@ def main():
             control_mode=cfg.control_mode, episode_length=args.max_steps,
         )
         env = selected[args.suite][args.task_id]
-        limit = int(env.call('_max_episode_steps')[0])
+        horizon = read_action_horizon(env, args.max_steps)
+        limit = horizon.effective
+        summary['action_horizon'] = asdict(horizon)
         instruction = env.call('task_description')[0]
         summary.update(task=instruction, max_steps=limit, status='running')
         print(f'Task {args.task_id}: {instruction}', flush=True)

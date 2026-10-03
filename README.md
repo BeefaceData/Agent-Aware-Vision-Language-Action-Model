@@ -866,3 +866,45 @@ supervisor decisions and executed actions.
 checks distance/interval boundaries, frame and state loss, episode isolation,
 and complete sealed replays of stall candidates, intentional pauses, motion,
 and unknown observations with unchanged policy execution.
+
+## Visual-change assessment
+
+`VisualChangeTrigger(VisualChangeSettings(view='main', pixel_max=255))` from
+`visual_change` plugs into `run_episode`'s `assessment_trigger`. Select `main`
+or `wrist` explicitly. The image contract is a rectangular HW grayscale or HWC
+image with one or three channels and finite values from zero to `pixel_max`.
+Configure the actual adapter's scale (for example, 1 for normalized pixels);
+the trigger does not infer scale or transpose channel-first images.
+
+Each image is sampled on an endpoint-inclusive grid of at most 16 by 16 points
+by default (configurable from 2 to 64 per dimension). The metric is mean absolute
+channel difference divided by `pixel_max`, comparing consecutive same-view,
+same-shape samples. Defaults request assessment for change <= 0.01 or >= 0.5
+over intervals from 0.1 to 2 seconds, inclusive. Intermediate change does not
+request assessment. An extreme condition emits once until it clears or changes
+regime; periodic assessment remains independent. These defaults are uncalibrated
+software settings, not measured detection thresholds.
+
+Only the previous grid and current immutable evidence record are retained,
+with at most two grids (at most `2 * grid_size**2 * 3` channel values).
+Sanitization still visits the incoming image; this is a retained-evidence bound,
+not a bound on input decoding or sanitizer cost. Grid sampling can miss local
+changes. Missing views, stale associations, sequence gaps, episode changes,
+shape/time-basis changes and invalid intervals prevent temporal comparison.
+Missing pixels are never replaced with a blank image. Observation-return timing
+is explicitly distinguished from camera-capture timing; use the separate
+observation eligibility gate when verified sensing freshness is required.
+
+Retain `trigger.evidence` after each call in the caller's evidence sink. It
+records the selected view/settings, proposal and observation identities, sampled
+values, capture times/time basis, interval, computed change or `None`, status,
+and limitations. These records are not automatically appended to the episode
+bundle; resulting assessments and executed actions use the existing trace.
+Camera motion, lighting, occlusion and productive stationary work can all cause
+these signals. Neither extreme establishes task failure, progress, grasp state
+or correction eligibility; those interpretations remain with the supervisor.
+
+`python -m unittest discover -s tests -p test_visual_change.py -v` verifies
+thresholds, view selection, bounded samples, missing/incompatible evidence,
+episode isolation and successful/unsuccessful complete sealed replays with
+unchanged execution. No live model calls or calibration runs are involved.

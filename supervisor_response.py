@@ -70,6 +70,19 @@ def _resolve_temporal_evidence(temporal, proposal, window):
             raise SupervisorResponseError(f'temporal evidence reference {index}: {reason}')
 
 
+def _conflict_abstention(temporal, proposal):
+    """Conflict presence dominates the requested category and correction kind."""
+    diagnosis = deepcopy(temporal)
+    diagnosis['category'] = 'unknown'
+    diagnosis['summary'] = ('Conflicting temporal evidence; original assessment: ' +
+                            temporal['summary'])[:2000]
+    return SupervisorAbstention(
+        proposal.observation.episode_id, proposal.observation.sequence,
+        proposal.proposal_id, 'Conflicting temporal evidence requires abstention',
+        {source: 'unknown' for source in ('main', 'wrist', 'robot_state')},
+        temporal_diagnosis=diagnosis)
+
+
 @dataclass(frozen=True)
 class SupervisorResponseDecoder:
     """Decode JSON objects with caller-owned correction contracts.
@@ -113,7 +126,18 @@ class SupervisorResponseDecoder:
             if decoder is None:
                 raise SupervisorResponseError(f'{kind} requests are not configured')
             try:
-                return decoder.decode(response, proposal)
+                request = decoder.decode(
+                    {key: value for key, value in response.items()
+                     if key != 'temporal_diagnosis'}, proposal)
+                temporal = response.get('temporal_diagnosis')
+                if temporal is not None:
+                    if not valid_temporal_diagnosis(temporal, 'pass'):
+                        raise SupervisorResponseError('invalid temporal diagnosis')
+                    _resolve_temporal_evidence(temporal, proposal, window)
+                    if temporal.get('conflicts'):
+                        return _conflict_abstention(temporal, proposal)
+                    raise SupervisorResponseError('correction temporal diagnosis requires conflicts')
+                return request
             except ValueError as exc:
                 raise SupervisorResponseError(str(exc)) from exc
         fields = {'kind', 'episode_id', 'observation_sequence', 'proposal_id'}
@@ -136,11 +160,13 @@ class SupervisorResponseDecoder:
             raise SupervisorResponseError(f'{kind} response must reference the current proposal')
         identity = (response['episode_id'], sequence, response['proposal_id'])
         _resolve_temporal_evidence(temporal, proposal, window)
-        if kind == 'pass':
-            return SupervisorPass(*identity, temporal_diagnosis=deepcopy(temporal))
-        if (response['diagnosis'] != 'unknown' or
+        if kind == 'abstain' and (response['diagnosis'] != 'unknown' or
                 not valid_abstention_details(response['reason'], response['evidence_availability'])):
             raise SupervisorResponseError('invalid abstention diagnosis or evidence availability')
+        if temporal is not None and temporal.get('conflicts'):
+            return _conflict_abstention(temporal, proposal)
+        if kind == 'pass':
+            return SupervisorPass(*identity, temporal_diagnosis=deepcopy(temporal))
         return SupervisorAbstention(*identity, response['reason'],
                                     deepcopy(response['evidence_availability']),
                                     temporal_diagnosis=deepcopy(temporal))

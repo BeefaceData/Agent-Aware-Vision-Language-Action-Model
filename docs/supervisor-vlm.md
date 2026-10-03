@@ -240,8 +240,7 @@ reference index and reason in a finalized failed-attempt trace before terminatin
 without executing that proposal. It does not fabricate an observation or silently
 replace a diagnosis. Failed attempts are retained but not sealed as successful
 replays. Existing correction request decoders still return request data only;
-resolving a diagnosis does not grant intervention authority. Contradiction and
-persistence gates remain in #52/#53; no calibrated detector quality is claimed.
+resolving a diagnosis does not grant intervention authority. The persistence gate remains in #53; no calibrated detector quality is claimed.
 
 `tests/fixtures/temporal_diagnoses.json` contains synthetic responses for every
 category. Run `python -m unittest discover -s tests -p test_temporal_diagnosis.py -v`
@@ -253,3 +252,31 @@ labels or measured model performance.
 Run `python -m unittest discover -s tests -p test_diagnosis_evidence.py -v`
 for bounded-window resolution, absent sources, episode isolation and retained
 rejected-attempt checks.
+
+
+## Conflicting temporal evidence
+
+An optional `temporal_diagnosis.conflicts` list identifies defined conflicts:
+`grasp_state_conflict` for apparent grasp success contradicted by later state,
+and `ambiguous_object_motion` for disagreeing views or camera-motion ambiguity.
+Each entry contains `case` and `evidence_indices`: two or more distinct zero-based
+indices into the diagnosis evidence list. At most 16 conflicts are accepted.
+The prompt requests both sides of a conflict and an unknown assessment.
+
+After validating response identity and resolving every evidence reference, the
+shared decoder converts any reported conflict into `SupervisorAbstention` with
+category `unknown`, preserving evidence and conflict references. This overrides
+an attempted pass or a configured, otherwise-valid recovery/adjustment request.
+Correction requests may attach a temporal diagnosis with conflicts for this
+abstention path; nonconflicting correction diagnoses are not supported yet.
+No confidence field is accepted, so a score cannot override the rule. Malformed
+or unresolved evidence still causes rejection, never correction execution.
+Availability is marked unknown because presence alone does not establish usable
+consistent evidence. Normal validated policy execution can continue on abstention.
+
+These are reported semantic conflicts, not automatic pixel-level verification.
+The model can miss or misdescribe a conflict; existence checks do not establish
+claim truth. No grasp-success classifier, calibrated perception quality, or
+privileged object state is introduced. Legacy responses remain supported.
+Run `python -m unittest discover -s tests -p test_temporal_conflicts.py -v` for
+both cases, correction suppression, confidence rejection and sealed replays.

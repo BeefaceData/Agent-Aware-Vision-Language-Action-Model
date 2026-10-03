@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "split": "development",
+  "provenance": "Repository synthetic recorded_episode fixture; no client data or live inference; schema demonstration only",
+  "source_episode_id": "4bd2d9fc12474296a80bcec6cd09bf81",
+  "trace_sha256": "5edb3a53ec1c5b3739c0682d5db9a2b83e609a0717a106d646e0f554d60cbee2",
+  "reviewer": "synthetic fixture author (not a human development review)",
+  "reviewed_at": "2026-10-03T00:00:00+00:00",
+  "status": "reviewed",
+  "events": [
+    {
+      "id": "example-1",
+      "family": "unknown",
+      "example": "failed",
+      "onset": [
+        0,
+        2
+      ],
+      "uncertain": true,
+      "evidence": [
+        {
+          "sequence": 0,
+          "description": "Synthetic initial observation; insufficient imagery to diagnose grasp."
+        },
+        {
+          "sequence": 2,
+          "description": "Synthetic terminal observation retained for inspection."
+        }
+      ],
+      "notes": "Unsuccessful synthetic episode; outcome does not establish a missed grasp or stall. Onset bracket is illustrative and uncertain, not a calibrated label."
+    }
+  ]
+}

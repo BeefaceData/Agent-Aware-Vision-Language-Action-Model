@@ -829,6 +829,13 @@ The implementation was checked against the published LeRobot 0.4.3 source during
 
 Built on the work of the SmolVLA, LeRobot, LIBERO, robosuite, and MuJoCo contributors.
 
+## Development trace annotation
+
+Use the [offline annotation workflow](docs/development-annotations.md) to record
+reviewed failure or productive-motion examples with trace identity, onset
+intervals, evidence and explicit uncertainty. A synthetic fixture and CLI
+round-trip run without live inference or client demonstrations.
+
 ## End-effector progress assessment
 
 `EndEffectorProgressTrigger(ProgressSettings(frame='world', position_units='m'))`

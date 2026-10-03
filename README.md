@@ -228,6 +228,34 @@ retains the source ID separately and preserves historical capture timestamps;
 its synthetic clock does not reproduce source inference latency or establish
 performance. This replays recorded decisions, not the original model's reasoning.
 
+To inspect the intervention timeline locally, generate a standalone HTML report
+and open the resulting file in a browser:
+
+```bash
+python episode_timeline.py tests/fixtures/recorded_episode timeline.html
+python episode_timeline.py outputs/my_episode/replay my_episode_timeline.html
+```
+
+The output must be a new file. No server, JavaScript, model or simulator is needed.
+The synthetic failed fixture shows decision 1 changing `[0.1]` to `[0.5]`, then
+decision 2 executing `[0.2]` unchanged and terminating unsuccessfully. Follow each
+observation link to its original episode/sequence, timestamp, camera availability
+and expandable full payload; decision links show the original acknowledgement
+and JSONL line. Observation 1 has an unavailable wrist view. This verifies trace
+inspection, not the quality or causal benefit of a model intervention.
+
+The report validates checksums and evidence identities before rendering. Missing
+or corrupt required files produce `Report unavailable` and a nonzero exit, without
+creating a report or claiming an outcome. Missing camera views and unrecorded
+video artifacts are marked in the report. The format does not retain exact
+decision/execution timestamps or model diagnoses; those remain explicitly
+unavailable rather than inferred from observation times or task failure.
+Interrupted/unsealed traces are not supported. Reports embed raw evaluator
+payloads, so retain them with the original private artifacts; they are not
+supervisor inputs. For programmatic use, `render_episode_timeline(directory)`
+returns HTML and `load_recorded_replay(directory).evidence()` returns a detached
+JSON-compatible copy of the validated historical evidence.
+
 Interrupted attempts re-raise the original exception with an
 `episode_interruption` (`EpisodeInterruption`) record. It retains the episode ID,
 termination reason (`interrupted` for cancellation, `error` for ordinary exceptions),

@@ -284,6 +284,20 @@ class RecordedReplay:
         self._decisions = deepcopy(decisions)
         self._outcome = deepcopy(outcome)
 
+    def evidence(self):
+        """Return detached, JSON-compatible historical evidence for inspection.
+
+        Includes private evaluator observations; this is not a supervisor input.
+        Timestamps retain their original meaning, not replay execution timing.
+        """
+        return _plain({
+            'source_episode_id': self.source_episode_id,
+            'config': asdict(self.config),
+            'observations': [asdict(packet) for packet in self._packets],
+            'decisions': self._decisions,
+            'outcome': self._outcome,
+        })
+
     def run(self, recorder=None):
         packets, decisions = deepcopy((self._packets, self._decisions))
         config = self.config

@@ -240,7 +240,9 @@ reference index and reason in a finalized failed-attempt trace before terminatin
 without executing that proposal. It does not fabricate an observation or silently
 replace a diagnosis. Failed attempts are retained but not sealed as successful
 replays. Existing correction request decoders still return request data only;
-resolving a diagnosis does not grant intervention authority. The persistence gate remains in #53; no calibrated detector quality is claimed.
+resolving a diagnosis does not grant intervention authority. The optional persistence
+gate below adds a prerequisite for intervention consideration; no calibrated
+detector quality is claimed.
 
 `tests/fixtures/temporal_diagnoses.json` contains synthetic responses for every
 category. Run `python -m unittest discover -s tests -p test_temporal_diagnosis.py -v`
@@ -280,3 +282,48 @@ claim truth. No grasp-success classifier, calibrated perception quality, or
 privileged object state is introduced. Legacy responses remain supported.
 Run `python -m unittest discover -s tests -p test_temporal_conflicts.py -v` for
 both cases, correction suppression, confidence rejection and sealed replays.
+
+## Persistent evidence before intervention consideration
+
+`temporal_persistence.TemporalPersistenceGate` consumes the shared structured
+temporal diagnosis through `SupervisorResponseDecoder`, together with the
+adapter-owned `ObservationWindow`. It has no dependency on particular heuristic
+or model implementations. Future signal adapters must emit that same diagnosis
+contract; a boolean trigger alone is insufficient evidence.
+
+Construct `PersistenceSettings(required_windows, assessment_stride, calibration_id)`
+with explicit caller-owned values. The count must be 2 through 32; the stride is
+the positive observation-sequence distance between assessments. Record these
+settings with the run configuration and link `calibration_id` to the actual
+development calibration evidence. The software cannot attest that evidence exists
+or approve detector readiness. Tests use the explicitly synthetic identity
+`synthetic-v1`; no live calibration or performance is claimed.
+
+For every scheduled assessment, call
+`gate.assess(response_json, proposal, window=active_window)` and return its decision
+from the harness's `supervisor_decider`. This resolves references and records the
+persistence verdict in the temporal summary (or abstention reason for legacy
+responses). The verdict includes family, supporting window endpoints, settings,
+eligibility and the pass/fail reason. `gate.verdict` exposes the same current
+bounded evidence for inspection. The original evidence and conflicts are retained.
+
+Eligibility requires consecutive windows of the same suspected failure family,
+each citing its current observation, with increasing capture time and the declared
+stride. Rolling windows can overlap; citing only old observations cannot increment
+the count. Progress, uncertainty, conflicts, missing intervals and missing diagnoses
+clear the count. Episode/family changes, time reversal, duplicate assessments and
+stride gaps start a new count. Malformed/unresolved input clears eligibility before
+raising. Run the gate on quiet and uncertain assessments too; sparse event-only
+callbacks cannot establish continuity. Event-triggered extra assessments may reset
+a fixed-stride streak conservatively. Sensor freshness remains a separate gate.
+
+`gate.consider(proposal, candidate_producer)` invokes the producer only when the
+current proposal is eligible, otherwise returns `None`. A stale result cannot be
+used for a different proposal. The candidate is still unvalidated request data:
+all sensing, readiness, correction bounds, budgets and execution checks remain
+mandatory. The gate itself never executes a correction. Progress passes without
+eligibility; insufficient failure evidence abstains as unknown while healthy
+baseline execution continues.
+
+Run `python -m unittest discover -s tests -p test_temporal_persistence.py -v` for
+boundary/reset tests, candidate suppression and complete sealed episode replays.

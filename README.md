@@ -564,6 +564,13 @@ baseline fallback. Valid recovery/adjustment results remain request data and
 cannot authorize execution through this callback. Failed attempts retain their
 decision records but cannot be sealed as completed replay bundles.
 
+Responses must match all three active identities: episode, observation sequence
+and proposal. A response from a completed attempt remains invalid after reset,
+even when the new observation sequence matches. A previous decision cannot
+authorize the next proposal within an episode. The harness checks typed
+pass/abstention responses too and records identity mismatches as explicit
+rejections with the same retained failure evidence, before any environment step.
+
 Verify with
 `python -m unittest discover -s tests -p test_supervisor_response.py -v`.
 

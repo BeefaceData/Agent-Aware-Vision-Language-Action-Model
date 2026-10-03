@@ -898,11 +898,14 @@ def run_episode(
                             proposal_id, supervisor_observation(observation),
                             deepcopy(proposed_action)))
                         if (type(response) not in (SupervisorPass, SupervisorAbstention) or
+                            type(response.episode_id) is not str or
+                            type(response.proposal_id) is not str or
                             type(response.observation_sequence) is not int or
                             response.episode_id != episode_id or
                             response.observation_sequence != observation.sequence or
                             response.proposal_id != proposal_id):
-                            raise ValueError('supervisor response must reference the current proposal')
+                            raise SupervisorResponseError(
+                                'supervisor response must reference the current proposal')
                         if type(response) is SupervisorAbstention:
                             if (response.kind != 'abstain' or response.diagnosis != 'unknown' or
                                 not valid_abstention_details(response.reason,

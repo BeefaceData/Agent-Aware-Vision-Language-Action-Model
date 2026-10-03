@@ -1,6 +1,7 @@
 """Malformed provider data is rejected and remains diagnosable in traces."""
 
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -156,6 +157,84 @@ class SupervisorResponseTests(unittest.TestCase):
                                     self.bind(response, p), p))
                 self.assertEqual(environment.actions, [])
                 self.assertTrue(recorder.finalized)
+
+    def test_previous_episode_responses_are_rejected_and_logged(self):
+        for template in self.responses:
+            if template['kind'] == 'recovery':
+                template = template | {'evidence': [
+                    {'observation_sequence': 0, 'source': 'main_camera'}]}
+            for typed in (False, True) if template['kind'] in ('pass', 'abstain') else (False,):
+                with self.subTest(kind=template['kind'], typed=typed):
+                    config, policy, environment, recorder = self.fixture()
+                    previous = []
+
+                    def capture(proposal):
+                        bound = self.bind(template, proposal)
+                        decoded = self.decoder.decode(bound, proposal)
+                        previous.append(decoded if typed else bound)
+                        return self.decoder.decode(self.bind(self.responses[0], proposal), proposal)
+
+                    # Finish a real attempt, then deliver its response after reset.
+                    self.assertTrue(run_episode(config, policy, environment, recorder,
+                                                supervisor_decider=capture).success)
+                    stale = previous[0]
+                    self.assert_identity_rejection(
+                        lambda proposal: stale if typed else self.decoder.decode(stale, proposal),
+                        executed=[])
+
+    def test_superseded_response_identities_are_rejected_independently(self):
+        for template in self.responses:
+            if template['kind'] == 'recovery':
+                template = template | {'evidence': [
+                    {'observation_sequence': 0, 'source': 'main_camera'}]}
+            for field in ('episode_id', 'observation_sequence', 'proposal_id', 'all'):
+                for typed in (False, True) if template['kind'] in ('pass', 'abstain') else (False,):
+                    with self.subTest(kind=template['kind'], field=field, typed=typed):
+                        previous = []
+
+                        def decide(proposal):
+                            current = self.bind(template, proposal)
+                            decoded = self.decoder.decode(current, proposal)
+                            if not previous:
+                                previous.append(current)
+                                return self.decoder.decode(
+                                    self.bind(self.responses[0], proposal), proposal)
+                            old = previous[0]
+                            changes = (old if field == 'all' else
+                                       {field: 'previous-episode'} if field == 'episode_id' else
+                                       {field: old[field]})
+                            if typed:
+                                return replace(decoded,
+                                               **{key: value for key, value in changes.items()
+                                                  if key in ('episode_id', 'observation_sequence',
+                                                             'proposal_id')})
+                            return self.decoder.decode(current | changes, proposal)
+
+                        self.assert_identity_rejection(decide, executed=[[.1]])
+
+    def assert_identity_rejection(self, decide, executed):
+        config, policy, environment, recorder = self.fixture()
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary) / 'trace'
+            trace = TraceRecorder(directory, config, recorder)
+            with self.assertRaisesRegex(SupervisorResponseError, 'current proposal'):
+                run_episode(config, policy, environment, trace, supervisor_decider=decide)
+            self.assertEqual(environment.actions, executed)
+            self.assertTrue(recorder.finalized)
+            failure = recorder.failures[0][3]
+            self.assertEqual(failure.stage, 'supervisor')
+            record = failure.action_record
+            self.assertEqual(record.disposition, 'rejected')
+            self.assertIn('current proposal', record.rejection_reason)
+            self.assertIsNone(record.selected_action)
+            self.assertIsNone(record.executed_action)
+            self.assertIsNone(record.execution_acknowledgement)
+            rows = [json.loads(line) for line in
+                    (directory / 'decisions.jsonl').read_text().splitlines()]
+            self.assertEqual(len(rows), len(executed) + 1)
+            self.assertEqual(rows[-1]['action_record']['rejection_reason'], record.rejection_reason)
+            self.assertEqual(rows[-1]['action_record']['disposition'], 'rejected')
+            self.assertFalse((directory / 'manifest.json').exists())
 
 
 if __name__ == '__main__':

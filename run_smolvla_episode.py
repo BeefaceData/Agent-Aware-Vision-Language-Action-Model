@@ -29,8 +29,8 @@ from pathlib import Path
 from time import monotonic
 
 from camera_evidence import CameraEvidenceRecorder
-from episode_harness import (EpisodeConfig, ObservationPacket, StepResult,
-                             frame_references_for_observation, run_episode)
+from libero_adapter import LiberoEnvironmentAdapter
+from episode_harness import EpisodeConfig, run_episode
 
 
 def parse_args(argv=None):
@@ -145,39 +145,6 @@ def main():
                     raise RuntimeError(f'Invalid action: {action_numpy!r}')
                 return action_numpy
 
-        class BaselineEnvironment:
-            def reset(self, seed, episode_id):
-                self.episode_id = episode_id
-                self.sequence = 0
-                observation, _ = env.reset(seed=[seed])
-                captured_monotonic = monotonic()
-                captured_at = datetime.now(timezone.utc)
-                return ObservationPacket(episode_id, self.sequence,
-                                         captured_at, observation,
-                                         captured_monotonic,
-                                         frame_references_for_observation(
-                                             observation, self.sequence,
-                                             captured_at, captured_monotonic))
-
-            def step(self, action):
-                observation, reward, terminated, truncated, info = env.step(action)
-                captured_monotonic = monotonic()
-                captured_at = datetime.now(timezone.utc)
-                self.sequence += 1
-                success_info = info.get('final_info', info)
-                return StepResult(
-                    observation=ObservationPacket(
-                        self.episode_id, self.sequence,
-                        captured_at, observation, captured_monotonic,
-                        frame_references_for_observation(
-                            observation, self.sequence,
-                            captured_at, captured_monotonic)),
-                    reward=float(reward[0]),
-                    success=bool(np.asarray(success_info.get('is_success', [False])).reshape(-1)[0]),
-                    terminated=bool(terminated[0]),
-                    truncated=bool(truncated[0]),
-                )
-
         class BaselineRecorder:
             def __init__(self):
                 self.camera_evidence = None
@@ -185,8 +152,8 @@ def main():
                 self.cumulative_wait_seconds = 0.0
 
             def record_frame(self, packet):
-                # Returned pixels preserve the terminal observation even if the
-                # wrapper resets internally. Never replace a missing view.
+                # The adapter selects terminal evidence before recording.
+                # Never replace a missing view.
                 self.camera_evidence.record(packet)
 
             def begin(self, packet):
@@ -299,11 +266,13 @@ def main():
                       flush=True)
 
         outcome = run_episode(EpisodeConfig(args.seed, limit), BaselinePolicy(),
-                              BaselineEnvironment(), recorder, show_progress)
+                              LiberoEnvironmentAdapter(env), recorder, show_progress)
         summary.update(status='completed', steps=outcome.steps,
                        episode_id=outcome.episode_id,
                        success=outcome.success, sum_rewards=outcome.sum_rewards,
                        stop_reason=outcome.stop_reason,
+                       terminal_observation=(asdict(outcome.terminal_observation)
+                           if outcome.terminal_observation is not None else None),
                        rollout_seconds=outcome.rollout_seconds,
                        cumulative_wait_seconds=outcome.cumulative_wait_seconds,
                        video_path=outcome.artifacts.get('video_path'),

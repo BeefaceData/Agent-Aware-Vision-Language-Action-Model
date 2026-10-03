@@ -537,6 +537,12 @@ class StepResult:
 
 
 @dataclass(frozen=True)
+class ObservationReference:
+    episode_id: str
+    sequence: int
+
+
+@dataclass(frozen=True)
 class EpisodeOutcome:
     episode_id: str
     success: bool
@@ -547,6 +553,7 @@ class EpisodeOutcome:
     artifacts: Mapping[str, str]
     cumulative_wait_seconds: float = 0.0
     step_timings: tuple[StepTiming, ...] = ()
+    terminal_observation: ObservationReference | None = None
 
 
 class PolicyAdapter(Protocol):
@@ -620,6 +627,7 @@ def run_episode(
     steps = 0
     cumulative_wait = 0.0
     step_timings: list[StepTiming] = []
+    terminal_observation = None
 
     for step in range(1, config.max_steps + 1):
         action = policy.act(observation)
@@ -727,6 +735,8 @@ def run_episode(
         if on_step is not None:
             on_step(step, result)
         if success or result.terminated or result.truncated:
+            terminal_observation = ObservationReference(
+                result.observation.episode_id, result.observation.sequence)
             stop_reason = ('success' if success else
                            'terminated' if result.terminated else 'truncated')
             break
@@ -736,4 +746,4 @@ def run_episode(
     artifacts = recorder.finish()
     return EpisodeOutcome(episode_id, success, steps, stop_reason, reward_sum,
                           rollout_seconds, artifacts, cumulative_wait,
-                          tuple(step_timings))
+                          tuple(step_timings), terminal_observation)

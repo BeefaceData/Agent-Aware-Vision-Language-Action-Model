@@ -200,6 +200,35 @@ LIBERO camera references use `pixels.image` (main) and `pixels.image2` (wrist). 
 
 `supervisor_observation(packet)` constructs a detached supervisor packet and is always applied by `run_episode` before the supervisor callback. Its allowlist includes a string `task`, numeric `pixels.image`/`image2`, and numeric robot measurements: `position`, `orientation`, `joint_positions`, `joint_velocities`, `eef.pos`/`quat`, and `gripper.qpos`/`qvel`/`closed`. Numeric arrays become plain lists; invalid measurement payloads become unavailable (`None`). Unknown fields and nested metadata are omitted, including simulator object poses, rewards, and success predicates. Identity, capture times, and typed camera/state references remain available for freshness checks. Adapters must explicitly map additional deployable sensors to this contract; arbitrary raw observations are not supervisor inputs. The policy and recorder retain the original packet, and evaluator-only `StepResult` fields still control scoring and termination. This boundary trusts adapters to provide actual camera/state measurements and the declared task instruction; it cannot detect truth deliberately encoded as pixels or mislabeled measurements.
 
+For an explicit pass decision, supply `supervisor_decider(proposal)` to
+`run_episode`. It receives an `ActionProposal` with a detached native action and
+the same sanitized observation boundary described above. Return a typed response:
+
+```python
+from episode_harness import SupervisorPass
+
+def pass_current(proposal):
+    return SupervisorPass(
+        episode_id=proposal.observation.episode_id,
+        observation_sequence=proposal.observation.sequence,
+        proposal_id=proposal.proposal_id,
+    )
+
+# run_episode(config, policy, environment, recorder,
+#             supervisor_decider=pass_current)
+```
+
+The harness checks all three identities before executing the original proposal
+unchanged. Missing, untyped, stale or foreign responses produce a supervisor
+failure without executing that proposal. This callback has exclusive decision
+ownership and cannot be combined with `supervisor`, `window_supervisor` or
+`action_selector`. Accepted responses appear in `ActionRecord.supervisor_pass`
+and recorded trace evidence, including when the subsequent environment call
+fails; acknowledgement still requires a returned step result. Baseline execution
+leaves this field `None`. Sealed replay validates and retains historical pass
+evidence; replay execution uses the recorded action choices without calling a
+supervisor model. This pass-only interface makes no active-correction claim.
+
 For temporal supervision, pass `window_supervisor(window, proposed_action)` and
 optionally `window_settings=WindowSettings(max_observations=8, max_actions=8)`
 from `observation_window` to `run_episode`. Choose either this callback or the

@@ -235,6 +235,15 @@ def _load(directory, manifest):
         record = row['action_record']
         _require(record['proposal_id'] == f'{episode_id}:{index + 1}', 'foreign proposal')
         _require(record['proposed_action'] is not None, 'proposal missing')
+        response = record.get('supervisor_pass')
+        if response is not None:
+            _require(type(response) is dict and
+                     type(response.get('observation_sequence')) is int and
+                     response == {'kind': 'pass', 'episode_id': episode_id,
+                                  'observation_sequence': index,
+                                  'proposal_id': record['proposal_id']} and
+                     record['disposition'] == 'unmodified',
+                     'invalid supervisor pass evidence')
         result = row['result']
         last = index == len(decisions) - 1
         if record['disposition'] == 'rejected':

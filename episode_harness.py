@@ -569,6 +569,16 @@ class ActionProposal:
 
 
 @dataclass(frozen=True)
+class SupervisorPass:
+    """Explicit permission to execute exactly one current policy proposal."""
+
+    episode_id: str
+    observation_sequence: int
+    proposal_id: str
+    kind: Literal['pass'] = field(default='pass', init=False)
+
+
+@dataclass(frozen=True)
 class ActionResolution:
     """A deterministic execution choice; rejection does not call the environment."""
 
@@ -605,6 +615,7 @@ class ActionRecord:
     execution_acknowledgement: ExecutionAcknowledgement | None
     disposition: Literal['unmodified', 'overridden', 'rejected', 'unconfirmed']
     rejection_reason: str | None = None
+    supervisor_pass: SupervisorPass | None = None
 
 
 @dataclass(frozen=True)
@@ -741,6 +752,7 @@ def run_episode(
     action_selector: Callable[[ActionProposal], ActionResolution] | None = None,
     window_supervisor: Callable[[ObservationWindow, Any], None] | None = None,
     window_settings: WindowSettings | None = None,
+    supervisor_decider: Callable[[ActionProposal], SupervisorPass] | None = None,
 ) -> EpisodeOutcome:
     """Run one attempt and return task outcome and artifact finalization status.
 
@@ -768,6 +780,10 @@ def run_episode(
     ``supervisor``. It receives bounded sanitized history and acknowledged prior
     actions, using ``window_settings`` (defaults to eight packets/eight actions).
     Both callbacks are observation-only and cannot be configured together.
+    ``supervisor_decider`` instead receives a sanitized, detached ActionProposal
+    and must return a SupervisorPass matching its episode, observation and proposal.
+    It cannot be combined with other supervision or action selection callbacks.
+    A valid pass is retained in action evidence, including execution failures.
     """
     if type(config.max_steps) is not int or config.max_steps <= 0:
         raise ValueError('max_steps must be a positive integer')
@@ -775,6 +791,9 @@ def run_episode(
         raise ValueError('choose one supervisor callback')
     if window_settings is not None and window_supervisor is None:
         raise ValueError('window_settings requires window_supervisor')
+    if supervisor_decider is not None and any(callback is not None for callback in
+                                             (supervisor, window_supervisor, action_selector)):
+        raise ValueError('supervisor_decider requires exclusive decision ownership')
 
     from observation_window import ObservationWindowBuilder, WindowAction, WindowSettings
     settings = window_settings if window_settings is not None else WindowSettings()
@@ -829,15 +848,27 @@ def run_episode(
             action = policy.act(observation)
             proposed_action = deepcopy(action)
             proposal_id = f'{episode_id}:{step}'
+            pass_response = None
             proposal_for_supervisor = (deepcopy(proposed_action)
                                        if supervisor is not None or window_supervisor is not None
                                        else None)
             request_at = clock()
             if observation.captured_monotonic > request_at:
                 raise ValueError('observation capture is in the future of the episode clock')
-            if supervisor is not None or window_supervisor is not None:
+            if (supervisor is not None or window_supervisor is not None or
+                supervisor_decider is not None):
                 try:
-                    if window_supervisor is not None:
+                    if supervisor_decider is not None:
+                        pass_response = supervisor_decider(ActionProposal(
+                            proposal_id, supervisor_observation(observation),
+                            deepcopy(proposed_action)))
+                        if (type(pass_response) is not SupervisorPass or
+                            type(pass_response.observation_sequence) is not int or
+                            pass_response.episode_id != episode_id or
+                            pass_response.observation_sequence != observation.sequence or
+                            pass_response.proposal_id != proposal_id):
+                            raise ValueError('supervisor pass must reference the current proposal')
+                    elif window_supervisor is not None:
                         if history is None:
                             task = supervisor_observation(observation).observation.get('task')
                             history = ObservationWindowBuilder(episode_id, task, settings)
@@ -917,7 +948,7 @@ def run_episode(
                         cumulative_wait),
                         ActionRecord(proposal_id, deepcopy(proposed_action),
                                      deepcopy(selected_action), None, None,
-                                     'unconfirmed')))
+                                     'unconfirmed', supervisor_pass=pass_response)))
                 raise
             execution_finished_at = clock()
             timing = StepTiming(observation.captured_monotonic, request_at,
@@ -931,7 +962,8 @@ def run_episode(
                                                           ObservationPacket) else None)
             result = replace(result, timing=timing, action_record=ActionRecord(
                 proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
-                deepcopy(selected_action), acknowledgement, disposition))
+                deepcopy(selected_action), acknowledgement, disposition,
+                supervisor_pass=pass_response))
             acknowledged_actions.append(deepcopy(result.action_record))
             reward_sum += result.reward
             steps = step

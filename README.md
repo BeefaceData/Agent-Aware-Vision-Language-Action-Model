@@ -496,6 +496,44 @@ request there fails before execution. Tool registry and execution integration ar
 separate work. Run the public recorded-response and no-execution checks with
 `python -m unittest discover -s tests -p test_supervisor_recovery.py -v`.
 
+### Recorded numerical adjustment interface
+
+`supervisor_adjustment.AdjustmentRequestDecoder` parses a recorded response for
+exactly one current policy proposal. Configure its target arm/group, frame and
+named components from trusted adapter settings:
+
+```python
+from dataclasses import asdict
+from supervisor_adjustment import AdjustmentComponent, AdjustmentRequestDecoder
+
+# Synthetic interface bounds only, not calibrated robot limits.
+decoder = AdjustmentRequestDecoder("left_arm", "world", (
+    AdjustmentComponent("translation_x", "m", -0.03, 0.03),
+    AdjustmentComponent("rotation_z", "rad", -0.05, 0.05),
+))
+request = decoder.decode(recorded_response, current_proposal)
+proposed_adjustment_record = asdict(request)  # JSON-serializable evidence
+```
+
+See [adjustment_response.json](tests/fixtures/adjustment_response.json) for the
+wire format. The response carries episode/observation/proposal/decision identities,
+target, frame, per-component units and numerical residuals. Every configured
+component is required, including an explicit zero for an unchanged component.
+Residuals are additive changes, not replacement actions. `kind: adjustment` and
+`scope: single_action` distinguish this request from recovery and reject persistent
+or chunk-wide adjustments. Unknown fields, stale identities, mismatched semantics,
+booleans, nonfinite values and values outside caller-owned bounds fail decoding.
+
+The immutable result records the proposed adjustment without modifying the policy
+action. Recording via `asdict` produces ordered component/value pairs for units and
+residuals; the wire input uses objects. This decoder does not map native action
+indices, convert frames/units, validate the resulting action, or establish robot
+readiness. A configured group name does not establish coordinated execution.
+Executor integration remains separate: returning this request directly from
+`run_episode`'s decision callback is rejected before execution. Public fixture,
+recording and rejection checks:
+`python -m unittest discover -s tests -p test_supervisor_adjustment.py -v`.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

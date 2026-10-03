@@ -1,0 +1,12 @@
+{
+  "kind": "adjustment",
+  "scope": "single_action",
+  "episode_id": "fixture-episode",
+  "observation_sequence": 2,
+  "proposal_id": "fixture-proposal",
+  "decision_id": "fixture-adjustment",
+  "target": "left_arm",
+  "frame": "world",
+  "units": {"translation_x": "m", "rotation_z": "rad"},
+  "residual": {"translation_x": 0.01, "rotation_z": -0.02}
+}

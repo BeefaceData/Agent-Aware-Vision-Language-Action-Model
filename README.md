@@ -636,6 +636,50 @@ These are preliminary local observations from **one episode per task**, not stat
 
 The uploaded action log contained 520 consecutive entries with seven finite action values each. Visual review suggested the first container reached the basket, followed by repeated unsuccessful attempts to pick up the second. This is a qualitative observation; the simulator's final outcome confirms only that the complete task was not achieved.
 
+## Recorded supervisor responses
+
+`RecordedSupervisor(bundle)` in `supervisor_replay.py` is an offline
+`supervisor_decider` callback. Load a JSON bundle with `json.loads`, then pass
+the adapter to `run_episode`. It has no provider connection or fallback.
+
+```json
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "episode_id": "attempt-id",
+      "observation_sequence": 0,
+      "proposal_id": "attempt-id:1",
+      "response": {
+        "kind": "pass",
+        "episode_id": "attempt-id",
+        "observation_sequence": 0,
+        "proposal_id": "attempt-id:1"
+      }
+    }
+  ]
+}
+```
+
+Each fixture matches the full episode/observation/proposal identity, including
+the identity inside its structured response. A new harness attempt generates a
+new episode ID; author fixtures explicitly for that ID from the public reset
+packet before decisions begin. The adapter never silently rebinds old evidence.
+The complete-episode test demonstrates this using the recorder's `begin` hook.
+Repeated requests for an identical key return detached decisions. Duplicate keys
+or unsupported bundle versions fail at construction; missing keys and malformed
+responses fail visibly at request time.
+
+Use the same structured abstention/recovery/adjustment response schemas described
+above (corrections still require caller-configured decoders and grant no execution
+authority). To reproduce a provider failure, replace `response` with
+`"error": "provider_error"`. Errors follow the harness's recorded rejection and
+finalization path without executing the rejected proposal or contacting a model.
+These synthetic fixtures verify software behavior, not model diagnosis quality.
+
+Verify with
+`python -m unittest discover -s tests -p test_supervisor_replay.py -v`.
+
 ## Supervisor roadmap
 
 1. **Offline observation:** process task instructions and chronological frame windows from recorded episodes.

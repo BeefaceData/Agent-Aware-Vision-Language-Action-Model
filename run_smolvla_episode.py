@@ -31,7 +31,7 @@ from time import monotonic
 from camera_evidence import CameraEvidenceRecorder
 from artifact_finalization import ArtifactResources
 from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon
-from episode_harness import EpisodeConfig, run_episode
+from episode_harness import EpisodeConfig, exception_stop_reason, run_episode
 from recorded_replay import TraceRecorder
 
 
@@ -107,6 +107,7 @@ def main():
         'steps': 0, 'success': False,
         'requested_max_steps': args.max_steps,
         'artifact_status': 'incomplete', 'artifact_diagnostics': [],
+        'task_status': 'unknown',
     }
     env = recorder = None
     start = monotonic()
@@ -287,7 +288,7 @@ def main():
                        artifact_diagnostics=list(outcome.artifact_diagnostics),
                        episode_id=outcome.episode_id,
                        success=outcome.success, sum_rewards=outcome.sum_rewards,
-                       stop_reason=outcome.stop_reason,
+                       stop_reason=outcome.stop_reason, task_status=outcome.task_status,
                        terminal_observation=(asdict(outcome.terminal_observation)
                            if outcome.terminal_observation is not None else None),
                        rollout_seconds=outcome.rollout_seconds,
@@ -305,13 +306,18 @@ def main():
     except BaseException as exc:
         summary.update(status='interrupted' if not isinstance(exc, Exception) else 'error',
                        error=f'{type(exc).__name__}: {exc}',
-                       error_type=type(exc).__name__,
-                       stop_reason='interrupted' if not isinstance(exc, Exception) else 'error')
+                       error_type=type(exc).__name__)
+        # Sealing/cleanup errors cannot replace an already returned episode reason.
+        if 'stop_reason' not in summary:
+            summary.update(stop_reason=exception_stop_reason(exc))
         partial = getattr(exc, 'episode_interruption', None)
         if partial is not None:
             summary.update(episode_id=partial.episode_id, steps=partial.steps,
                            sum_rewards=partial.sum_rewards,
-                           partial_evidence=asdict(partial))
+                           partial_evidence=asdict(partial),
+                           stop_reason=partial.stop_reason, task_status=partial.task_status,
+                           artifact_status=partial.artifact_status,
+                           success=partial.task_status == 'success')
             summary['artifact_diagnostics'].extend(partial.artifact_diagnostics)
         raise
     finally:

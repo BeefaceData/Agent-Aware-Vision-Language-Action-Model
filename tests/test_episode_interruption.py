@@ -64,7 +64,7 @@ class EpisodeInterruptionTests(unittest.TestCase):
                     self.assertEqual(len(evidence.acknowledged_actions), count)
                     self.assertEqual(evidence.error_type, type(error).__name__)
                     self.assertEqual(evidence.stop_reason,
-                                     'interrupted' if isinstance(error, KeyboardInterrupt) else 'error')
+                                     'interrupted' if isinstance(error, KeyboardInterrupt) else 'timeout')
                     self.assertIn('OSError: video close failed', evidence.artifact_diagnostics)
                     if stage in ('supervisor', 'execution'):
                         self.assertIn('OSError: failure log unavailable', evidence.artifact_diagnostics)

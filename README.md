@@ -304,7 +304,8 @@ JSON-compatible copy of the validated historical evidence.
 
 Interrupted attempts re-raise the original exception with an
 `episode_interruption` (`EpisodeInterruption`) record. It retains the episode ID,
-termination reason (`interrupted` for cancellation, `error` for ordinary exceptions),
+termination reason (`interrupted` for cancellation, `timeout` for `TimeoutError`,
+and `infrastructure_failure` for other ordinary exceptions),
 exception category, acknowledged action count and records, reward sum, and a detached
 copy of the last accepted observation. A command whose environment call raises is
 not acknowledged. Recorder finalization is attempted on failure; recording and
@@ -325,6 +326,39 @@ with an error for incomplete artifacts. Paths retained there after failure ident
 partial evidence, not verified usable files. Video and log close failures are collected
 across all sinks; repeated cleanup cannot clear a failed finalization. A task failure
 can still have a completely finalized evidence package.
+
+### Terminal categories and report denominators
+
+`EpisodeOutcome`, `EpisodeInterruption`, and CLI `result.json` expose separate
+`stop_reason`, `task_status`, and `artifact_status` fields. Retain all attempts
+and these categories for later protocol-specific denominators.
+
+| Stop reason | Task status | Meaning |
+|---|---|---|
+| `success` | `success` | Evaluator success takes precedence over terminal flags. |
+| `terminated` | `failure` | Environment ended the task without success. |
+| `step_limit` | `failure` | Action budget exhausted without success. |
+| `truncated` | `unknown` | Environment cut execution short. |
+| `proposal_rejected` | `unknown` | Executor rejected a proposal before sending it. |
+| `timeout` | Last established status, otherwise `unknown` | An adapter/callback raised `TimeoutError`. |
+| `interrupted` | Last established status, otherwise `unknown` | Cancellation or another non-`Exception` interruption. |
+| `infrastructure_failure` | Last established status, otherwise `unknown` | Ordinary execution, observation, policy, or recording exception. |
+
+Task status comes from accepted evaluator observations or budget exhaustion.
+Recording/callback faults after an accepted terminal result preserve its task
+status alongside the fault's reason. Interrupted attempts have incomplete
+artifacts even if cleanup succeeds. Ordinary finalization or sealing failures
+after a completed rollout retain its original reason and task status, marking
+artifacts incomplete. The legacy `success: false` alone does not establish policy
+failure: inspect `task_status` and `stop_reason`. These fields do not choose
+exclusions or approve a scientific denominator. Truncation is not automatically
+a timeout. Adapters must raise `TimeoutError` for deadline failures; this change
+adds no deadlines or retries.
+
+Version-1 sealed bundles retain their existing outcome fields (`success` and
+`stop_reason` included); replay returns the derived `task_status`. Immutable
+fixtures need no rewriting. Public checks are in
+`tests/test_episode_termination.py` and `tests/test_episode_interruption.py`.
 
 ## Initial baseline results
 

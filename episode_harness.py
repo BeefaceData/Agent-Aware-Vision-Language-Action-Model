@@ -9,7 +9,7 @@ policy through this interface.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from math import isfinite
 from time import monotonic
@@ -638,6 +638,20 @@ class EpisodeOutcome:
     terminal_observation: ObservationReference | None = None
     artifact_status: Literal['incomplete', 'completed'] = 'incomplete'
     artifact_diagnostics: tuple[str, ...] = ()
+    task_status: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, 'task_status',
+                           'success' if self.success else
+                           'failure' if self.stop_reason in ('terminated', 'step_limit')
+                           else 'unknown')
+
+
+def exception_stop_reason(error: BaseException) -> str:
+    """Classify the original failure independently of cleanup diagnostics."""
+    if not isinstance(error, Exception):
+        return 'interrupted'
+    return 'timeout' if isinstance(error, TimeoutError) else 'infrastructure_failure'
 
 
 @dataclass(frozen=True)
@@ -656,6 +670,8 @@ class EpisodeInterruption:
     last_observation: ObservationPacket | None
     acknowledged_actions: tuple[ActionRecord, ...]
     artifact_diagnostics: tuple[str, ...]
+    task_status: str = 'unknown'
+    artifact_status: str = 'incomplete'
 
 
 class PolicyAdapter(Protocol):
@@ -742,6 +758,7 @@ def run_episode(
     reward_sum = 0.0
     steps = 0
     interruption_diagnostics = []
+    task_status = 'unknown'
 
     def record_failure(*args):
         try:
@@ -878,6 +895,12 @@ def run_episode(
             ingestion = ingestor.ingest(result.observation, execution_finished_at)
             if ingestion.accepted:
                 last_observation = deepcopy(result.observation)
+                if result.success:
+                    task_status = 'success'
+                elif result.terminated:
+                    task_status = 'failure'
+                elif not result.truncated and step == config.max_steps:
+                    task_status = 'failure'
             recorder.record_step(step, observation, deepcopy(selected_action), result,
                                  ingestion)
             if not ingestion.accepted:
@@ -905,9 +928,9 @@ def run_episode(
                 interruption_diagnostics.append(
                     f'{type(cleanup_error).__name__}: {cleanup_error}')
         exc.episode_interruption = EpisodeInterruption(
-            episode_id, 'interrupted' if not isinstance(exc, Exception) else 'error',
+            episode_id, exception_stop_reason(exc),
             type(exc).__name__, steps, reward_sum, last_observation,
-            tuple(acknowledged_actions), tuple(interruption_diagnostics))
+            tuple(acknowledged_actions), tuple(interruption_diagnostics), task_status)
         raise
 
     rollout_seconds = clock() - rollout_start
@@ -921,6 +944,14 @@ def run_episode(
         # Task outcome is already known. Encoding failure must not erase it or
         # present partial paths as a successfully finalized evidence package.
         diagnostics = (f'{type(exc).__name__}: {exc}',)
+    except BaseException as exc:
+        exc.episode_interruption = EpisodeInterruption(
+            episode_id, exception_stop_reason(exc), type(exc).__name__,
+            steps, reward_sum, last_observation, tuple(acknowledged_actions),
+            (f'{type(exc).__name__}: {exc}',),
+            'success' if success else 'failure' if stop_reason in
+            ('terminated', 'step_limit') else 'unknown')
+        raise
     return EpisodeOutcome(episode_id, success, steps, stop_reason, reward_sum,
                           rollout_seconds, artifacts, cumulative_wait,
                           tuple(step_timings), terminal_observation,

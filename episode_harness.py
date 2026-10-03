@@ -79,6 +79,85 @@ class FrameReference:
     time_basis: Literal['observation_return', 'camera_capture'] | None
 
 
+def supervisor_observation(packet: ObservationPacket) -> ObservationPacket:
+    """Copy only declared deployable fields across the supervision boundary.
+
+    Raw environment mappings belong to the policy/recorder. Unknown fields,
+    including nested metadata, are omitted rather than filtered by secret names.
+    Adapters must map additional sensors to this contract before exposing them.
+    Numeric payloads are rebuilt as plain values, removing array/object metadata.
+    """
+    def measurement(value):
+        if type(value) in (int, float, bool):
+            return value if isfinite(value) else None
+        if isinstance(value, (list, tuple)):
+            items = [measurement(item) for item in value]
+            return items if items and all(item is not None for item in items) else None
+        if hasattr(value, 'tolist'):
+            try:
+                return measurement(value.tolist())
+            except (TypeError, ValueError, RuntimeError):
+                return None
+        return None
+
+    raw = packet.observation if isinstance(packet.observation, Mapping) else {}
+    allowed = {}
+    if type(raw.get('task')) is str:
+        allowed['task'] = raw['task']
+    pixels = raw.get('pixels')
+    if isinstance(pixels, Mapping):
+        allowed['pixels'] = {key: measurement(pixels[key])
+                             for key in ('image', 'image2') if key in pixels}
+    state = raw.get('robot_state')
+    if isinstance(state, Mapping):
+        clean_state = {}
+        for key in ('position', 'orientation', 'joint_positions', 'joint_velocities'):
+            if key in state:
+                clean_state[key] = measurement(state[key])
+        for group, fields in (('eef', ('pos', 'quat')),
+                              ('gripper', ('qpos', 'qvel', 'closed'))):
+            if isinstance(state.get(group), Mapping):
+                clean_state[group] = {key: measurement(state[group][key])
+                                      for key in fields if key in state[group]}
+        allowed['robot_state'] = clean_state
+    def valid_capture(sequence, wall, mono):
+        return (type(sequence) is int and type(wall) is datetime and
+                type(mono) in (int, float) and isfinite(mono))
+
+    # Reject malformed metadata rather than forwarding nested payloads in typed slots.
+    for ref in packet.frame_references:
+        if (type(ref) is not FrameReference or
+            ref.camera not in ('main', 'wrist') or
+            ref.image_key != ('pixels.image' if ref.camera == 'main' else 'pixels.image2') or
+            type(ref.observation_sequence) is not int or
+            (ref.captured_at is not None and type(ref.captured_at) is not datetime) or
+            (ref.captured_monotonic is not None and
+             (type(ref.captured_monotonic) not in (int, float) or
+              not isfinite(ref.captured_monotonic))) or
+            ref.availability not in ('available', 'missing') or
+            ref.synchronization not in ('co_observed', 'verified', 'unsynchronized',
+                                        'unpaired', 'unavailable') or
+            ref.time_basis not in (None, 'observation_return', 'camera_capture')):
+            raise ValueError('invalid supervisor camera metadata')
+    # Reconstruct typed metadata rather than copying arbitrary attached attributes.
+    references = tuple(FrameReference(
+        ref.camera, ref.observation_sequence, ref.image_key, ref.captured_at,
+        ref.captured_monotonic, ref.availability, ref.synchronization, ref.time_basis)
+        for ref in packet.frame_references)
+    capture = packet.robot_state_capture
+    if capture is not None and (
+        type(capture) is not RobotStateCapture or not valid_capture(
+            capture.observation_sequence, capture.captured_at, capture.captured_monotonic)
+    ):
+        raise ValueError('invalid supervisor robot-state metadata')
+    state_capture = (RobotStateCapture(capture.observation_sequence,
+                                      capture.captured_at, capture.captured_monotonic)
+                     if type(capture) is RobotStateCapture else None)
+    return ObservationPacket(packet.episode_id, packet.sequence, packet.captured_at,
+                             allowed, packet.captured_monotonic, references,
+                             state_capture)
+
+
 def frame_references_for_observation(
     observation: Mapping[str, Any], sequence: int,
     captured_at: datetime, captured_monotonic: float,
@@ -600,7 +679,7 @@ def run_episode(
     before raising; failures do not produce a completed outcome.
     The caller releases adapter resources on any exception. ``clock`` must be
     monotonic and share a timebase with each packet's ``captured_monotonic``.
-    ``supervisor`` observes the packet and a copy of the proposed action before
+    ``supervisor`` observes an allowlisted packet and a copy of the proposed action before
     execution; it has no execution authority here. ``action_selector`` is an
     injected, deterministic execution choice for replay or a validated executor.
     Its input and output actions are copied so neither it nor the environment can
@@ -639,7 +718,7 @@ def run_episode(
             raise ValueError('observation capture is in the future of the episode clock')
         if supervisor is not None:
             try:
-                supervisor(observation, proposal_for_supervisor)
+                supervisor(supervisor_observation(observation), proposal_for_supervisor)
             except BaseException as exc:
                 request_finished_at = clock()
                 cumulative_wait += request_finished_at - request_at

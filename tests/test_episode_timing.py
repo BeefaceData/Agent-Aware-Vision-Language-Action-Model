@@ -153,8 +153,8 @@ class EpisodeTimingTests(unittest.TestCase):
         self.assertEqual(outcome.steps, 2)
         self.assertEqual(fixture.environment.actions,
                          [('reach', 0.25), ('place', 0.75)])
-        self.assertEqual(requests, [(0, 'item visible', ('reach', 0.25)),
-                                    (1, 'item held', ('place', 0.75))])
+        self.assertEqual(requests, [(0, {}, ('reach', 0.25)),
+                                    (1, {}, ('place', 0.75))])
         self.assertEqual(outcome.cumulative_wait_seconds, 10.0)
         self.assertEqual(outcome.rollout_seconds, 16.0)
         self.assertEqual(

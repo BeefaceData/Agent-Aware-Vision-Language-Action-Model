@@ -117,11 +117,11 @@ class ObservationFreshnessTests(unittest.TestCase):
 
     def test_complete_episode_reports_absent_camera_delayed_wrist_and_stale_state(self):
         state = {'eef': {'pos': [0.0, 0.0, 0.0]}, 'gripper': {'qpos': [0.0]}}
-        initial = observation('main 0', 'wrist 0', state)
-        no_main = observation(wrist='wrist 1', state=state)
-        old_wrist = observation('main 2', 'wrist 1', state)
-        old_state = observation('main 3', 'wrist 3', state)
-        terminal = observation('main 4', 'wrist 4', state)
+        initial = observation(0, 0, state)
+        no_main = observation(wrist=1, state=state)
+        old_wrist = observation(2, 1, state)
+        old_state = observation(3, 3, state)
+        terminal = observation(4, 4, state)
         delayed_cameras = {
             'main': ViewCapture(2, START + timedelta(seconds=2), 10.0),
             'wrist': ViewCapture(1, START + timedelta(seconds=1), 8.0),

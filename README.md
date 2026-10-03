@@ -915,3 +915,12 @@ or correction eligibility; those interpretations remain with the supervisor.
 thresholds, view selection, bounded samples, missing/incompatible evidence,
 episode isolation and successful/unsuccessful complete sealed replays with
 unchanged execution. No live model calls or calibration runs are involved.
+
+## Offline detector metrics
+
+Use [the detector metrics workflow](docs/detector-metrics.md) to compare declared
+event outputs with reviewed development annotations on a sealed trace. It reports
+per-family precision/recall, onset-interval delay bounds, unmatched events,
+unknown/abstention counts and executed interventions during reviewed productive
+intervals. Synthetic fixtures verify the calculations without establishing
+detector calibration or intervention readiness.

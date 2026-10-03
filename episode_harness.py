@@ -128,6 +128,10 @@ def supervisor_observation(packet: ObservationPacket) -> ObservationPacket:
             if isinstance(state.get(group), Mapping):
                 clean_state[group] = {key: measurement(state[group][key])
                                       for key in fields if key in state[group]}
+                if group == 'eef':
+                    for key in ('frame', 'position_units'):
+                        if type(state[group].get(key)) is str:
+                            clean_state[group][key] = state[group][key]
         allowed['robot_state'] = clean_state
     def valid_capture(sequence, wall, mono):
         return (type(sequence) is int and type(wall) is datetime and

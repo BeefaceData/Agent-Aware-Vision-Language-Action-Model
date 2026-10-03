@@ -828,3 +828,41 @@ The implementation was checked against the published LeRobot 0.4.3 source during
 - [Original LIBERO project](https://github.com/Lifelong-Robot-Learning/LIBERO)
 
 Built on the work of the SmolVLA, LeRobot, LIBERO, robosuite, and MuJoCo contributors.
+
+## End-effector progress assessment
+
+`EndEffectorProgressTrigger(ProgressSettings(frame='world', position_units='m'))`
+from `end_effector_progress` plugs into `run_episode`'s `assessment_trigger`.
+The adapter must explicitly supply `robot_state.eef.pos` (finite xyz),
+`eef.frame`, and `eef.position_units` on every observation. The sanitizer retains
+these two string metadata fields. Use actual adapter semantics; this trigger
+neither assumes LIBERO coordinates nor converts between frames or units.
+Missing or incompatible metadata/state is unknown, never zero displacement.
+
+The default window contains four consecutive samples spanning at least 0.1 and
+at most 2 seconds, with maximum pairwise Euclidean displacement <= 0.001 in the
+declared units. Configure these values for the task and retain the frozen
+settings with the run configuration. Pairwise distance counts an excursion even
+when the end effector returns to its starting position. Sequence gaps, episode
+changes, invalid samples and non-increasing packet times break the history.
+Expired samples are discarded, and storage is bounded by the sample count.
+
+Inspect and retain `trigger.evidence` after each call: it contains proposal and
+observation identities, positions, packet monotonic times, settings, elapsed
+interval, displacement (or `None`), status and limitations. Packet time does
+not establish sensor freshness; use the existing observation eligibility gate
+when verified state age is required. Missing camera views do not become motion
+measurements; camera eligibility remains a separate assessment requirement.
+
+A low-progress window emits once until the condition clears. Stationary
+productive work or an intentional pause can produce the same evidence as a
+stall. Only supervisor assessment can interpret it using additional context;
+the trigger cannot diagnose task failure or authorize correction. Periodic
+assessment continues while evidence is unknown. The caller's evidence sink
+retains these diagnostic records; the sealed trace retains the resulting
+supervisor decisions and executed actions.
+
+`python -m unittest discover -s tests -p test_end_effector_progress.py -v`
+checks distance/interval boundaries, frame and state loss, episode isolation,
+and complete sealed replays of stall candidates, intentional pauses, motion,
+and unknown observations with unchanged policy execution.

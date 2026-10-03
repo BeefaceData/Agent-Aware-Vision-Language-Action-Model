@@ -24,6 +24,12 @@ if TYPE_CHECKING:
 class EpisodeConfig:
     seed: int
     max_steps: int
+    supervisor_interval_actions: int = 1
+
+    def __post_init__(self):
+        if (type(self.supervisor_interval_actions) is not int or
+                self.supervisor_interval_actions <= 0):
+            raise ValueError('supervisor_interval_actions must be a positive integer')
 
 
 @dataclass(frozen=True)
@@ -785,6 +791,7 @@ def run_episode(
     window_supervisor: Callable[[ObservationWindow, Any], None] | None = None,
     window_settings: WindowSettings | None = None,
     supervisor_decider: Callable[[ActionProposal], SupervisorPass | SupervisorAbstention] | None = None,
+    assessment_trigger: Callable[[ActionProposal], bool] | None = None,
 ) -> EpisodeOutcome:
     """Run one attempt and return task outcome and artifact finalization status.
 
@@ -823,11 +830,22 @@ def run_episode(
     only on step(); this is not a physical-controller hold/stop implementation.
     Use a bounded decider to impose a deadline; callback failures retain waiting
     time and terminate the attempt without executing the pending proposal.
+    The decider is assessed before action 1 and every configured interval of
+    acknowledged actions thereafter. An optional sanitized assessment_trigger
+    adds assessments between these fixed boundaries; it never postpones them.
+    Coincident periodic/event requests use one call and pending calls block the
+    loop. Skipped assessments retain no supervisor response in action evidence.
     """
     if type(config.max_steps) is not int or config.max_steps <= 0:
         raise ValueError('max_steps must be a positive integer')
     if supervisor is not None and window_supervisor is not None:
         raise ValueError('choose one supervisor callback')
+    if assessment_trigger is not None and (
+            supervisor_decider is None or not callable(assessment_trigger)):
+        raise ValueError('assessment_trigger requires supervisor_decider and a callable')
+    if config.supervisor_interval_actions != 1 and (
+            supervisor is not None or window_supervisor is not None):
+        raise ValueError('periodic assessment requires supervisor_decider')
     if window_settings is not None and window_supervisor is None:
         raise ValueError('window_settings requires window_supervisor')
     if supervisor_decider is not None and any(callback is not None for callback in
@@ -898,7 +916,15 @@ def run_episode(
             if (supervisor is not None or window_supervisor is not None or
                 supervisor_decider is not None):
                 try:
-                    if supervisor_decider is not None:
+                    assessment_due = (step - 1) % config.supervisor_interval_actions == 0
+                    if assessment_trigger is not None:
+                        triggered = assessment_trigger(ActionProposal(
+                            proposal_id, supervisor_observation(observation),
+                            deepcopy(proposed_action)))
+                        if type(triggered) is not bool:
+                            raise ValueError('assessment_trigger must return bool')
+                        assessment_due = assessment_due or triggered
+                    if supervisor_decider is not None and assessment_due:
                         response = supervisor_decider(ActionProposal(
                             proposal_id, supervisor_observation(observation),
                             deepcopy(proposed_action)))
@@ -925,7 +951,7 @@ def run_episode(
                             history = ObservationWindowBuilder(episode_id, task, settings)
                         history.append(observation)
                         window_supervisor(history.snapshot(), proposal_for_supervisor)
-                    else:
+                    elif supervisor is not None:
                         supervisor(supervisor_observation(observation), proposal_for_supervisor)
                 except BaseException as exc:
                     request_finished_at = clock()

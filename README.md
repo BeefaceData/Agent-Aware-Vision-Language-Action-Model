@@ -627,6 +627,34 @@ while pending and rejects competing provider requests, then seals and replays th
 successful branch. Its timeout branch preserves the first action and records the
 second proposal's rejection, including waiting time and no late execution.
 
+### Periodic and event-triggered assessments
+
+Set `EpisodeConfig(seed=17, max_steps=20, supervisor_interval_actions=4)`
+and pass `supervisor_decider` to assess before action 1, then after 4, 8, 12,
+and 16 acknowledged actions. The positive integer interval defaults to 1.
+Its units are executed actions, not seconds or policy chunks; `TraceRecorder`
+retains `config.supervisor_interval_actions` in the sealed manifest. Older
+manifests without this field use the default. Cadence restarts each episode.
+
+An optional `assessment_trigger(proposal) -> bool` receives a detached,
+sanitized current proposal on every action and can request an extra assessment.
+Event assessments do not shift periodic boundaries. A coincident event and
+periodic boundary produce one decider call. The synchronous loop cannot advance
+or enqueue another assessment while that call is pending. Use the bounded
+provider above for deadlines. This action-based schedule makes no wall-clock
+latency guarantee and does not enable physical operation.
+
+On unscheduled actions, the baseline proposal executes and the action record
+contains no supervisor response; a skipped assessment is not a model pass or
+abstention. Trigger errors terminate the attempt through supervisor-failure
+recording. The cadence option applies to `supervisor_decider`; legacy packet
+and window observation callbacks still run on every action and reject a
+nondefault interval. Baseline-only runs make no supervisor calls.
+
+Run `python -m unittest discover -s tests -p test_assessment_schedule.py -v`
+for a 20-action quiet episode, extra/overlapping events, pending-call ordering,
+episode reset, configuration validation, and complete sealed replay.
+
 ## Initial baseline results
 
 The following results were recorded on September 25, 2026, using the pretrained policy without a supervisor. Suite evaluations used LeRobot's evaluator with one episode per task and serial execution; the standalone runner was tested separately.

@@ -24,10 +24,10 @@ import json
 import os
 from dataclasses import asdict
 from datetime import datetime, timezone
-from importlib.metadata import version
 from pathlib import Path
 from time import monotonic
 
+from baseline_environment import capture_environment
 from camera_evidence import CameraEvidenceRecorder
 from artifact_finalization import ArtifactResources
 from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon
@@ -72,11 +72,14 @@ def main():
         args.max_steps is not None and args.max_steps <= 0
     ):
         raise ValueError('Task ID must be nonnegative; FPS and max steps must be positive.')
-    if version('lerobot') != '0.4.3':
-        raise RuntimeError('This script targets lerobot==0.4.3; activate smolvla_libero.')
-
     # Must precede simulator imports. Respect an explicitly selected backend.
     os.environ.setdefault('MUJOCO_GL', 'egl')
+    out = args.output_dir or Path('outputs') / (
+        f'smolvla_{args.suite}_task{args.task_id}_'
+        + datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    )
+    out.mkdir(parents=True, exist_ok=False)
+    environment = capture_environment(out / 'environment.json', args.device)
     import gymnasium as gym
     import imageio.v2 as imageio
     import numpy as np
@@ -87,14 +90,7 @@ def main():
     from lerobot.envs.utils import add_envs_task, preprocess_observation
     from lerobot.utils.random_utils import set_seed
 
-    if args.device == 'cuda' and not torch.cuda.is_available():
-        raise RuntimeError('CUDA unavailable in this interpreter. Check the active environment.')
     set_seed(args.seed)
-    out = args.output_dir or Path('outputs') / (
-        f'smolvla_{args.suite}_task{args.task_id}_'
-        + datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    )
-    out.mkdir(parents=True, exist_ok=False)
     video_path = out / 'episode.mp4'
     wrist_video_path = out / 'episode_wrist.mp4'
     frames_path = out / 'frames.jsonl'
@@ -104,7 +100,8 @@ def main():
         'policy_revision': POLICY_REVISION, 'policy_assets': None,
         'device': args.device, 'video_fps': args.video_fps,
         'render_backend': os.environ['MUJOCO_GL'],
-        'versions': {p: version(p) for p in ['lerobot', 'torch', 'gymnasium', 'hf-libero']},
+        'environment_manifest': 'environment.json',
+        'versions': {row['name']: row['version'] for row in environment['dependencies']},
         'video_path': None, 'wrist_video_path': None, 'frames_path': None,
         'steps': 0, 'success': False,
         'requested_max_steps': args.max_steps,

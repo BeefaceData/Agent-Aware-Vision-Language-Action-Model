@@ -33,6 +33,10 @@ An invalid command returns `reject` with a reason and no override action.
 The harness records that reason as `rejection_reason`, leaves execution absent,
 and ends the episode with `proposal_rejected` without calling the environment.
 This implements #69; rejection does not consume an action or attempt clipping.
+An explicitly configured [baseline fallback guard](baseline-fallback.md) may
+instead admit the unchanged current policy proposal after independent input,
+controller and native-action checks; a rejected adjustment itself never grants
+that permission.
 
 A successful resolution consumes that episode/proposal identity before dispatch.
 Further adjustments for the same identity are rejected, even under a new decision

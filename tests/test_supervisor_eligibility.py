@@ -6,6 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from baseline_fallback import BaselineFallback
+
 from episode_harness import (ActionProposal, EpisodeConfig, ObservationPacket,
                              RobotStateCapture, SupervisorAbstention, SupervisorPass,
                              ViewCapture, frame_references_for_observation, run_episode)
@@ -115,7 +117,10 @@ class EligibilityTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary) / 'trace'
             recorder = TraceRecorder(directory, config, ReplayRecorder())
-            outcome = run_episode(config, policy, environment, recorder, supervisor_decider=gate)
+            outcome = run_episode(config, policy, environment, recorder, supervisor_decider=gate,
+                                  clock=lambda: 10.2,
+                                  baseline_fallback=BaselineFallback(
+                                      {'main': .5}, lambda: True, lambda p: True))
             recorder.seal(outcome)
             replay = load_recorded_replay(directory)
             self.assertTrue(replay.run().success)

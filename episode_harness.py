@@ -22,6 +22,7 @@ from temporal_diagnosis import valid_temporal_diagnosis
 from intervention_budget import InterventionBudget
 
 if TYPE_CHECKING:
+    from baseline_fallback import BaselineFallback
     from observation_window import ObservationWindow, WindowSettings
 
 
@@ -743,6 +744,7 @@ class ActionRecord:
     supervisor_abstention: SupervisorAbstention | None = None
     recovery: dict | None = None
     intervention_budget: dict | None = None
+    fallback: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -909,6 +911,7 @@ def run_episode(
     supervisor_decider: Callable[[ActionProposal], SupervisorPass | SupervisorAbstention] | None = None,
     assessment_trigger: Callable[[ActionProposal], bool] | None = None,
     recovery_observer: Callable[[RecoverySequence, int, ObservationPacket], Any] | None = None,
+    baseline_fallback: BaselineFallback | None = None,
 ) -> EpisodeOutcome:
     """Run one attempt and return task outcome and artifact finalization status.
 
@@ -960,20 +963,30 @@ def run_episode(
     ``supervisor_decider`` instead receives a sanitized, detached ActionProposal
     and must return a SupervisorPass or SupervisorAbstention matching its episode,
     observation and proposal. Abstention records uncertainty and continues the
-    unchanged baseline proposal; any execution/observation fault ends the attempt.
+    unchanged baseline proposal only after baseline_fallback confirms fresh required
+    inputs, healthy controller state and validity of the current native proposal.
+    Without this host-owned guard, abstention refuses dispatch. Any execution or
+    observation fault ends the attempt.
     It cannot be combined with other supervision or action selection callbacks.
     Accepted responses are retained in action evidence, including execution failures.
     Simulation scheduling is synchronous: one proposal waits for its decision
     before any environment step or next policy call. The environment must advance
     only on step(); this is not a physical-controller hold/stop implementation.
     Use a bounded decider to impose a deadline; callback failures retain waiting
-    time and terminate the attempt without executing the pending proposal.
+    time and terminate the attempt without executing the pending proposal unless
+    baseline_fallback is configured and admits that proposal. Explicit selector
+    rejection can also use this guard; internal budget/cooldown rejections cannot.
+    Interruptions and selector exceptions never trigger fallback. Refusal ends
+    dispatch but does not implement the adapter physical hold/stop contract.
     The decider is assessed before action 1 and every configured interval of
     acknowledged actions thereafter. An optional sanitized assessment_trigger
     adds assessments between these fixed boundaries; it never postpones them.
     Coincident periodic/event requests use one call and pending calls block the
     loop. Skipped assessments retain no supervisor response in action evidence.
     """
+    from baseline_fallback import BaselineFallback, fallback_evidence
+    if baseline_fallback is not None and type(baseline_fallback) is not BaselineFallback:
+        raise ValueError('BaselineFallback required')
     if type(config.max_steps) is not int or config.max_steps <= 0:
         raise ValueError('max_steps must be a positive integer')
     if supervisor is not None and window_supervisor is not None:
@@ -1056,6 +1069,8 @@ def run_episode(
             proposal_id = f'{episode_id}:{step}'
             pass_response = None
             abstention_response = None
+            fallback_cause = None
+            fallback = None
             proposal_for_supervisor = (deepcopy(proposed_action)
                                        if supervisor is not None or window_supervisor is not None
                                        else None)
@@ -1108,27 +1123,31 @@ def run_episode(
                     elif supervisor is not None:
                         supervisor(supervisor_observation(observation), proposal_for_supervisor)
                 except BaseException as exc:
-                    request_finished_at = clock()
-                    cumulative_wait += request_finished_at - request_at
-                    record_failure(
-                        step, observation, deepcopy(proposed_action),
-                        StepFailure('supervisor', type(exc).__name__, FailedStepTiming(
-                            observation.captured_monotonic, request_at,
-                            request_finished_at, None, None, None, cumulative_wait),
-                            ActionRecord(proposal_id, deepcopy(proposed_action), None,
-                                         None, None,
-                                         'rejected' if isinstance(exc, SupervisorResponseError)
-                                         else 'unconfirmed',
-                                         str(exc) if isinstance(exc, SupervisorResponseError)
-                                         else None)))
-                    raise
+                    if baseline_fallback is not None and isinstance(exc, Exception):
+                        # Retain a safe error category, never provider payloads.
+                        fallback_cause = f'supervisor unavailable or rejected: {type(exc).__name__}'
+                    else:
+                        request_finished_at = clock()
+                        cumulative_wait += request_finished_at - request_at
+                        record_failure(
+                            step, observation, deepcopy(proposed_action),
+                            StepFailure('supervisor', type(exc).__name__, FailedStepTiming(
+                                observation.captured_monotonic, request_at,
+                                request_finished_at, None, None, None, cumulative_wait),
+                                ActionRecord(proposal_id, deepcopy(proposed_action), None,
+                                             None, None,
+                                             'rejected' if isinstance(exc, SupervisorResponseError)
+                                             else 'unconfirmed',
+                                             str(exc) if isinstance(exc, SupervisorResponseError)
+                                             else None)))
+                        raise
                 response_at = clock()
             else:
                 response_at = request_at
             cumulative_wait += response_at - request_at
             if recovery_sequence is not None:
                 resolution = ActionResolution('recovery', recovery=recovery_sequence)
-            elif action_selector is None:
+            elif action_selector is None or fallback_cause is not None:
                 resolution = ActionResolution('pass')
             else:
                 try:
@@ -1143,6 +1162,9 @@ def run_episode(
                     if ((resolution.kind == 'recovery' and type(resolution.recovery) is not RecoverySequence) or
                             (resolution.kind != 'recovery' and resolution.recovery is not None)):
                         raise ValueError('invalid recovery resolution')
+                    if resolution.kind == 'reject' and baseline_fallback is not None:
+                        fallback_cause = 'correction rejected: ' + resolution.reason
+                        resolution = ActionResolution('pass')
                     if (resolution.source_identity is not None and
                             resolution.source_identity !=
                             (episode_id, observation.sequence, proposal_id)):
@@ -1191,6 +1213,19 @@ def run_episode(
                 selection_finished_at = clock()
                 cumulative_wait += selection_finished_at - response_at
                 response_at = selection_finished_at
+            if abstention_response is not None:
+                fallback_cause = 'supervisor abstained: ' + abstention_response.reason
+            if fallback_cause is not None:
+                proposal = ActionProposal(proposal_id, deepcopy(observation),
+                                          deepcopy(proposed_action))
+                fallback = (baseline_fallback.assess(proposal, fallback_cause, clock)
+                            if baseline_fallback is not None else
+                            fallback_evidence(proposal, fallback_cause, clock()))
+                checked_at = clock()
+                cumulative_wait += checked_at - response_at
+                response_at = checked_at
+                if fallback['selected'] == 'refuse':
+                    resolution = ActionResolution('reject', reason=fallback['reason'])
             if resolution.kind == 'reject':
                 recorder.record_failure(
                     step, observation, deepcopy(proposed_action),
@@ -1199,7 +1234,9 @@ def run_episode(
                         response_at, None, None, cumulative_wait),
                         ActionRecord(proposal_id, deepcopy(proposed_action), None,
                                      None, None, 'rejected', resolution.reason,
-                                     intervention_budget=deepcopy(budget_record))))
+                                     intervention_budget=deepcopy(budget_record),
+                                     supervisor_abstention=abstention_response,
+                                     fallback=deepcopy(fallback))))
                 stop_reason = 'proposal_rejected'
                 break
             recovery_evidence = (dict(sequence=asdict(recovery_sequence), action_index=recovery_index)
@@ -1227,7 +1264,8 @@ def run_episode(
                                      'unconfirmed', supervisor_pass=pass_response,
                                      supervisor_abstention=abstention_response,
                                      recovery=recovery_evidence,
-                                     intervention_budget=deepcopy(budget_record))))
+                                     intervention_budget=deepcopy(budget_record),
+                                     fallback=deepcopy(fallback))))
                 raise
             execution_finished_at = clock()
             timing = StepTiming(observation.captured_monotonic, request_at,
@@ -1244,7 +1282,8 @@ def run_episode(
                 deepcopy(selected_action), acknowledgement, disposition,
                 supervisor_pass=pass_response,
                 supervisor_abstention=abstention_response,
-                recovery=recovery_evidence, intervention_budget=deepcopy(budget_record)))
+                recovery=recovery_evidence, intervention_budget=deepcopy(budget_record),
+                fallback=deepcopy(fallback)))
             acknowledged_actions.append(deepcopy(result.action_record))
             reward_sum += result.reward
             steps = step

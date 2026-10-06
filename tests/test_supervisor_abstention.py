@@ -7,9 +7,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from fallback_fixtures import MeasuredReplayEnvironment, healthy_fallback
+
 from episode_harness import EpisodeConfig, SupervisorAbstention, SupervisorPass, run_episode
 from recorded_replay import TraceError, TraceRecorder, load_recorded_replay
-from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
+from replay_adapters import ReplayPolicy, ReplayRecorder, ReplayStep
 
 
 def abstain(proposal):
@@ -25,7 +27,7 @@ class SupervisorAbstentionTests(unittest.TestCase):
                         for i in range(3)]
         actions = [[0.1], [0.2]]
         return (EpisodeConfig(17, 3), ReplayPolicy(tuple(zip(observations, actions))),
-                ReplayEnvironment(17, observations[0], (
+                MeasuredReplayEnvironment(17, observations[0], (
                     (actions[0], ReplayStep(observations[1], 0, False, False, False)),
                     (actions[1], ReplayStep(observations[2], 1, True, True, False)))),
                 ReplayRecorder())
@@ -49,7 +51,8 @@ class SupervisorAbstentionTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary) / 'trace'
             trace = TraceRecorder(directory, config, recorder)
-            outcome = run_episode(config, policy, environment, trace, supervisor_decider=decide)
+            outcome = run_episode(config, policy, environment, trace, supervisor_decider=decide,
+                                  baseline_fallback=healthy_fallback())
             trace.seal(outcome)
             replay = load_recorded_replay(directory)
             self.assertTrue(replay.run().success)
@@ -99,9 +102,13 @@ class SupervisorAbstentionTests(unittest.TestCase):
             responses.append(abstain(proposal))
             return responses[0]
 
-        with self.assertRaisesRegex(ValueError, 'current proposal'):
-            run_episode(config, policy, environment, recorder, supervisor_decider=stale)
-        self.assertEqual(environment.actions, [[0.1]])
+        outcome = run_episode(config, policy, environment, recorder, supervisor_decider=stale,
+                              baseline_fallback=healthy_fallback())
+        self.assertTrue(outcome.success)
+        second = recorder.steps[1][3].action_record
+        self.assertIsNone(second.supervisor_abstention)
+        self.assertIn('SupervisorResponseError', second.fallback['cause'])
+        self.assertEqual(environment.actions, [[0.1], [0.2]])
 
     def test_unhealthy_execution_stops_and_retains_uncertainty(self):
         config, policy, environment, recorder = self.fixture()
@@ -116,7 +123,8 @@ class SupervisorAbstentionTests(unittest.TestCase):
 
         with self.assertRaises(TimeoutError):
             run_episode(config, policy, BrokenEnvironment(), recorder,
-                        supervisor_decider=abstain)
+                        supervisor_decider=abstain,
+                        baseline_fallback=healthy_fallback())
         self.assertEqual(calls, [[0.1]])
         failure = recorder.failures[0][3]
         self.assertEqual(failure.stage, 'execution')
@@ -130,7 +138,8 @@ class SupervisorAbstentionTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary) / 'trace'
             trace = TraceRecorder(directory, config, recorder)
-            outcome = run_episode(config, policy, environment, trace, supervisor_decider=abstain)
+            outcome = run_episode(config, policy, environment, trace, supervisor_decider=abstain,
+                                  baseline_fallback=healthy_fallback())
             trace.seal(outcome)
             original = (directory / 'decisions.jsonl').read_text()
             for changes in ({'reason': ''}, {'evidence_availability': {}},

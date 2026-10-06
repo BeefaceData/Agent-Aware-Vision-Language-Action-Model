@@ -5,10 +5,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from fallback_fixtures import MeasuredReplayEnvironment, healthy_fallback
+
 from episode_harness import EpisodeConfig, SupervisorResponseError, run_episode
 from observation_window import ObservationWindowBuilder
 from recorded_replay import TraceRecorder, load_recorded_replay
-from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
+from replay_adapters import ReplayPolicy, ReplayRecorder, ReplayStep
 from supervisor_response import SupervisorResponseDecoder
 from supervisor_provider import BoundedSupervisorProvider
 from supervisor_vlm import ChronologicalVlmAdapter, VlmSettings
@@ -72,7 +74,7 @@ class TemporalConflictTests(unittest.TestCase):
                 observations = [raw(i) for i in range(3)]
                 config = EpisodeConfig(17, 3)
                 policy = ReplayPolicy(list(zip(observations, ([0], [1]))))
-                environment = ReplayEnvironment(17, observations[0], [
+                environment = MeasuredReplayEnvironment(17, observations[0], [
                     ([0], ReplayStep(observations[1], 0, False, False, False)),
                     ([1], ReplayStep(observations[2], 1, True, True, False))])
                 def transport(payload, deadline, cancel):
@@ -84,7 +86,8 @@ class TemporalConflictTests(unittest.TestCase):
                 provider = BoundedSupervisorProvider(ChronologicalVlmAdapter(
                     VlmSettings('offline'), lambda image: PNG, transport), 2)
                 trace = TraceRecorder(Path(tmp) / 'trace', config, ReplayRecorder())
-                outcome = run_episode(config, policy, environment, trace, supervisor_decider=provider)
+                outcome = run_episode(config, policy, environment, trace, supervisor_decider=provider,
+                                      baseline_fallback=healthy_fallback())
                 trace.seal(outcome)
                 replay = load_recorded_replay(trace.directory)
                 self.assertTrue(replay.run().success)

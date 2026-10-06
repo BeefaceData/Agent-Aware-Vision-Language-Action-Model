@@ -7,10 +7,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from fallback_fixtures import MeasuredReplayEnvironment, healthy_fallback
+
 from episode_harness import (ActionProposal, EpisodeConfig, ObservationPacket,
                              SupervisorResponseError, run_episode)
 from recorded_replay import TraceRecorder, load_recorded_replay
-from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
+from replay_adapters import ReplayPolicy, ReplayRecorder, ReplayStep
 from supervisor_adjustment import AdjustmentComponent, AdjustmentRequestDecoder
 from supervisor_recovery import RecoveryParameter, RecoveryRequestDecoder
 from supervisor_response import SupervisorResponseDecoder
@@ -85,7 +87,7 @@ class SupervisorResponseTests(unittest.TestCase):
                         for i in range(3)]
         actions = [[.1], [.2]]
         return (EpisodeConfig(17, 3), ReplayPolicy(tuple(zip(observations, actions))),
-                ReplayEnvironment(17, observations[0], (
+                MeasuredReplayEnvironment(17, observations[0], (
                     (actions[0], ReplayStep(observations[1], 0, False, False, False)),
                     (actions[1], ReplayStep(observations[2], 1, True, True, False)))),
                 ReplayRecorder())
@@ -103,7 +105,8 @@ class SupervisorResponseTests(unittest.TestCase):
             trace = TraceRecorder(directory, config, recorder)
             outcome = run_episode(config, policy, environment, trace,
                                   supervisor_decider=lambda p: self.decoder.decode(
-                                      self.bind(next(responses), p), p))
+                                      self.bind(next(responses), p), p),
+                                  baseline_fallback=healthy_fallback())
             trace.seal(outcome)
             replay = load_recorded_replay(directory)
             self.assertTrue(replay.run().success)

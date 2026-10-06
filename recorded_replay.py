@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from episode_harness import (
-    ActionResolution, EpisodeConfig, FrameReference, ObservationIngestor, RecoverySequence,
+    ActionProposal, ActionResolution, EpisodeConfig, FrameReference, ObservationIngestor, RecoverySequence,
     ObservationPacket, RobotStateCapture, StepResult, StepTiming, run_episode,
     supervisor_observation, valid_abstention_details,
 )
@@ -346,8 +346,30 @@ def _load(directory, manifest):
                      abstention['proposal_id'] == record['proposal_id'] and
                      valid_abstention_details(abstention['reason'],
                                               abstention['evidence_availability']) and
-                     record['disposition'] == 'unmodified',
+                     record['disposition'] in ('unmodified', 'rejected'),
                      'invalid supervisor abstention evidence')
+        fallback = record.get('fallback')
+        # Historical traces lack the field; new abstentions must retain admission.
+        if abstention is not None and 'fallback' in record:
+            _require(fallback is not None, 'missing fallback admission evidence')
+        if fallback is not None:
+            from baseline_fallback import validate_fallback
+            try:
+                validate_fallback(fallback, ActionProposal(
+                    record['proposal_id'], packets[index], record['proposed_action']))
+            except (ValueError, TypeError, KeyError) as exc:
+                raise TraceError('invalid fallback evidence') from exc
+            _require(response is None and recovery is None and accounting is None and
+                     ((fallback['selected'] == 'baseline' and record['disposition'] == 'unmodified') or
+                      (fallback['selected'] == 'refuse' and record['disposition'] == 'rejected' and
+                       record['rejection_reason'] == fallback['reason'])),
+                     'fallback selection does not match dispatch')
+            if abstention is not None:
+                _require(fallback['cause'] == 'supervisor abstained: ' + abstention['reason'],
+                         'fallback cause does not match abstention')
+            if 'timing' in row:
+                _require(row['timing']['request_at'] <= fallback['checked_at'] <=
+                         row['timing']['execution_started_at'], 'invalid fallback check time')
         result = row['result']
         if 'timing' in row:
             timing = StepTiming(**row['timing'])

@@ -8,10 +8,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from fallback_fixtures import MeasuredReplayEnvironment, healthy_fallback
+
 from episode_harness import (ActionProposal, ObservationPacket, SupervisorAbstention,
                              SupervisorPass, SupervisorResponseError, run_episode)
 from recorded_replay import TraceRecorder, load_recorded_replay
-from replay_adapters import successful_replay
+from replay_adapters import ReplayFixture, ReplayPolicy, ReplayRecorder, ReplayStep
+from episode_harness import EpisodeConfig
 from supervisor_replay import RecordedSupervisor
 
 
@@ -83,7 +86,13 @@ class RecordedSupervisorTests(unittest.TestCase):
             self.assertNotIn('SECRET', str(caught.exception))
 
     def run_fixture(self, directory, kinds):
-        fixture = successful_replay()
+        observations = [{'robot_state': {'position': [i]}} for i in range(3)]
+        actions = [('reach', .25), ('place', .75)]
+        fixture = ReplayFixture(EpisodeConfig(17, 5),
+            ReplayPolicy(list(zip(observations, actions))),
+            MeasuredReplayEnvironment(17, observations[0], [
+                (actions[i], ReplayStep(observations[i + 1], i, i == 1, i == 1, False))
+                for i in range(2)]), ReplayRecorder())
 
         class FixtureRecorder(TraceRecorder):
             def begin(self, observation):
@@ -103,7 +112,8 @@ class RecordedSupervisorTests(unittest.TestCase):
             directory = Path(temporary)
             fixture, trace = self.run_fixture(directory, ('pass', 'abstain'))
             outcome = run_episode(fixture.config, fixture.policy, fixture.environment, trace,
-                                  supervisor_decider=lambda proposal: trace.supervisor(proposal))
+                                  supervisor_decider=lambda proposal: trace.supervisor(proposal),
+                                  baseline_fallback=healthy_fallback())
             trace.seal(outcome)
             replay = load_recorded_replay(directory / 'trace')
             self.assertTrue(replay.run().success)

@@ -9,12 +9,14 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 
+from fallback_fixtures import MeasuredReplayEnvironment, healthy_fallback
+
 from development_annotations import annotation_template
 from detector_metrics import detector_report
 from episode_harness import EpisodeConfig, SupervisorResponseError, run_episode
 from observation_only import export_diagnosis_events
 from recorded_replay import TraceRecorder, load_recorded_replay
-from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
+from replay_adapters import ReplayPolicy, ReplayRecorder, ReplayStep
 from supervisor_response import SupervisorResponseDecoder
 from test_episode_timing import ControlledClock
 import test_supervisor_response as response_fixtures
@@ -37,7 +39,7 @@ class ObservationOnlyTests(unittest.TestCase):
         actions = [[i / 10] for i in range(6)]
         config = EpisodeConfig(17, 6, supervisor_interval_actions=interval)
         policy = ReplayPolicy(list(zip(observations, actions)))
-        environment = ReplayEnvironment(17, observations[0], [
+        environment = MeasuredReplayEnvironment(17, observations[0], [
             (action, ReplayStep(observations[i + 1], 0, False, i == 5, False))
             for i, action in enumerate(actions)], clock=clock)
         trace = TraceRecorder(directory, config, ReplayRecorder())
@@ -60,7 +62,8 @@ class ObservationOnlyTests(unittest.TestCase):
             return self.decoder.decode(response, proposal)
 
         outcome = run_episode(config, policy, environment, trace, clock=clock,
-                              supervisor_decider=decide if supervised else None)
+                              supervisor_decider=decide if supervised else None,
+                              baseline_fallback=healthy_fallback())
         trace.seal(outcome)
         return environment.actions, outcome, load_recorded_replay(directory)
 

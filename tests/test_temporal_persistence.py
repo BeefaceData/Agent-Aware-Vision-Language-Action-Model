@@ -5,10 +5,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from fallback_fixtures import MeasuredReplayEnvironment, healthy_fallback
+
 from episode_harness import EpisodeConfig, SupervisorResponseError, run_episode
 from observation_window import ObservationWindowBuilder, WindowSettings
 from recorded_replay import TraceRecorder, load_recorded_replay
-from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
+from replay_adapters import ReplayPolicy, ReplayRecorder, ReplayStep
 from temporal_persistence import PersistenceSettings, TemporalPersistenceGate
 from test_supervisor_vlm import proposal, raw
 
@@ -127,7 +129,7 @@ class PersistenceTests(unittest.TestCase):
                 actions = [[i] for i in range(4)]
                 config = EpisodeConfig(17, 4)
                 policy = ReplayPolicy(list(zip(observations, actions)))
-                env = ReplayEnvironment(17, observations[0], [
+                env = MeasuredReplayEnvironment(17, observations[0], [
                     (action, ReplayStep(observations[i + 1], 0, i == 3, i == 3, False))
                     for i, action in enumerate(actions)])
                 gate = self.gate()
@@ -138,7 +140,8 @@ class PersistenceTests(unittest.TestCase):
                     eligible.append(gate.eligible_for(p))
                     return result
                 trace = TraceRecorder(Path(tmp) / 'trace', config, ReplayRecorder())
-                outcome = run_episode(config, policy, env, trace, supervisor_decider=decider)
+                outcome = run_episode(config, policy, env, trace, supervisor_decider=decider,
+                                      baseline_fallback=healthy_fallback())
                 trace.seal(outcome)
                 replay = load_recorded_replay(trace.directory)
                 self.assertTrue(replay.run().success)

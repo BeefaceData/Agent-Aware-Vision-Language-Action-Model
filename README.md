@@ -97,13 +97,18 @@ The destination must not already exist, preventing accidental overwrites. Relati
 | `--suite` | `libero_10` | LIBERO task suite |
 | `--task-id` | `0` | Zero-based task index within the suite |
 | `--seed` | `0` | Random seed |
-| `--policy` | `HuggingFaceVLA/smolvla_libero` | Compatible SmolVLA checkpoint |
+| `--policy` | `HuggingFaceVLA/smolvla_libero` | Frozen baseline repository; other values are rejected |
 | `--device` | `cuda` | `cuda` or `cpu`; recorded run used CUDA |
 | `--max-steps` | Suite horizon | Override the episode action limit |
 | `--video-fps` | `20` | Saved-video playback rate |
 | `--output-dir` | Timestamped directory | New directory for this episode |
 
 Supported suites: `libero_spatial`, `libero_object`, `libero_goal`, `libero_10`, and `libero_90`. Video FPS changes playback speed, not simulation control frequency. The script defaults `MUJOCO_GL` to `egl` before simulator imports, while respecting an existing setting.
+
+The baseline enforces checkpoint revision `6721902bc4d61e50a3bfdb11dfb4cb626f05d102`
+and verifies weights, configuration, processor state and separate backbone/tokenizer
+assets before loading. See [frozen asset resolution](docs/pinned-baseline-assets.md)
+for the lock, recorded identities, download requirements and offline checks.
 
 Before reset, the runner reads the created environment's action horizon and
 requires a positive integer. An explicit `--max-steps` must match that readback;

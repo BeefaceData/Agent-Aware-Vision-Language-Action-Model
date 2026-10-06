@@ -171,13 +171,13 @@ class BaselineCliTests(unittest.TestCase):
                          ('libero_10', 0, 0, 'HuggingFaceVLA/smolvla_libero',
                           'cuda', None, 20, None))
         selected = parse_args(['--suite', 'libero_spatial', '--task-id', '9',
-                               '--seed', '4', '--policy', 'local/checkpoint',
+                               '--seed', '4', '--policy', 'HuggingFaceVLA/smolvla_libero',
                                '--device', 'cpu', '--max-steps', '3',
                                '--video-fps', '80', '--output-dir', 'custom'])
         self.assertEqual((selected.suite, selected.task_id, selected.seed,
                           selected.policy, selected.device, selected.max_steps,
                           selected.video_fps, str(selected.output_dir)),
-                         ('libero_spatial', 9, 4, 'local/checkpoint', 'cpu',
+                         ('libero_spatial', 9, 4, 'HuggingFaceVLA/smolvla_libero', 'cpu',
                           3, 80, 'custom'))
 
 

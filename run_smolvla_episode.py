@@ -34,6 +34,7 @@ from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon
 from episode_harness import EpisodeConfig, exception_stop_reason, run_episode
 from recorded_replay import TraceRecorder
 from policy_adapter import ResetOnResumePolicyAdapter
+from pinned_policy import POLICY_REPOSITORY, POLICY_REVISION, resolve_policy_assets
 
 
 def evidence_json(value):
@@ -52,7 +53,9 @@ def parse_args(argv=None):
         'libero_10', 'libero_spatial', 'libero_object', 'libero_goal', 'libero_90'])
     parser.add_argument('--task-id', type=int, default=0)
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--policy', default='HuggingFaceVLA/smolvla_libero')
+    parser.add_argument('--policy', default=POLICY_REPOSITORY,
+                        choices=[POLICY_REPOSITORY],
+                        help='Frozen baseline repository; revision is enforced by the asset lock.')
     parser.add_argument('--device', choices=['cuda', 'cpu'], default='cuda')
     parser.add_argument('--max-steps', type=int, default=None,
                         help='Default: suite horizon (520 for libero_10).')
@@ -78,13 +81,10 @@ def main():
     import imageio.v2 as imageio
     import numpy as np
     import torch
-    from lerobot.configs.policies import PreTrainedConfig
     from lerobot.envs.configs import LiberoEnv as LiberoConfig
     from lerobot.envs.factory import make_env_pre_post_processors
     from lerobot.envs.libero import create_libero_envs
     from lerobot.envs.utils import add_envs_task, preprocess_observation
-    from lerobot.policies.factory import make_pre_post_processors
-    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
     from lerobot.utils.random_utils import set_seed
 
     if args.device == 'cuda' and not torch.cuda.is_available():
@@ -101,6 +101,7 @@ def main():
     summary = {
         'status': 'initializing', 'suite': args.suite, 'task_id': args.task_id,
         'seed': args.seed, 'initial_state_index': 0, 'policy': args.policy,
+        'policy_revision': POLICY_REVISION, 'policy_assets': None,
         'device': args.device, 'video_fps': args.video_fps,
         'render_backend': os.environ['MUJOCO_GL'],
         'versions': {p: version(p) for p in ['lerobot', 'torch', 'gymnasium', 'hf-libero']},
@@ -114,16 +115,13 @@ def main():
     start = monotonic()
     try:
         print('Loading policy...', flush=True)
-        # Device override also controls initial checkpoint loading.
-        policy_config = PreTrainedConfig.from_pretrained(args.policy)
-        policy_config.device = args.device
-        policy = SmolVLAPolicy.from_pretrained(args.policy, config=policy_config)
-        policy.to(args.device).eval()
-        policy.requires_grad_(False)
-        preprocessor, postprocessor = make_pre_post_processors(
-            policy.config, args.policy,
-            preprocessor_overrides={'device_processor': {'device': args.device}},
-        )
+        assets = resolve_policy_assets(args.policy)
+        summary['policy_assets'] = assets.identity()
+        # Resolve every asset before creating/resetting the environment.
+        preflight_path = out / 'policy-assets.json'
+        preflight_path.write_text(json.dumps(summary['policy_assets'], indent=2),
+                                  encoding='utf-8')
+        policy, preprocessor, postprocessor = assets.load(args.device)
         cfg = LiberoConfig(task=args.suite)
         env_pre, env_post = make_env_pre_post_processors(cfg, policy.config)
         # The Python factory supports this filter in 0.4.3, unlike env.task_ids CLI.

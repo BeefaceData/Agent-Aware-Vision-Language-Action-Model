@@ -620,6 +620,52 @@ geometry, stale sensing, intervention limits, recovery clearance/envelope and
 tampered replay memory. These establish interface behavior, not physical safety
 or measured task improvement.
 
+### Build a development-only snapshot
+
+Use `development_memory.freeze_development_snapshot` for development admission:
+
+```python
+snapshot = freeze_development_snapshot(
+    "development.json", store, candidate_pins,
+    membership={"revision": "reviewed-split-v1", "episodes": {
+        development_episode_id: "development",
+        held_out_episode_id: "held_out",
+    }},
+    compatibility={"policy": declared_policy_assets,
+                   "supervisor": declared_supervisor_manifest,
+                   "settings": declared_attempt_settings},
+    retrieval=declared_retrieval_settings,
+)
+report = snapshot.read()["metadata"]["development_selection"]
+```
+
+The host supplies reviewed episode membership, using episode IDs from sealed
+evidence, and complete declared compatible identities. Missing membership or
+`unknown` is excluded as `unknown_origin`; `held_out` is excluded explicitly.
+Every candidate is verified against its pinned source evidence before admission.
+Missing or corrupt evidence is excluded as `unverified_evidence`. Exact policy,
+supervisor and attempt settings mismatches are separately reported. Episode
+seed and horizon are not part of this compatibility comparison. There are no
+implicit version conversions or success-based selection rules.
+
+The immutable snapshot metadata binds the complete membership declaration,
+compatibility policy, and included/excluded record pins with reasons. Reordering
+candidates preserves identity. Duplicate identities and malformed declarations
+fail without publishing a snapshot; an empty admitted population is explicit.
+Excluded evidence is not a retrieval dependency after construction. Included
+evidence remains verified on snapshot reads. Preserve the external snapshot pin
+and use it with `FixedMemory` for evaluation.
+
+Split declarations are supplied evidence, not independently certified facts:
+review their provenance before a real evaluation. The generic `MemorySnapshot`
+API remains available for other populations and does not certify a development
+split. Synthetic tests verify admission and successful/unsuccessful complete
+evaluation replay; they do not constitute a collected development dataset or
+authorize live trials.
+
+Run `python -m unittest discover -s tests -p test_development_memory.py -v`
+to check development admission and sealed reporting.
+
 Run the public offline contracts:
 
 ```powershell

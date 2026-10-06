@@ -2,7 +2,7 @@
 
 `intervention_memory.InterventionMemory` implements issues #95 through #100 as an
 offline append-only store with candidate ranking and bounded context preparation. It does not
-enable supervisor retrieval, select development data, update fixed-memory
+select development data, update fixed-memory
 evaluation snapshots, or authorize an intervention.
 
 The trusted host retains four pieces of evidence:
@@ -199,7 +199,7 @@ context, compatibility rule, sort fields, and absence of outcome preference.
 Retain these settings along with the task/control query and permitted references
 to reproduce an ordering. Results are detached evaluator data. This API neither
 truncates nor prepares supervisor context. Use the separate bounded API below;
-decision logging remains issue #101. No runtime execution path changes.
+decision logging is available through the explicit adapter integration below.
 
 ## Bounded historical context
 
@@ -247,6 +247,66 @@ the store, attach memory to a provider request, change the frozen prompt, or
 enable live retrieval. It establishes bounded preparation, not scientific
 evidence that memory improves performance.
 
+## Decision provenance (#101)
+
+`ChronologicalVlmAdapter` accepts an optional `decision_memory=DecisionMemory(...)`.
+This opt-in supplies only the bounded `context_json` as a separate user text
+block; the frozen system prompt and VLA instruction remain unchanged. The host
+must provide permitted development references and a query callback using current
+deployable evidence:
+
+```python
+from decision_memory import DecisionMemory
+
+selection = DecisionMemory(memory, permitted_development_references,
+    query=lambda proposal: {
+        "task": active_task, "robot_capabilities": active_capabilities,
+        "progress_context": current_progress(proposal),
+        "failure_category": current_failure_category(proposal),
+        "max_entries": 4, "max_summary_bytes": 1024, "max_context_bytes": 4096,
+    })
+# Pass decision_memory=selection when constructing ChronologicalVlmAdapter.
+```
+
+Each preparation revalidates all pinned source evidence, including omitted
+records. The adapter retains a detached host-owned `memory_context` on decoded
+pass/abstention assessments. It contains selected IDs/digests and whole summaries,
+the exact context string and its digest, query and budget/ranking settings,
+permitted references, exclusions and omissions. The model cannot supply this
+metadata through response JSON. Audit settings and raw evaluator records are
+never appended to model input. Memory-informed active correction requests remain
+rejected pending the current-scene integration in #108.
+
+The optional `snapshot={"snapshot_id": ..., "sha256": ...}` records an externally
+declared pin; `None` explicitly means no snapshot was declared. This field does
+not create or verify snapshot membership, development splits or read-only
+evaluation; those remain #102/#103/#109. It is not authorization for a live run.
+
+Without this option, assessments explicitly retain `retrieval="disabled"` and
+empty context/settings; an enabled query with no selected records instead has
+`retrieval="enabled"`, `context_json="[]"` and its actual settings. Legacy traces
+without the field remain readable; absence is historical unavailable evidence.
+
+After sealing an episode, inspect the same records through the public replay
+query, without invoking retrieval or the provider again:
+
+```python
+replay = load_recorded_replay(trace_directory)
+for row in replay.evidence()["decisions"]:
+    action = row["action_record"]
+    assessment = action.get("supervisor_pass") or action.get("supervisor_abstention")
+    if assessment:
+        provenance = assessment.get("memory_context")
+```
+
+Loading validates the retained context digest, selected pins and summaries,
+budget consistency, and disabled-mode invariants alongside existing decision
+identity and trace checks. This verifies retained provenance, not remote model
+attention or causal influence. The synthetic transport contracts compare the
+exact sent text block with these sealed records for successful pass and
+unsuccessful abstention episodes. They also cover corrupt source evidence,
+tampered logs, empty retrieval, and model-authored provenance rejection.
+
 Writes use exclusive file creation, flush, and fsync; a repeated episode/proposal
 cannot replace an existing record. A failed write can leave an unreadable partial
 file, which fails verification rather than becoming a usable experience. Reads
@@ -268,6 +328,7 @@ python -m unittest discover -s tests -p test_intervention_memory.py -v
 python -m unittest discover -s tests -p test_memory_compatibility.py -v
 python -m unittest discover -s tests -p test_memory_ranking.py -v
 python -m unittest discover -s tests -p test_memory_context.py -v
+python -m unittest discover -s tests -p test_decision_memory.py -v
 ```
 
 These tests cover completed recovery followed by task failure, failed local

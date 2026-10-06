@@ -18,6 +18,7 @@ from observation_window import ObservationWindowBuilder, WindowSettings
 from model_usage import ModelReply
 from supervisor_response import WindowedSupervisorResponse
 from supervisor_retry import RecoverableProviderError
+from decision_memory import DecisionMemory, disabled_memory
 
 
 PROVIDER_API_VERSION = '2023-06-01'
@@ -142,7 +143,7 @@ class ChronologicalVlmAdapter:
     """
 
     def __init__(self, settings: VlmSettings, encode_png, transport=None, *,
-                 call_journal=None, frozen_manifest=None):
+                 call_journal=None, frozen_manifest=None, decision_memory=None):
         if type(settings) is not VlmSettings or not callable(encode_png):
             raise ValueError('VlmSettings and image encoder required')
         if transport is not None and not callable(transport):
@@ -157,6 +158,9 @@ class ChronologicalVlmAdapter:
         self._history = None
         self._call_journal = call_journal
         self._retry_proposal = None
+        if decision_memory is not None and type(decision_memory) is not DecisionMemory:
+            raise ValueError('DecisionMemory required')
+        self._decision_memory = decision_memory
 
     def __call__(self, proposal, deadline, cancellation):
         if cancellation.is_set() or monotonic() >= deadline:
@@ -177,6 +181,8 @@ class ChronologicalVlmAdapter:
         identity = dict(episode_id=packet.episode_id,
                         observation_sequence=packet.sequence,
                         proposal_id=proposal.proposal_id)
+        memory = (disabled_memory() if self._decision_memory is None else
+                  self._decision_memory.prepare(proposal))
         content = [{'type': 'text', 'text': _json({
             'request': identity, 'task': window.task,
             'proposed_action': proposal.action,
@@ -186,6 +192,8 @@ class ChronologicalVlmAdapter:
             'missing_intervals': [asdict(gap) for gap in window.missing_intervals],
             'executed_action_history': 'not supplied',
         })}]
+        if memory['retrieval'] == 'enabled':
+            content.append({'type': 'text', 'text': memory['context_json']})
         for observation in window.observations:
             content.append({'type': 'text', 'text': _json({
                 'observation_sequence': observation.sequence,
@@ -247,4 +255,4 @@ class ChronologicalVlmAdapter:
                 type(blocks[0].get('text')) is not str):
             raise ValueError('provider must return one structured text response')
         # The bounded provider applies the shared strict decision decoder next.
-        return WindowedSupervisorResponse(json.loads(blocks[0]['text']), window)
+        return WindowedSupervisorResponse(json.loads(blocks[0]['text']), window, memory)

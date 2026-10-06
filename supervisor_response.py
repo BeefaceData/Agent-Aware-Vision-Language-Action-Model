@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 
 from temporal_diagnosis import valid_temporal_diagnosis
 from observation_window import ObservationWindow
+from decision_memory import disabled_memory, validate_memory
 
 from episode_harness import (ActionProposal, SupervisorAbstention, SupervisorPass,
                              SupervisorResponseError, valid_abstention_details,
@@ -19,6 +20,7 @@ class WindowedSupervisorResponse:
 
     response: dict
     window: ObservationWindow
+    memory_context: dict | None = None
 
 
 def _resolve_temporal_evidence(temporal, proposal, window):
@@ -107,7 +109,22 @@ class SupervisorResponseDecoder:
                  type(self.adjustment) is not AdjustmentRequestDecoder)):
             raise ValueError('invalid supervisor decoder configuration')
 
-    def decode(self, response: dict | WindowedSupervisorResponse, proposal: ActionProposal,
+    def decode(self, response, proposal, *, window=None):
+        memory = disabled_memory()
+        if type(response) is WindowedSupervisorResponse and response.memory_context is not None:
+            memory = deepcopy(response.memory_context)
+        try:
+            validate_memory(memory)
+        except ValueError as exc:
+            raise SupervisorResponseError(str(exc)) from exc
+        decision = self._decode(response, proposal, window=window)
+        if type(decision) in (SupervisorPass, SupervisorAbstention):
+            return replace(decision, memory_context=memory)
+        if memory['retrieval'] != 'disabled':
+            raise SupervisorResponseError('memory-informed corrections require current-scene integration')
+        return decision
+
+    def _decode(self, response: dict | WindowedSupervisorResponse, proposal: ActionProposal,
                *, window: ObservationWindow | None = None) -> (
             SupervisorPass | SupervisorAbstention | SupervisorRecoveryRequest |
             SupervisorAdjustmentRequest):

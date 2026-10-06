@@ -6,6 +6,7 @@ needed. Only normally returned episodes (including rejected proposals) are seale
 """
 
 from temporal_diagnosis import valid_temporal_diagnosis
+from decision_memory import validate_memory
 
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -479,13 +480,19 @@ def _load(directory, manifest):
                          (pending or row['timing']['request_at'] == expiry['requested_at']),
                          'expiry check is not at correction dispatch')
         response = record.get('supervisor_pass')
+        for assessment in (response, record.get('supervisor_abstention')):
+            if type(assessment) is dict and 'memory_context' in assessment:
+                try:
+                    validate_memory(assessment['memory_context'])
+                except ValueError as exc:
+                    raise TraceError('invalid decision memory: ' + str(exc)) from exc
         if response is not None:
             _require(type(response) is dict and
                      type(response.get('observation_sequence')) is int and
                      valid_temporal_diagnosis(response.get('temporal_diagnosis'), 'pass') and
                      response.get('suppressed_correction') in (None, 'recovery', 'adjustment') and
                      {k: v for k, v in response.items()
-                      if k not in ('temporal_diagnosis', 'suppressed_correction')} ==
+                      if k not in ('temporal_diagnosis', 'suppressed_correction', 'memory_context')} ==
                      {'kind': 'pass', 'episode_id': episode_id,
                       'observation_sequence': index,
                       'proposal_id': record['proposal_id']} and
@@ -495,7 +502,7 @@ def _load(directory, manifest):
         if abstention is not None:
             _require(type(abstention) is dict and response is None and
                      valid_temporal_diagnosis(abstention.get('temporal_diagnosis'), 'abstain') and
-                     set(abstention) - {'temporal_diagnosis'} == {'kind', 'diagnosis', 'episode_id',
+                     set(abstention) - {'temporal_diagnosis', 'memory_context'} == {'kind', 'diagnosis', 'episode_id',
                                          'observation_sequence', 'proposal_id',
                                          'reason', 'evidence_availability'} and
                      abstention['kind'] == 'abstain' and

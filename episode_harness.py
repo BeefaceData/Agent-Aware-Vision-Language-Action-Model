@@ -23,6 +23,7 @@ from intervention_budget import InterventionBudget
 from correction_expiry import check_expiry
 from episode_deadline import EpisodeDeadline, EpisodeDeadlineExceeded, workers_busy
 from supervisor_retry import RECOVERABLE_ERRORS
+from decision_memory import disabled_memory
 
 if TYPE_CHECKING:
     from baseline_fallback import BaselineFallback
@@ -686,6 +687,7 @@ class SupervisorPass:
     proposal_id: str
     temporal_diagnosis: dict | None = None
     suppressed_correction: Literal['recovery', 'adjustment'] | None = None
+    memory_context: dict = field(default_factory=disabled_memory)
     kind: Literal['pass'] = field(default='pass', init=False)
 
 
@@ -708,6 +710,7 @@ class SupervisorAbstention:
     reason: str
     evidence_availability: dict[str, Literal['available', 'missing', 'stale', 'unknown']]
     temporal_diagnosis: dict | None = None
+    memory_context: dict = field(default_factory=disabled_memory)
     kind: Literal['abstain'] = field(default='abstain', init=False)
     diagnosis: Literal['unknown'] = field(default='unknown', init=False)
 

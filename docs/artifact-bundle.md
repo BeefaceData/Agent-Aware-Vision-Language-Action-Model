@@ -38,6 +38,9 @@ codec decoding; verification does not independently establish encoder correctnes
 or physical task success. Keep a trusted copy of the final manifest when sharing
 permitted artifacts.
 
+For a separate report that excludes raw evidence by default and records explicit
+artifact permissions and omissions, use the [shareable export](shareable-report.md).
+
 `python -m unittest discover -s tests -p test_artifact_bundle.py -v` exercises a
 complete synthetic episode, camera gaps, relocation, CLI replay and damaged
 evidence. Synthetic video sinks establish byte-integrity behavior only; these

@@ -8,6 +8,7 @@ from base64 import b64encode
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from hashlib import sha256
 import http.client
 import json
 import os
@@ -19,11 +20,40 @@ from supervisor_response import WindowedSupervisorResponse
 from supervisor_retry import RecoverableProviderError
 
 
+PROVIDER_API_VERSION = '2023-06-01'
+SUPERVISOR_PROMPT = ('Assess only the supplied observations. Return one JSON object, '
+    'without markdown. Copy the request identity fields exactly. '
+    'Assess temporal progress: progress, suspected_missed_grasp, '
+    'suspected_lost_grasp, stall, or unknown. Include temporal_diagnosis '
+    'with category, summary, and evidence: a list of objects with '
+    'observation_sequence, source (main, wrist, robot_state), and '
+    'description of visible evidence. Cite supplied observations; '
+    'non-unknown categories require evidence. Explain temporal changes '
+    'and limitations; missing history is not proof of a stall. '
+    'Report contradictions in temporal_diagnosis.conflicts as objects '
+    'with case and evidence_indices (at least two distinct zero-based '
+    'indices into evidence). Use grasp_state_conflict when apparent '
+    'grasp success conflicts with later state; use ambiguous_object_motion '
+    'when views or camera motion leave object movement ambiguous. '
+    'Preserve both sides as evidence and abstain with unknown. '
+    'Confidence cannot override a conflict. '
+    'Do not claim ground-truth task success or infer hidden object state. '
+    'For non-unknown assessments use kind="pass"; suspected failures '
+    'are observation-only and leave the policy action unchanged. '
+    'For uncertainty use kind="abstain", diagnosis="unknown", '
+    'a nonempty reason, and evidence_availability mapping main, wrist '
+    'and robot_state to available, missing, stale or unknown. '
+    'Do not generate code, corrections or instruction changes.')
+
+
 @dataclass(frozen=True)
 class VlmSettings:
     model: str
     max_tokens: int = 512
     max_observations: int = 8
+    immutable_model_version: bool = False
+    version_limitation: str = (
+        "Provider model immutability is unverified; the selected identifier may drift.")
 
     def __post_init__(self):
         if type(self.model) is not str or not self.model.strip():
@@ -31,6 +61,30 @@ class VlmSettings:
         if type(self.max_tokens) is not int or self.max_tokens < 1:
             raise ValueError('positive output token limit required')
         WindowSettings(self.max_observations, 0)
+        if type(self.immutable_model_version) is not bool:
+            raise ValueError('model immutability must be explicit boolean')
+        if type(self.version_limitation) is not str:
+            raise ValueError('version limitation must be text')
+        if not self.immutable_model_version and not self.version_limitation.strip():
+            raise ValueError('mutable or unverified versions require a limitation')
+
+
+def supervisor_identity(settings):
+    """Declared selection, not proof that a remote provider preserves weights."""
+    if type(settings) is not VlmSettings:
+        raise ValueError('VlmSettings required')
+    return {
+        'schema_version': 1, 'provider': 'anthropic',
+        'provider_api_version': PROVIDER_API_VERSION,
+        'model': settings.model,
+        'immutable_model_version': settings.immutable_model_version,
+        'version_limitation': settings.version_limitation,
+        'prompt_template_sha256': sha256(SUPERVISOR_PROMPT.encode('utf-8')).hexdigest(),
+        'generation_settings': {'max_tokens': settings.max_tokens,
+                                'temperature': 'provider_default',
+                                'top_p': 'provider_default', 'top_k': 'provider_default'},
+        'observation_settings': {'max_observations': settings.max_observations},
+    }
 
 
 def _json(value):
@@ -60,7 +114,7 @@ class AnthropicMessagesTransport:
         try:
             connection.request('POST', '/v1/messages', body=_json(payload).encode(),
                                headers={'content-type': 'application/json',
-                                        'anthropic-version': '2023-06-01',
+                                        'anthropic-version': PROVIDER_API_VERSION,
                                         'x-api-key': key})
             response = connection.getresponse()
             if response.status in (429, 503):
@@ -88,12 +142,15 @@ class ChronologicalVlmAdapter:
     """
 
     def __init__(self, settings: VlmSettings, encode_png, transport=None, *,
-                 call_journal=None):
+                 call_journal=None, frozen_manifest=None):
         if type(settings) is not VlmSettings or not callable(encode_png):
             raise ValueError('VlmSettings and image encoder required')
         if transport is not None and not callable(transport):
             raise ValueError('transport must be callable')
         self.settings = settings
+        self._frozen_manifest = frozen_manifest
+        if frozen_manifest is not None:
+            frozen_manifest.verify(supervisor_identity(settings))
         self._encode_png = encode_png
         self._transport = transport if transport is not None else AnthropicMessagesTransport()
         self._history = None
@@ -103,6 +160,8 @@ class ChronologicalVlmAdapter:
     def __call__(self, proposal, deadline, cancellation):
         if cancellation.is_set() or monotonic() >= deadline:
             raise RuntimeError('request no longer current')
+        if self._frozen_manifest is not None:
+            self._frozen_manifest.verify(supervisor_identity(self.settings))
         packet = proposal.observation
         if self._history is None or self._history.episode_id != packet.episode_id:
             self._history = ObservationWindowBuilder(
@@ -151,29 +210,7 @@ class ChronologicalVlmAdapter:
                         'type': 'base64', 'media_type': 'image/png',
                         'data': b64encode(encoded).decode('ascii')}})
         payload = dict(model=self.settings.model, max_tokens=self.settings.max_tokens,
-                       system=('Assess only the supplied observations. Return one JSON object, '
-                               'without markdown. Copy the request identity fields exactly. '
-                               'Assess temporal progress: progress, suspected_missed_grasp, '
-                               'suspected_lost_grasp, stall, or unknown. Include temporal_diagnosis '
-                               'with category, summary, and evidence: a list of objects with '
-                               'observation_sequence, source (main, wrist, robot_state), and '
-                               'description of visible evidence. Cite supplied observations; '
-                               'non-unknown categories require evidence. Explain temporal changes '
-                               'and limitations; missing history is not proof of a stall. '
-                               'Report contradictions in temporal_diagnosis.conflicts as objects '
-                               'with case and evidence_indices (at least two distinct zero-based '
-                               'indices into evidence). Use grasp_state_conflict when apparent '
-                               'grasp success conflicts with later state; use ambiguous_object_motion '
-                               'when views or camera motion leave object movement ambiguous. '
-                               'Preserve both sides as evidence and abstain with unknown. '
-                               'Confidence cannot override a conflict. '
-                               'Do not claim ground-truth task success or infer hidden object state. '
-                               'For non-unknown assessments use kind="pass"; suspected failures '
-                               'are observation-only and leave the policy action unchanged. '
-                               'For uncertainty use kind="abstain", diagnosis="unknown", '
-                               'a nonempty reason, and evidence_availability mapping main, wrist '
-                               'and robot_state to available, missing, stale or unknown. '
-                               'Do not generate code, corrections or instruction changes.'),
+                       system=SUPERVISOR_PROMPT,
                        messages=[{'role': 'user', 'content': content}])
         if cancellation.is_set() or monotonic() >= deadline:
             raise RuntimeError('request no longer current')

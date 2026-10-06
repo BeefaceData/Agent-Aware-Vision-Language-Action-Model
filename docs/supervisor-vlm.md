@@ -28,6 +28,61 @@ unavailable. It does not infer that earlier proposals executed.
 
 ## Integration
 
+### Freeze supervisor identity before an experiment
+
+Use `FrozenSupervisorManifest` to retain the selected identity before calling
+`run_episode`. Construction and every request verify the actual adapter settings,
+current prompt digest and provider API version against these retained bytes.
+A changed model, prompt, token limit or history bound fails before transport.
+Existing manifest paths are never overwritten.
+
+```python
+from supervisor_identity import FrozenSupervisorManifest
+from supervisor_vlm import supervisor_identity
+from attempt_identity import AttemptIdentityRecorder
+
+settings = VlmSettings(model_id, max_tokens=512, max_observations=4)
+# attempt_directory must already exist and belong to this new attempt.
+frozen = FrozenSupervisorManifest.freeze(
+    attempt_directory / 'supervisor.json', supervisor_identity(settings))
+adapter = ChronologicalVlmAdapter(settings, encode_png, transport=transport,
+                                  frozen_manifest=frozen)
+provider = BoundedSupervisorProvider(adapter, timeout_seconds=10)
+# Wrap the downstream recorder before passing it to TraceRecorder/run_episode.
+recorder = AttemptIdentityRecorder(
+    attempt_directory, config,
+    lambda: frozen.verify(supervisor_identity(settings)), downstream_recorder)
+```
+
+The attempt manifest records the supervisor filename and SHA-256 before policy
+control. Combine the returned reference with other resolved task, policy and
+configuration identities in the callback when available. Retain `supervisor.json`
+beside `attempt.json` and include both in the final artifact bundle. The supervisor
+record alone is not a complete experiment protocol or proof of provider behavior.
+To reuse a frozen experiment selection, load
+`FrozenSupervisorManifest(path, expected_sha256)` using the digest from the
+trusted original experiment/attempt record. Do not derive that expected digest
+from a replacement file. Missing or modified evidence fails verification.
+
+By default, `immutable_model_version=False` and `version_limitation` explicitly
+records that the configured identifier may drift. Set immutability to true only
+with provider evidence for that selected version; this is a caller declaration,
+not an attestation made by the adapter. The pinned API version describes the wire
+contract, not model weights. Sampling fields not sent by this adapter are recorded
+as `provider_default`, so their reproducibility limitation remains visible.
+Credentials, image payloads and observations are absent from this record. The
+image encoder is still caller-owned and its preprocessing identity belongs in the
+broader attempt configuration.
+
+Legacy callers may omit `frozen_manifest` for compatibility; they do not establish
+a frozen supervisor selection. A frozen experiment must use this manifest path.
+Changing a selection requires a new declared experiment record. This workflow
+does not select a live model, authorize calls or establish diagnosis quality.
+
+Run `python -m unittest discover -s tests -p test_supervisor_identity.py -v`
+for selection/prompt drift, retained-file integrity, version limitations, and
+complete offline episode provenance and sealed replay.
+
 The image converter is caller owned, as in the camera recorder. It receives
 sanitized numeric pixels and must return PNG bytes, preserving the declared
 camera orientation and channel semantics. For an adapter declaring integer RGB

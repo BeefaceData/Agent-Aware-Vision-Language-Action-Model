@@ -158,6 +158,7 @@ class TraceRecorder:
         manifest = {
             'version': 1, 'source_episode_id': self._episode_id,
             'config': asdict(self.config), 'outcome': _summary(outcome),
+            'supervisor_call_budget': outcome.supervisor_call_budget,
             'files': {name: sha256((self.directory / name).read_bytes()).hexdigest()
                       for name in ('observations.jsonl', 'decisions.jsonl')},
         }
@@ -234,6 +235,8 @@ def _load(directory, manifest):
     budget = InterventionBudget(config.max_interventions, config.recovery_attempt_limits)
     budget_required = 'max_interventions' in manifest['config']
     cooldown_remaining = 0
+    supervisor_calls = 0
+    supervisor_exhausted = False
     for index, row in enumerate(decisions):
         _require(type(row['step']) is int and type(row['source_sequence']) is int and
                  row['step'] == index + 1 and row['source_sequence'] == index and
@@ -242,6 +245,35 @@ def _load(directory, manifest):
         record = row['action_record']
         _require(record['proposal_id'] == f'{episode_id}:{index + 1}', 'foreign proposal')
         _require(record['proposed_action'] is not None, 'proposal missing')
+        call_budget = record.get('supervisor_call_budget')
+        if call_budget is not None:
+            _require(type(call_budget) is dict and
+                     type(call_budget.get('admitted')) is bool and
+                     type(call_budget.get('attempted')) is int and
+                     type(call_budget.get('limit')) is int,
+                     'invalid supervisor call budget')
+            admitted = supervisor_calls < config.max_supervisor_calls
+            supervisor_calls += int(admitted)
+            supervisor_exhausted = supervisor_exhausted or not admitted
+            _require(call_budget == dict(limit=config.max_supervisor_calls,
+                     attempted=supervisor_calls, admitted=admitted,
+                     policy=config.supervisor_exhaustion_policy),
+                     'supervisor call budget does not match allowance')
+            if not admitted:
+                fallback = record.get('fallback')
+                _require(fallback is not None and
+                         fallback['cause'] == 'supervisor call allowance exhausted' and
+                         record.get('supervisor_pass') is None and
+                         record.get('supervisor_abstention') is None and
+                         (config.supervisor_exhaustion_policy != 'stop' or
+                          fallback['selected'] == 'refuse'),
+                         'supervisor allowance refusal does not match policy')
+        elif 'max_supervisor_calls' in manifest['config']:
+            _require(record.get('supervisor_pass') is None and
+                     record.get('supervisor_abstention') is None and
+                     (record.get('fallback') or {}).get('cause') !=
+                         'supervisor call allowance exhausted',
+                     'missing supervisor call budget')
         recovery = record.get('recovery')
         expiry = record.get('correction_expiry')
         expired = expiry is not None and expiry.get('valid') is False
@@ -486,8 +518,13 @@ def _load(directory, manifest):
     _require(manifest['outcome'] == dict(success=success, steps=executed,
                                        stop_reason=stop, sum_rewards=reward),
              'outcome does not match recorded sequence')
+    summary = dict(limit=config.max_supervisor_calls, attempted=supervisor_calls,
+                   exhausted=supervisor_exhausted, policy=config.supervisor_exhaustion_policy)
+    if 'max_supervisor_calls' in manifest['config']:
+        _require(manifest.get('supervisor_call_budget') == summary,
+                 'supervisor call budget outcome mismatch')
     return RecordedReplay(episode_id, config, packets, decisions, manifest['outcome'],
-                          manifest['config'])
+                          manifest['config'], manifest.get('supervisor_call_budget'))
 
 
 def load_recorded_replay(directory):
@@ -506,18 +543,21 @@ def load_recorded_replay(directory):
 class RecordedReplay:
     """Validated trace; run() creates fresh replay-only adapters on every call."""
 
-    def __init__(self, episode_id, config, packets, decisions, outcome, recorded_config=None):
+    def __init__(self, episode_id, config, packets, decisions, outcome, recorded_config=None,
+                 supervisor_call_budget=None):
         self.source_episode_id = episode_id
         self.config = config
         self._packets = packets
         self._decisions = deepcopy(decisions)
         self._outcome = deepcopy(outcome)
+        self._supervisor_call_budget = deepcopy(supervisor_call_budget)
         self._recorded_config = asdict(config)
         # Historical annotation fingerprints include pre-existing config defaults,
         # but must not acquire fields introduced after the trace was sealed.
         if recorded_config is not None:
             for name in ('max_interventions', 'recovery_attempt_limits', 'recovery_cooldown_actions',
-                         'correction_timeout_seconds', 'correction_max_age_seconds'):
+                         'correction_timeout_seconds', 'correction_max_age_seconds',
+                         'max_supervisor_calls', 'supervisor_exhaustion_policy'):
                 if name not in recorded_config:
                     self._recorded_config.pop(name)
 
@@ -635,7 +675,7 @@ class RecordedReplay:
                               clock=lambda: now, action_selector=select,
                               recovery_observer=observe, on_step=after_step)
         _require(_summary(outcome) == self._outcome, 'replayed outcome diverged')
-        return outcome
+        return replace(outcome, supervisor_call_budget=deepcopy(self._supervisor_call_budget))
 
 
 if __name__ == '__main__':

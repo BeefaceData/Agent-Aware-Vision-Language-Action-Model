@@ -41,6 +41,11 @@ class EpisodeConfig:
     admission requires room for the entire sequence; unused commands after
     terminal outcomes or aborts are not counted as executed actions.
 
+    max_supervisor_calls defaults to max_steps and reserves one request before
+    each due single-attempt supervisor callback. Failed requests are not refunded.
+    Exhaustion stops dispatch by default; baseline_fallback explicitly opts into
+    current-input/health/native-action admission checks. See docs/supervisor-allowance.md.
+
     Declare both correction validity limits for expiry-enforced operation.
     None/None preserves the legacy trusted-selector/replay interface; it is
     not an expiry-ready active configuration. No physical limits are inferred.
@@ -53,6 +58,8 @@ class EpisodeConfig:
     recovery_cooldown_actions: int = 0
     correction_timeout_seconds: float | None = None
     correction_max_age_seconds: float | None = None
+    max_supervisor_calls: int | None = None
+    supervisor_exhaustion_policy: str = "stop"
 
     def __post_init__(self):
         if (type(self.supervisor_interval_actions) is not int or
@@ -66,6 +73,12 @@ class EpisodeConfig:
             raise ValueError('max_interventions must be a nonnegative integer')
         if type(self.recovery_cooldown_actions) is not int or self.recovery_cooldown_actions < 0:
             raise ValueError('recovery_cooldown_actions must be a nonnegative integer')
+        if self.max_supervisor_calls is None:
+            object.__setattr__(self, 'max_supervisor_calls', self.max_steps)
+        if type(self.max_supervisor_calls) is not int or self.max_supervisor_calls < 0:
+            raise ValueError('max_supervisor_calls must be a nonnegative integer')
+        if self.supervisor_exhaustion_policy not in ('stop', 'baseline_fallback'):
+            raise ValueError('invalid supervisor exhaustion policy')
         expiry_limits = (self.correction_timeout_seconds, self.correction_max_age_seconds)
         if expiry_limits != (None, None) and any(
                 type(value) not in (int, float) or not isfinite(value) or value <= 0
@@ -760,6 +773,7 @@ class ActionRecord:
     interruption: dict | None = None
     dispatch: dict | None = None
     correction_expiry: dict | None = None
+    supervisor_call_budget: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -793,6 +807,7 @@ class EpisodeOutcome:
     terminal_observation: ObservationReference | None = None
     artifact_status: Literal['incomplete', 'completed'] = 'incomplete'
     artifact_diagnostics: tuple[str, ...] = ()
+    supervisor_call_budget: dict | None = None
     task_status: str = field(init=False)
 
     def __post_init__(self):
@@ -1032,6 +1047,8 @@ def run_episode(
     from environment_interruption import require_interruption, interrupt
     interruption_contract = (require_interruption(environment) if any(
         item is not None for item in (action_selector, supervisor_decider, baseline_fallback))
+        or (config.max_supervisor_calls < config.max_steps and
+            (supervisor is not None or window_supervisor is not None))
         else None)
 
     from observation_window import ObservationWindowBuilder, WindowAction, WindowSettings
@@ -1091,6 +1108,8 @@ def run_episode(
         recovery_budget = None
         recovery_validity = None
         cooldown_remaining = 0
+        supervisor_calls = 0
+        supervisor_exhausted = False
 
         for step in range(1, config.max_steps + 1):
             budget_record = recovery_budget if recovery_sequence is not None else None
@@ -1107,6 +1126,8 @@ def run_episode(
             fallback_cause = None
             fallback = None
             expiry = None
+            call_budget = None
+            allowance_refused = False
             continuing_recovery = recovery_sequence is not None
             proposal_for_supervisor = (deepcopy(proposed_action)
                                        if supervisor is not None or window_supervisor is not None
@@ -1125,7 +1146,27 @@ def run_episode(
                         if type(triggered) is not bool:
                             raise ValueError('assessment_trigger must return bool')
                         assessment_due = assessment_due or triggered
-                    if supervisor_decider is not None and assessment_due:
+                    if window_supervisor is not None:
+                        if history is None:
+                            task = supervisor_observation(observation).observation.get('task')
+                            history = ObservationWindowBuilder(episode_id, task, settings)
+                        history.append(observation)
+                    if assessment_due:
+                        allowance_refused = supervisor_calls >= config.max_supervisor_calls
+                        if allowance_refused:
+                            supervisor_exhausted = True
+                            fallback_cause = 'supervisor call allowance exhausted'
+                        else:
+                            # Reserve before invoking user/provider code. Failures, timeouts,
+                            # malformed replies and cancellation never refund an attempt.
+                            supervisor_calls += 1
+                        call_budget = dict(limit=config.max_supervisor_calls,
+                                           attempted=supervisor_calls,
+                                           admitted=not allowance_refused,
+                                           policy=config.supervisor_exhaustion_policy)
+                    if allowance_refused:
+                        pass
+                    elif supervisor_decider is not None and assessment_due:
                         response = supervisor_decider(ActionProposal(
                             proposal_id, supervisor_observation(observation),
                             deepcopy(proposed_action)))
@@ -1152,10 +1193,6 @@ def run_episode(
                         else:
                             pass_response = deepcopy(response)
                     elif window_supervisor is not None:
-                        if history is None:
-                            task = supervisor_observation(observation).observation.get('task')
-                            history = ObservationWindowBuilder(episode_id, task, settings)
-                        history.append(observation)
                         window_supervisor(history.snapshot(), proposal_for_supervisor)
                     elif supervisor is not None:
                         supervisor(supervisor_observation(observation), proposal_for_supervisor)
@@ -1176,7 +1213,8 @@ def run_episode(
                                              'rejected' if isinstance(exc, SupervisorResponseError)
                                              else 'unconfirmed',
                                              str(exc) if isinstance(exc, SupervisorResponseError)
-                                             else None)))
+                                             else None,
+                                             supervisor_call_budget=deepcopy(call_budget))))
                         raise
                 response_at = clock()
             else:
@@ -1247,7 +1285,8 @@ def run_episode(
                 proposal = ActionProposal(proposal_id, deepcopy(observation),
                                           deepcopy(proposed_action))
                 fallback = (baseline_fallback.assess(proposal, fallback_cause, clock)
-                            if baseline_fallback is not None else
+                            if baseline_fallback is not None and not (allowance_refused and
+                                config.supervisor_exhaustion_policy == 'stop') else
                             fallback_evidence(proposal, fallback_cause, clock()))
                 checked_at = clock()
                 cumulative_wait += checked_at - response_at
@@ -1297,7 +1336,8 @@ def run_episode(
                                      intervention_budget=deepcopy(budget_record),
                                      supervisor_abstention=abstention_response,
                                      fallback=deepcopy(fallback),
-                                     interruption=interruption, correction_expiry=expiry)))
+                                     interruption=interruption, correction_expiry=expiry,
+                                     supervisor_call_budget=deepcopy(call_budget))))
                 stop_reason = ('proposal_rejected' if interruption['confirmed']
                                else 'interruption_failed')
                 break
@@ -1334,6 +1374,7 @@ def run_episode(
                     supervisor_abstention=abstention_response, recovery=recovery_evidence,
                     intervention_budget=deepcopy(budget_record), fallback=deepcopy(fallback),
                     interruption=interruption, correction_expiry=expiry,
+                    supervisor_call_budget=deepcopy(call_budget),
                     dispatch=dict(attempted=True,
                                   sent=exc.sent if isinstance(exc, ExecutionFailure) else None,
                                   acknowledged=False, error_type=type(exc).__name__))
@@ -1361,7 +1402,8 @@ def run_episode(
                 supervisor_pass=pass_response,
                 supervisor_abstention=abstention_response,
                 recovery=recovery_evidence, intervention_budget=deepcopy(budget_record),
-                fallback=deepcopy(fallback), correction_expiry=expiry))
+                fallback=deepcopy(fallback), correction_expiry=expiry,
+                supervisor_call_budget=deepcopy(call_budget)))
             acknowledged_actions.append(deepcopy(result.action_record))
             reward_sum += result.reward
             steps = step
@@ -1476,4 +1518,7 @@ def run_episode(
     return EpisodeOutcome(episode_id, success, steps, stop_reason, reward_sum,
                           rollout_seconds, artifacts, cumulative_wait,
                           tuple(step_timings), terminal_observation,
-                          artifact_status, diagnostics)
+                          artifact_status, diagnostics,
+                          dict(limit=config.max_supervisor_calls, attempted=supervisor_calls,
+                               exhausted=supervisor_exhausted,
+                               policy=config.supervisor_exhaustion_policy))

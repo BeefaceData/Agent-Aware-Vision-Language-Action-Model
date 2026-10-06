@@ -18,7 +18,7 @@ from observation_window import ObservationWindowBuilder, WindowSettings
 from model_usage import ModelReply
 from supervisor_response import WindowedSupervisorResponse
 from supervisor_retry import RecoverableProviderError
-from decision_memory import DecisionMemory, disabled_memory
+from decision_memory import DecisionMemory, NoMemory
 from fixed_memory import FixedMemory
 
 
@@ -159,9 +159,9 @@ class ChronologicalVlmAdapter:
         self._history = None
         self._call_journal = call_journal
         self._retry_proposal = None
-        if decision_memory is not None and type(decision_memory) not in (DecisionMemory, FixedMemory):
-            raise ValueError('DecisionMemory or FixedMemory required')
-        self._decision_memory = decision_memory
+        if decision_memory is not None and type(decision_memory) not in (DecisionMemory, FixedMemory, NoMemory):
+            raise ValueError('DecisionMemory, FixedMemory or NoMemory required')
+        self._decision_memory = NoMemory() if decision_memory is None else decision_memory
 
     def __call__(self, proposal, deadline, cancellation):
         if cancellation.is_set() or monotonic() >= deadline:
@@ -182,8 +182,7 @@ class ChronologicalVlmAdapter:
         identity = dict(episode_id=packet.episode_id,
                         observation_sequence=packet.sequence,
                         proposal_id=proposal.proposal_id)
-        memory = (disabled_memory() if self._decision_memory is None else
-                  self._decision_memory.prepare(proposal))
+        memory = self._decision_memory.prepare(proposal)
         content = [{'type': 'text', 'text': _json({
             'request': identity, 'task': window.task,
             'proposed_action': proposal.action,

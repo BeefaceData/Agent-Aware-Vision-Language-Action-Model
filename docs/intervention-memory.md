@@ -413,6 +413,37 @@ writes, separately recorded additions, restart, detached results, prohibited que
 overrides, empty snapshots and tampering, plus complete pass/abstention episode
 replays with captured provider context and unchanged snapshot provenance.
 
+## No-memory supervisor condition
+
+For issue #104, pass `decision_memory=NoMemory()` to the same
+`ChronologicalVlmAdapter` used for memory-enabled supervision:
+
+```python
+from decision_memory import NoMemory
+from supervisor_vlm import ChronologicalVlmAdapter
+
+adapter = ChronologicalVlmAdapter(settings, encode_png, transport,
+                                  decision_memory=NoMemory())
+```
+
+Omitting `decision_memory` (or passing `None`) uses this same mode. It accepts
+no persistent store, snapshot, references or query callback and performs no
+experience reads or admissions. Each decision records retrieval as `disabled`
+with no selected records, and no memory context block is sent to the model.
+An enabled retrieval that selects zero records remains a different condition.
+
+Current-episode observations still enter the adapter's bounded chronological
+window with the same settings and supervisor prompt. A new episode ID clears
+that window; `run_episode` supplies a fresh ID for every attempt. Trace recording
+and sealed replay remain available independently of memory retrieval. Construct
+a new adapter to change conditions; do not reuse episode IDs across attempts.
+
+`python -m unittest discover -s tests -p test_no_memory.py -v` verifies the
+default and explicit modes with consecutive failed and successful episodes on
+the same adapter, captured provider history, sealed replay and forbidden
+persistent-access probes. These are offline synthetic contracts, not evidence
+of a performance improvement.
+
 Run the public offline contracts:
 
 ```powershell

@@ -12,6 +12,17 @@ def disabled_memory():
             'references': [], 'excluded': [], 'omitted': []}
 
 
+class NoMemory:
+    """Disable cross-episode retrieval without touching observation history.
+
+    This mode accepts no store, snapshot, references or query callback. Episode
+    history remains owned by the chronological supervisor adapter.
+    """
+
+    def prepare(self, proposal):
+        return disabled_memory()
+
+
 class DecisionMemory:
     """Explicit permitted references and host-declared query for each proposal.
 

@@ -233,6 +233,7 @@ def _load(directory, manifest):
     stop = 'step_limit'
     budget = InterventionBudget(config.max_interventions, config.recovery_attempt_limits)
     budget_required = 'max_interventions' in manifest['config']
+    cooldown_remaining = 0
     for index, row in enumerate(decisions):
         _require(type(row['step']) is int and type(row['source_sequence']) is int and
                  row['step'] == index + 1 and row['source_sequence'] == index and
@@ -282,6 +283,13 @@ def _load(directory, manifest):
             _require(check == expected, 'recovery check does not match evidence')
         else:
             _require(not pending, 'missing recovery continuation')
+        if record['disposition'] == 'overridden' and not pending:
+            _require(cooldown_remaining == 0, 'intervention during recovery cooldown')
+        reason = record.get('rejection_reason')
+        if isinstance(reason, str) and reason.startswith('recovery cooldown:'):
+            _require(cooldown_remaining > 0 and reason ==
+                     f'recovery cooldown: {cooldown_remaining} baseline actions remaining',
+                     'cooldown rejection does not match acknowledged actions')
         accounting = record.get('intervention_budget')
         if budget_required and record['disposition'] == 'rejected' and (
             record.get('rejection_reason') == 'episode intervention limit exhausted' or
@@ -367,6 +375,10 @@ def _load(directory, manifest):
             'reward', 'success', 'terminated', 'truncated'}, 'result missing/invalid')
         _require(all(type(result[key]) is bool for key in ('success', 'terminated', 'truncated'))
                  and type(result['reward']) in (int, float), 'invalid evaluator values')
+        if recovery is not None and recovery['check']['status'] == 'completed':
+            cooldown_remaining = config.recovery_cooldown_actions
+        elif record['disposition'] == 'unmodified':
+            cooldown_remaining = max(0, cooldown_remaining - 1)
         executed += 1
         reward += result['reward']
         success = result['success']
@@ -411,7 +423,7 @@ class RecordedReplay:
         # Historical annotation fingerprints include pre-existing config defaults,
         # but must not acquire fields introduced after the trace was sealed.
         if recorded_config is not None:
-            for name in ('max_interventions', 'recovery_attempt_limits'):
+            for name in ('max_interventions', 'recovery_attempt_limits', 'recovery_cooldown_actions'):
                 if name not in recorded_config:
                     self._recorded_config.pop(name)
 

@@ -177,3 +177,34 @@ then requests another recovery until the exact configured limit rejects it.
 Separate fixtures verify immediate abort, failed dispatch, independent tool
 counts, adjustments sharing the cap, new-episode reset and corrupted accounting.
 All evidence is synthetic and establishes execution behavior only.
+
+## Recovery cooldown
+
+`EpisodeConfig.recovery_cooldown_actions` declares a nonnegative integer count
+of acknowledged, unmodified baseline actions required after each successfully
+completed recovery sequence. For example, `recovery_cooldown_actions=2` permits
+the next recovery or numerical adjustment only after two baseline actions and
+their accepted observations. Recovery commands themselves do not count. The
+cooldown applies across all tools and adjustments, even if the executor is
+replaced. It starts again after every completed recovery; a new episode starts
+with no outstanding cooldown. Aborted recoveries already terminate the episode.
+
+The default `0` explicitly disables cooldown for compatibility with existing
+configurations; active configurations must select a reviewed count. This is an
+action-based contract: elapsed time, inference calls, and waiting cannot expire
+it. It does not establish physical safety or observed task progress.
+
+The declared policy rejects an otherwise valid correction during cooldown and
+ends the episode with `proposal_rejected`, recording the number of baseline
+actions still required. It dispatches no pending action, adds no hidden wait or
+retry, and consumes no intervention attempt. An unchanged baseline proposal can
+continue during cooldown under the ordinary execution/observation checks.
+
+The effective configuration is retained in the sealed trace manifest. Replay
+checks admitted interventions and cooldown rejections against acknowledged
+actions; historical trace fingerprints retain their original configuration.
+Run the synthetic public boundary, reset and complete-episode replay fixtures:
+
+```powershell
+python -m unittest discover -s tests -p test_recovery_cooldown.py -v
+```

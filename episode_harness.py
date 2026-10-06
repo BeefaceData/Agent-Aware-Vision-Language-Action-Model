@@ -31,12 +31,15 @@ class EpisodeConfig:
 
     Each recovery sequence and each single-action override consumes one
     intervention. Unlisted tools have zero attempts; zero disables a budget.
+    Recovery cooldown counts accepted baseline actions after local completion;
+    zero disables cooldown, and early correction requests stop the episode.
     """
     seed: int
     max_steps: int
     supervisor_interval_actions: int = 1
     max_interventions: int | None = None
     recovery_attempt_limits: tuple[tuple[str, int], ...] = (('reopen_and_retreat', 1),)
+    recovery_cooldown_actions: int = 0
 
     def __post_init__(self):
         if (type(self.supervisor_interval_actions) is not int or
@@ -48,6 +51,8 @@ class EpisodeConfig:
             object.__setattr__(self, 'max_interventions', self.max_steps)
         if type(self.max_interventions) is not int or self.max_interventions < 0:
             raise ValueError('max_interventions must be a nonnegative integer')
+        if type(self.recovery_cooldown_actions) is not int or self.recovery_cooldown_actions < 0:
+            raise ValueError('recovery_cooldown_actions must be a nonnegative integer')
         limits = self.recovery_attempt_limits
         if (type(limits) not in (tuple, list) or
                 any(type(item) not in (tuple, list) or len(item) != 2 or
@@ -1032,6 +1037,7 @@ def run_episode(
         recovery_index = 0
         budget = InterventionBudget(config.max_interventions, config.recovery_attempt_limits)
         recovery_budget = None
+        cooldown_remaining = 0
 
         for step in range(1, config.max_steps + 1):
             budget_record = recovery_budget if recovery_sequence is not None else None
@@ -1141,6 +1147,9 @@ def run_episode(
                         getattr(policy, 'resume', None)
                     ):
                         raise NotImplementedError('policy does not support override/resume')
+                    if resolution.kind in ('override', 'recovery') and cooldown_remaining:
+                        resolution = ActionResolution('reject', reason=
+                            f'recovery cooldown: {cooldown_remaining} baseline actions remaining')
                     if resolution.kind == 'recovery':
                         plan = RecoverySequence(**asdict(resolution.recovery))
                         if not callable(recovery_observer):
@@ -1289,6 +1298,9 @@ def run_episode(
                 recovery_finished = recovery_index == len(recovery_sequence.actions)
                 if recovery_finished:
                     recovery_sequence = None
+                    cooldown_remaining = config.recovery_cooldown_actions
+            elif resolution.kind == 'pass':
+                cooldown_remaining = max(0, cooldown_remaining - 1)
             if (resolution.kind == 'override' or recovery_finished) and step < config.max_steps:
                 # Only accepted, nonterminal evidence can seed the next proposal.
                 # Keep adapter mutation separate from recorded environment evidence.

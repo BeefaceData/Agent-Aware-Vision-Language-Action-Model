@@ -61,6 +61,8 @@ class EpisodeConfig:
     rejects numerical overrides, including identity overrides, while preserving
     normal recovery validation and every configured runtime limit. A rejected
     adjustment stops unless an explicit BaselineFallback admits the proposal.
+    'adjustment_only' instead rejects recovery sequences and retains normal
+    single-action adjustment validation and the same runtime limits.
     """
     seed: int
     max_steps: int
@@ -79,7 +81,7 @@ class EpisodeConfig:
     correction_mode: str = 'combined'
 
     def __post_init__(self):
-        if self.correction_mode not in ('combined', 'recovery_only'):
+        if self.correction_mode not in ('combined', 'recovery_only', 'adjustment_only'):
             raise ValueError('invalid correction mode')
         if type(self.supervisor_max_retries) is not int or self.supervisor_max_retries < 0:
             raise ValueError('supervisor retry count must be a nonnegative integer')
@@ -1335,6 +1337,9 @@ def run_episode(
                     if config.correction_mode == 'recovery_only' and resolution.kind == 'override':
                         resolution = ActionResolution(
                             'reject', reason='adjustment disallowed in recovery_only mode')
+                    if config.correction_mode == 'adjustment_only' and resolution.kind == 'recovery':
+                        resolution = ActionResolution(
+                            'reject', reason='recovery disallowed in adjustment_only mode')
                     if resolution.kind == 'reject' and baseline_fallback is not None:
                         fallback_cause = 'correction rejected: ' + resolution.reason
                         resolution = ActionResolution('pass')

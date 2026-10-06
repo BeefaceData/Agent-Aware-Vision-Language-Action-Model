@@ -342,6 +342,8 @@ def _load(directory, manifest):
                          'supervisor call allowance exhausted',
                      'missing supervisor call budget')
         recovery = record.get('recovery')
+        _require(not (config.correction_mode == 'adjustment_only' and recovery is not None),
+                 'recovery disallowed in adjustment_only mode')
         _require(not (config.correction_mode == 'recovery_only' and
                       record['disposition'] == 'overridden' and recovery is None),
                  'adjustment disallowed in recovery_only mode')
@@ -703,7 +705,7 @@ class RecordedReplay:
         """Execute validated replay and label diagnostic scope explicitly."""
         return dict(source_episode_id=self.source_episode_id,
                     correction_mode=self.config.correction_mode,
-                    optional_ablation=self.config.correction_mode == 'recovery_only',
+                    optional_ablation=self.config.correction_mode != 'combined',
                     primary_acceptance_evidence=False,
                     replay_outcome=_summary(self.run()))
 

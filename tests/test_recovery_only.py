@@ -132,7 +132,7 @@ class RecoveryOnlyTests(unittest.TestCase):
                 load_recorded_replay(directory)
 
     def test_invalid_mode_fails_before_startup(self):
-        for mode in ('adjustment_only', 'unknown', None, True):
+        for mode in ('unknown', None, True):
             with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'correction mode'):
                 EpisodeConfig(17, 4, correction_mode=mode)
 

@@ -342,6 +342,9 @@ def _load(directory, manifest):
                          'supervisor call allowance exhausted',
                      'missing supervisor call budget')
         recovery = record.get('recovery')
+        _require(not (config.correction_mode == 'recovery_only' and
+                      record['disposition'] == 'overridden' and recovery is None),
+                 'adjustment disallowed in recovery_only mode')
         expiry = record.get('correction_expiry')
         expired = expiry is not None and expiry.get('valid') is False
         previous = decisions[index - 1]['action_record'].get('recovery') if index else None
@@ -673,7 +676,7 @@ class RecordedReplay:
                          'correction_timeout_seconds', 'correction_max_age_seconds',
                          'max_supervisor_calls', 'supervisor_exhaustion_policy', 'max_episode_seconds',
                          'supervisor_max_retries', 'supervisor_retry_delay_seconds',
-                         'supervisor_retry_errors'):
+                         'supervisor_retry_errors', 'correction_mode'):
                 if name not in recorded_config:
                     self._recorded_config.pop(name)
 
@@ -695,6 +698,14 @@ class RecordedReplay:
         if self._wall_clock_limit is not None:
             result['wall_clock_limit'] = self._wall_clock_limit
         return _plain(result)
+
+    def report(self):
+        """Execute validated replay and label diagnostic scope explicitly."""
+        return dict(source_episode_id=self.source_episode_id,
+                    correction_mode=self.config.correction_mode,
+                    optional_ablation=self.config.correction_mode == 'recovery_only',
+                    primary_acceptance_evidence=False,
+                    replay_outcome=_summary(self.run()))
 
     def run(self, recorder=None):
         packets, decisions = deepcopy((self._packets, self._decisions))
@@ -820,5 +831,4 @@ if __name__ == '__main__':
     parser.add_argument('directory', help='sealed replay directory containing manifest.json')
     args = parser.parse_args()
     replay = load_recorded_replay(args.directory)
-    print(_json({'source_episode_id': replay.source_episode_id,
-                 'replay_outcome': _summary(replay.run())}))
+    print(_json(replay.report()))

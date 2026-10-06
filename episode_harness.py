@@ -56,6 +56,11 @@ class EpisodeConfig:
     Declare both correction validity limits for expiry-enforced operation.
     None/None preserves the legacy trusted-selector/replay interface; it is
     not an expiry-ready active configuration. No physical limits are inferred.
+
+    correction_mode='recovery_only' is an optional diagnostic ablation. It
+    rejects numerical overrides, including identity overrides, while preserving
+    normal recovery validation and every configured runtime limit. A rejected
+    adjustment stops unless an explicit BaselineFallback admits the proposal.
     """
     seed: int
     max_steps: int
@@ -71,8 +76,11 @@ class EpisodeConfig:
     supervisor_max_retries: int = 0
     supervisor_retry_delay_seconds: float = 0.0
     supervisor_retry_errors: tuple[str, ...] = RECOVERABLE_ERRORS
+    correction_mode: str = 'combined'
 
     def __post_init__(self):
+        if self.correction_mode not in ('combined', 'recovery_only'):
+            raise ValueError('invalid correction mode')
         if type(self.supervisor_max_retries) is not int or self.supervisor_max_retries < 0:
             raise ValueError('supervisor retry count must be a nonnegative integer')
         delay = self.supervisor_retry_delay_seconds
@@ -1324,6 +1332,9 @@ def run_episode(
                     if ((resolution.kind == 'recovery' and type(resolution.recovery) is not RecoverySequence) or
                             (resolution.kind != 'recovery' and resolution.recovery is not None)):
                         raise ValueError('invalid recovery resolution')
+                    if config.correction_mode == 'recovery_only' and resolution.kind == 'override':
+                        resolution = ActionResolution(
+                            'reject', reason='adjustment disallowed in recovery_only mode')
                     if resolution.kind == 'reject' and baseline_fallback is not None:
                         fallback_cause = 'correction rejected: ' + resolution.reason
                         resolution = ActionResolution('pass')

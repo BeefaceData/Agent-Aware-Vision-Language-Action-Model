@@ -988,8 +988,14 @@ def run_episode(
     assessment_trigger: Callable[[ActionProposal], bool] | None = None,
     recovery_observer: Callable[[RecoverySequence, int, ObservationPacket], Any] | None = None,
     baseline_fallback: BaselineFallback | None = None,
+    frozen_contract=None,
 ) -> EpisodeOutcome:
     """Run one attempt and return task outcome and artifact finalization status.
+
+    The initial task field remains fixed through terminal observation. Optional
+    ``frozen_contract`` verifies trusted host configuration readers before reset,
+    inference and dispatch and after each step. Drift records a rejection and
+    invokes the adapter's declared interruption behavior before raising.
 
     One call owns its policy, environment and recorder from before reset through
     finalization, including recovery and resumption. Concurrent or reentrant
@@ -1068,6 +1074,11 @@ def run_episode(
     work has no dispatch authority. A new attempt gets a new episode identity,
     so a cached executor resolution cannot be reused across that boundary.
     """
+    from frozen_runtime import EpisodeInstruction, FrozenContractViolation, FrozenRuntimeContract
+    if frozen_contract is not None:
+        if type(frozen_contract) is not FrozenRuntimeContract:
+            raise ValueError('FrozenRuntimeContract required')
+        frozen_contract.verify()
     from action_capabilities import validate_action_pair
     validate_action_pair(policy, environment)
     from baseline_fallback import BaselineFallback, fallback_evidence
@@ -1111,6 +1122,7 @@ def run_episode(
     acknowledged_actions = []
     recorder_started = False
     reward_sum = 0.0
+    cumulative_wait = 0.0
     steps = 0
     interruption_diagnostics = []
     failed_action = None
@@ -1141,6 +1153,7 @@ def run_episode(
         last_observation = deepcopy(observation)
         startup_stage = None
         recorder_started = True
+        instruction_guard = EpisodeInstruction(observation)
         recorder.begin(observation)
         deadline = EpisodeDeadline(config.max_episode_seconds, clock,
             (policy, environment, recorder, supervisor, window_supervisor,
@@ -1167,6 +1180,9 @@ def run_episode(
         for step in range(1, config.max_steps + 1):
             call_budget = None
             deadline.check('policy')
+            instruction_guard.verify(observation)
+            if frozen_contract is not None:
+                frozen_contract.verify()
             budget_record = recovery_budget if recovery_sequence is not None else None
             if recovery_sequence is not None and history is not None:
                 history.append(observation)
@@ -1408,6 +1424,9 @@ def run_episode(
             recovery_evidence = (dict(sequence=asdict(recovery_sequence), action_index=recovery_index)
                                  if recovery_sequence is not None else None)
             transport_action = deepcopy(selected_action)
+            instruction_guard.verify(observation)
+            if frozen_contract is not None:
+                frozen_contract.verify()
             deadline.check('dispatch')
             execution_started_at = clock()
             if resolution.kind in ('override', 'recovery'):
@@ -1575,6 +1594,9 @@ def run_episode(
                 deadline.check('after_execution')
             if on_step is not None:
                 deadline.call('on_step', on_step, step, result)
+            instruction_guard.verify(result.observation)
+            if frozen_contract is not None:
+                frozen_contract.verify()
             if terminal_reason is not None:
                 stop_reason = terminal_reason
                 break
@@ -1597,6 +1619,23 @@ def run_episode(
                 deadline.call('resume', policy.resume, deepcopy(observation))
 
     except BaseException as exc:
+        if isinstance(exc, FrozenContractViolation) and last_observation is not None:
+            stop = None
+            try:
+                contract = interruption_contract or require_interruption(environment)
+                stop = interrupt(environment, contract,
+                    ActionProposal(f'{episode_id}:{steps + 1}', last_observation, None),
+                    str(exc), clock)
+                interruption_diagnostics.append('frozen contract stop confirmed: ' + str(stop['confirmed']))
+            except Exception as stop_error:
+                interruption_diagnostics.append('frozen contract stop unavailable: ' + type(stop_error).__name__)
+            now = clock()
+            failed_action = ActionRecord(f'{episode_id}:{steps + 1}', None, None,
+                                         None, None, 'rejected', str(exc), interruption=stop)
+            record_failure(steps + 1, last_observation, None,
+                StepFailure('selection', type(exc).__name__, FailedStepTiming(
+                    last_observation.captured_monotonic, now, now, now, None, None, cumulative_wait),
+                    failed_action))
         if (isinstance(exc, EpisodeDeadlineExceeded) and failed_action is None
                 and terminal_reason is None):
             # No further policy, supervisor or recovery work can reach dispatch.

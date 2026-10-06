@@ -118,7 +118,7 @@ class SingleActionAdjustmentTests(unittest.TestCase):
 
     def test_complete_sealed_episode_has_one_override_and_no_carryover(self):
         with TemporaryDirectory() as tmp:
-            initial, current, final = {'task': 'place'}, {'task': 'place', 'time': 1}, {'task': 'done'}
+            initial, current, final = {'task': 'place'}, {'task': 'place', 'time': 1}, {'task': 'place', 'time': 2}
             adjusted = [0.1 + 0.01 / 0.05, 0.2 - 0.02 / 0.05,
                         0.3 + 0.005 / 0.05, 0.4, 0.5, 0.6, -1]
             policy = ReplayPolicy(((initial, self.action), (current, self.action)))

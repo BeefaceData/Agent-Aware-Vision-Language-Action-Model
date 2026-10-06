@@ -158,6 +158,9 @@ def main():
                 # Same processing order as LeRobot 0.4.3 rollout().
                 batch = preprocess_observation(packet.observation)
                 batch = add_envs_task(env, batch)
+                if batch.get('task') != [instruction]:
+                    from frozen_runtime import FrozenContractViolation
+                    raise FrozenContractViolation('VLA task instruction changed during episode')
                 batch = env_pre(batch)
                 batch = preprocessor(batch)
                 with torch.inference_mode():
@@ -292,7 +295,15 @@ def main():
         episode_config = EpisodeConfig(args.seed, limit)
         adapter = LiberoEnvironmentAdapter(env, initial_state=selection,
                                           action_capabilities=native_capabilities)
+        from frozen_runtime import FrozenRuntimeContract
+        runtime_contract = FrozenRuntimeContract(
+            policy=lambda: {'assets': summary['policy_assets'],
+                            'backbone_revision': Path(policy.config.vlm_model_name).name,
+                            'device': str(policy.config.device)},
+            instruction=lambda: env.call('task_description')[0],
+            controller=lambda: asdict(adapter.action_capabilities))
         identity_recorder = AttemptIdentityRecorder(out, episode_config, lambda: {
+            'frozen_runtime': runtime_contract.identity,
             'task': {'suite': args.suite, 'task_id': args.task_id,
                      'instruction': instruction},
             'initial_state': dict(adapter.initial_state_evidence),
@@ -317,7 +328,8 @@ def main():
         }, recorder)
         trace_recorder = TraceRecorder(out / 'replay', episode_config, identity_recorder)
         outcome = run_episode(episode_config, BaselinePolicy(),
-                              adapter, trace_recorder, show_progress)
+                              adapter, trace_recorder, show_progress,
+                              frozen_contract=runtime_contract)
         summary.update(status=('completed' if outcome.artifact_status == 'completed'
                                else 'error'), steps=outcome.steps,
                        artifact_status=outcome.artifact_status,

@@ -148,6 +148,7 @@ class ChronologicalVlmAdapter:
         if transport is not None and not callable(transport):
             raise ValueError('transport must be callable')
         self.settings = settings
+        self._initial_identity = supervisor_identity(settings)
         self._frozen_manifest = frozen_manifest
         if frozen_manifest is not None:
             frozen_manifest.verify(supervisor_identity(settings))
@@ -162,6 +163,8 @@ class ChronologicalVlmAdapter:
             raise RuntimeError('request no longer current')
         if self._frozen_manifest is not None:
             self._frozen_manifest.verify(supervisor_identity(self.settings))
+        if supervisor_identity(self.settings) != self._initial_identity:
+            raise ValueError('supervisor selection changed during adapter lifetime')
         packet = proposal.observation
         if self._history is None or self._history.episode_id != packet.episode_id:
             self._history = ObservationWindowBuilder(

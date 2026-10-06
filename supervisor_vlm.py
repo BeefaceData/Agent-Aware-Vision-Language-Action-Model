@@ -19,6 +19,7 @@ from model_usage import ModelReply
 from supervisor_response import WindowedSupervisorResponse
 from supervisor_retry import RecoverableProviderError
 from decision_memory import DecisionMemory, disabled_memory
+from fixed_memory import FixedMemory
 
 
 PROVIDER_API_VERSION = '2023-06-01'
@@ -158,8 +159,8 @@ class ChronologicalVlmAdapter:
         self._history = None
         self._call_journal = call_journal
         self._retry_proposal = None
-        if decision_memory is not None and type(decision_memory) is not DecisionMemory:
-            raise ValueError('DecisionMemory required')
+        if decision_memory is not None and type(decision_memory) not in (DecisionMemory, FixedMemory):
+            raise ValueError('DecisionMemory or FixedMemory required')
         self._decision_memory = decision_memory
 
     def __call__(self, proposal, deadline, cancellation):

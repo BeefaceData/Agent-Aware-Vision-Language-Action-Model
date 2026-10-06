@@ -370,9 +370,48 @@ To reproduce a query, use `manifest["records"]` with the store relative to the
 snapshot directory and its three `max_*` settings. Supply the current task,
 control, progress and failure-category query separately. This API records and
 validates configuration; it does not automatically wire a runtime retriever,
-prevent writes to the underlying store (#103), or certify development-only
+prevent writes to the underlying store, or certify development-only
 selection (#109). `DecisionMemory` still treats a supplied snapshot pin as a
 declaration. No execution policy, frozen prompt or model weights are changed.
+
+## Read-only fixed evaluation (#103)
+
+Use `FixedMemory` as the adapter's `decision_memory` to enforce a sealed
+snapshot's membership and retrieval budgets throughout evaluation:
+
+```python
+from fixed_memory import FixedMemory
+
+selection = FixedMemory(snapshot_path, expected_reference=pin,
+    query=lambda proposal: {
+        "task": active_task, "robot_capabilities": active_capabilities,
+        "progress_context": current_progress(proposal),
+        "failure_category": current_failure_category(proposal),
+    })
+# Pass decision_memory=selection to ChronologicalVlmAdapter.
+```
+
+The query must contain exactly those four current-context fields. References,
+snapshot identity, ranking policy and budgets cannot be overridden by the query.
+Each `prepare` verifies the manifest and all source evidence before retrieval
+and again before returning detached decision provenance. Corruption fails closed
+even when the snapshot's entry budget is zero. The recorded snapshot pin is the
+verified pin, rather than a caller's unverified declaration.
+
+`append(trace=..., attempt=..., supervisor=..., context=...)` always raises
+`TraceError` with `fixed-memory evaluation is read-only`, even for valid sealed
+episode evidence. A separate recorder/store may retain evaluation outcomes;
+those new entries never join this view's explicit membership. Reopening with
+the same external pin preserves membership, identity and settings across episodes.
+This API does not restrict filesystem owners, certify development-only selection
+(#109), or enable memory-informed active corrections (#108). Retain the trusted
+pin separately; use this interface instead of a freely configured `DecisionMemory`
+for fixed evaluation. No live campaign authorization is implied.
+
+`python -m unittest discover -s tests -p test_fixed_memory.py -v` covers rejected
+writes, separately recorded additions, restart, detached results, prohibited query
+overrides, empty snapshots and tampering, plus complete pass/abstention episode
+replays with captured provider context and unchanged snapshot provenance.
 
 Run the public offline contracts:
 

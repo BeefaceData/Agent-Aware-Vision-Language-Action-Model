@@ -190,7 +190,7 @@ class InterventionMemory:
         return record
 
     def append(self, *, trace, attempt, supervisor, context):
-        """Verify evidence and exclusively append; duplicate identity is an error."""
+        """Verify and append once; identical retries return the original pin."""
         try:
             provenance = {key: self._reference(value) for key, value in
                           dict(trace=trace, attempt=attempt, supervisor=supervisor,
@@ -201,10 +201,15 @@ class InterventionMemory:
             raise TraceError(f'invalid intervention provenance: {exc}') from exc
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / (record['record_id'] + '.json')
-        with path.open('xb') as stream:
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
+        try:
+            with path.open('xb') as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            _require(path.read_bytes() == raw,
+                     f"conflicting experience content: {record['record_id']}")
+            self.read(record['record_id'], expected_sha256=sha256(raw).hexdigest())
         return {'record_id': record['record_id'], 'sha256': sha256(raw).hexdigest()}
 
     def read(self, record_id, *, expected_sha256):

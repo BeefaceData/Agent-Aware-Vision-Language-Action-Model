@@ -248,17 +248,46 @@ class InterventionMemoryTests(unittest.TestCase):
                 self.store.candidates([dict(reference, sha256=pinned(path)[1])],
                     task=original['task'], robot_capabilities=original['robot_capabilities'])
 
-    def test_append_preserves_prior_bytes_and_duplicate_is_rejected(self):
+    def test_append_preserves_prior_bytes_and_retry_survives_restart(self):
         first = self.store.append(**self.arguments)
         path = self.store.directory / (first['record_id'] + '.json')
         original = path.read_bytes()
         second = self.store.append(**(self.arguments | {'context': pinned(self.contexts[1])}))
         self.assertNotEqual(first['record_id'], second['record_id'])
-        with self.assertRaises(FileExistsError):
-            self.store.append(**self.arguments)
+        self.store = InterventionMemory(self.store.directory)
+        self.assertEqual(self.store.append(**self.arguments), first)
+        self.assertEqual(len(list(self.store.directory.glob('*.json'))), 2)
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(len(self.read(first)['execution']), 2)
         self.assertEqual(len(self.read(second)['execution']), 2)
+
+    def test_conflicting_retry_reports_identity_without_replacing_original(self):
+        first = self.store.append(**self.arguments)
+        path = self.store.directory / (first['record_id'] + '.json')
+        original = path.read_bytes()
+        context = json.loads(self.arguments['context'][0].read_text())
+        context['diagnosis']['summary'] = 'Different retained diagnosis'
+        alternate = self.source / 'alternate-context.json'
+        alternate.write_text(json.dumps(context))
+        reopened = InterventionMemory(self.store.directory)
+        with self.assertRaisesRegex(TraceError, 'conflicting experience content: ' + first['record_id']):
+            reopened.append(**(self.arguments | {'context': pinned(alternate)}))
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(reopened.append(**self.arguments), first)
+
+    def test_retry_rejects_partial_record_and_changed_source(self):
+        first = self.store.append(**self.arguments)
+        path = self.store.directory / (first['record_id'] + '.json')
+        original = path.read_bytes()
+        path.write_bytes(b'{')
+        with self.assertRaisesRegex(TraceError, 'conflicting experience content'):
+            self.store.append(**self.arguments)
+        self.assertEqual(path.read_bytes(), b'{')
+        path.write_bytes(original)
+        self.arguments['context'][0].write_text('{}')
+        with self.assertRaises(TraceError):
+            self.store.append(**self.arguments)
+        self.assertEqual(path.read_bytes(), original)
 
     def test_missing_or_changed_pinned_provenance_never_creates_store(self):
         for name in self.arguments:

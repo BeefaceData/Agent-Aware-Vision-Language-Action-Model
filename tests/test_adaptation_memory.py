@@ -7,6 +7,7 @@ import unittest
 from adaptation_memory import AdaptationMemory
 from attempt_identity import AttemptIdentityRecorder
 from episode_harness import ActionResolution, EpisodeConfig, run_episode
+from fixed_memory import FixedMemory
 from memory_snapshot import MemorySnapshot
 from recorded_replay import TraceError, TraceRecorder, load_recorded_replay
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
@@ -176,8 +177,73 @@ class AdaptationMemoryTests(unittest.TestCase):
         result['after'].clear()
         memory.reference.clear()
         self.assertEqual(memory.reference, pin)
-        with self.assertRaisesRegex(TraceError, 'no active'):
+        with self.assertRaisesRegex(TraceError, 'conflicting completed episode'):
             memory.complete_episode(trace=trace, references=[], snapshot_path=self.root / 'again.json')
+
+    def test_repeated_outcomes_after_restart_leave_membership_and_exposure_unchanged(self):
+        memory = self.adaptive()
+        attempts = []
+        for index, success in enumerate((False, True)):
+            ref, outcome, _, trace = self.attempt(memory, f'completed-{index}', success)
+            path = self.root / f'completed-{index}.json'
+            memory.complete_episode(trace=trace, references=[ref], snapshot_path=path)
+            attempts.append((ref, outcome, trace))
+            pin = memory.reference
+            retry = memory.complete_episode(trace=trace, references=[ref], snapshot_path=path)
+            self.assertEqual(retry['before'], retry['after'])
+            self.assertEqual(memory.reference, pin)
+        memory = AdaptationMemory(path, expected_reference=pin, query=self.query)
+        original = path.read_bytes()
+        expected = FixedMemory(path, expected_reference=pin, query=self.query).prepare(proposal())
+        for ref, outcome, trace in attempts:
+            retry = memory.complete_episode(trace=trace, references=[ref],
+                snapshot_path=self.root / 'unused.json')
+            self.assertTrue(retry['replayed'])
+            self.assertEqual(retry['after'], pin)
+            with self.assertRaisesRegex(TraceError, 'own experience'):
+                memory.begin_episode(outcome.episode_id)
+            with self.assertRaisesRegex(TraceError, 'conflicting completed episode'):
+                memory.complete_episode(trace=trace, references=[],
+                    snapshot_path=self.root / 'unused.json')
+        document = MemorySnapshot(path, expected_reference=pin).read()
+        self.assertEqual(len(document['records']), 2)
+        self.assertEqual(len(document['metadata']['completed_episodes']), 2)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse((self.root / 'unused.json').exists())
+        self.assertEqual(memory.prepare(proposal()), expected)
+
+    def test_empty_exposure_retry_is_idempotent_and_cannot_be_reopened(self):
+        memory = self.adaptive()
+        directory, _, _ = self.episode(memory, 'empty', True)
+        trace = pinned(directory / 'manifest.json')
+        path = self.root / 'empty.json'
+        memory.complete_episode(trace=trace, references=[], snapshot_path=path)
+        pin = memory.reference
+        memory = AdaptationMemory(path, expected_reference=pin, query=self.query)
+        self.assertTrue(memory.complete_episode(trace=trace, references=[],
+            snapshot_path=path)['replayed'])
+        episode_id = load_recorded_replay(directory).evidence()['source_episode_id']
+        with self.assertRaisesRegex(TraceError, 'repeat exposure'):
+            memory.begin_episode(episode_id)
+        document = MemorySnapshot(path, expected_reference=pin).read()
+        self.assertEqual(document['records'], [])
+        self.assertEqual(len(document['metadata']['completed_episodes']), 1)
+        # A retry must still verify the completed trace, even with no members.
+        trace[0].write_bytes(trace[0].read_bytes() + b' ')
+        with self.assertRaisesRegex(TraceError, 'pinned sealed trace'):
+            memory.complete_episode(trace=trace, references=[], snapshot_path=path)
+        self.assertEqual(memory.reference, pin)
+
+    def test_retry_cannot_complete_or_replace_another_active_episode(self):
+        memory = self.adaptive()
+        ref, _, _, trace = self.attempt(memory, 'first')
+        memory.complete_episode(trace=trace, references=[ref],
+            snapshot_path=self.root / 'first.json')
+        before = memory.prepare(proposal(episode='active'))
+        with self.assertRaisesRegex(TraceError, 'active episode'):
+            memory.complete_episode(trace=trace, references=[ref],
+                snapshot_path=self.root / 'retry.json')
+        self.assertEqual(memory.prepare(proposal(episode='active')), before)
 
 
 if __name__ == '__main__':

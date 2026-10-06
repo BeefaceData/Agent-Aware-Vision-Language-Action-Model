@@ -37,6 +37,16 @@ class AdaptationMemory:
     def _document(self):
         return MemorySnapshot(self._path, expected_reference=self.reference).read()
 
+    @staticmethod
+    def _completed(document):
+        metadata = document['metadata']
+        if 'completed_episodes' in metadata:
+            return deepcopy(metadata['completed_episodes'])
+        # The previous format retained only its most recent completion.
+        previous = metadata.get('adaptation')
+        return ([] if previous is None else [{key: previous[key] for key in
+                ('episode_id', 'trace_sha256', 'admitted')}])
+
     def begin_episode(self, episode_id):
         """Require a fresh attempt identity and preserve the current membership."""
         with self._lock:
@@ -45,6 +55,8 @@ class AdaptationMemory:
             if self._episode is not None:
                 raise TraceError('complete the active adaptation episode first')
             document = self._document()
+            if any(item['episode_id'] == episode_id for item in self._completed(document)):
+                raise TraceError('episode cannot retrieve its own experience or repeat exposure')
             store = InterventionMemory(self._path.parent / document['store'])
             for ref in document['records']:
                 record = store.read(ref['record_id'], expected_sha256=ref['sha256'])
@@ -70,10 +82,10 @@ class AdaptationMemory:
         Empty admission still records an exposure and its verified terminal trace.
         A failed validation/write leaves retrieval on the old snapshot. Preserve
         the returned pin separately; restart explicitly from that pinned manifest.
+        A verified retry of a retained completion returns replayed=True and the
+        unchanged current pin without beginning an episode or writing a snapshot.
         """
         with self._lock:
-            if self._episode is None:
-                raise TraceError('no active adaptation episode')
             try:
                 trace_path, digest = trace
                 trace_path = Path(trace_path).resolve()
@@ -81,7 +93,8 @@ class AdaptationMemory:
                 if trace_path.name != 'manifest.json' or sha256(raw).hexdigest() != digest:
                     raise TraceError('adaptation requires a pinned sealed trace')
                 replay = load_recorded_replay(trace_path.parent)
-                if replay.evidence()['source_episode_id'] != self._episode:
+                episode_id = replay.evidence()['source_episode_id']
+                if self._episode is not None and episode_id != self._episode:
                     raise TraceError('sealed trace does not match active episode')
                 document = self._document()
                 store = InterventionMemory(self._path.parent / document['store'])
@@ -89,12 +102,30 @@ class AdaptationMemory:
                 for ref in refs:
                     record = store.read(ref['record_id'], expected_sha256=ref['sha256'])
                     source = record['provenance']['trace']
-                    if (record['episode_id'] != self._episode or
+                    if (record['episode_id'] != episode_id or
                             source['sha256'] != digest or
                             (store.directory / source['path']).resolve() != trace_path):
                         raise TraceError('admission record does not match completed episode')
                 if trace_path.read_bytes() != raw:
                     raise TraceError('episode trace changed during admission')
+                refs.sort(key=lambda ref: ref['record_id'])
+                if len({ref['record_id'] for ref in refs}) != len(refs):
+                    raise TraceError('duplicate admission record pin')
+                completed = self._completed(document)
+                receipt = {'episode_id': episode_id, 'trace_sha256': digest,
+                           'admitted': refs}
+                previous = next((item for item in completed
+                                 if item['episode_id'] == episode_id), None)
+                if previous is not None:
+                    if previous != receipt:
+                        raise TraceError('conflicting completed episode admission')
+                    # Reverify evidence above even on a retry. No publication,
+                    # exposure increment, or retrieval mutation is necessary.
+                    return deepcopy(dict(receipt, mode='adaptation',
+                        starting_snapshot=self._starting, before=self.reference,
+                        after=self.reference, replayed=True))
+                if self._episode is None:
+                    raise TraceError('no active adaptation episode')
                 before = self.reference
                 lineage = {'mode': 'adaptation', 'starting_snapshot': self._starting,
                     'before': before, 'episode_id': self._episode,
@@ -102,7 +133,9 @@ class AdaptationMemory:
                     'admitted': sorted(refs, key=lambda ref: ref['record_id'])}
                 snapshot = MemorySnapshot.freeze(snapshot_path, store,
                     document['records'] + refs,
-                    metadata={'adaptation': lineage}, retrieval=document['retrieval'])
+                    metadata={'adaptation': lineage,
+                              'completed_episodes': completed + [receipt]},
+                    retrieval=document['retrieval'])
                 view = FixedMemory(snapshot_path, expected_reference=snapshot.reference,
                                    query=self._query)
             except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:

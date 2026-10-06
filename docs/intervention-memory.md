@@ -309,7 +309,10 @@ unsuccessful abstention episodes. They also cover corrupt source evidence,
 tampered logs, empty retrieval, and model-authored provenance rejection.
 
 Writes use exclusive file creation, flush, and fsync; a repeated episode/proposal
-cannot replace an existing record. A failed write can leave an unreadable partial
+cannot replace an existing record. An identical, reverified append returns its
+original pin, including after reopening the store. A different record for that
+identity raises `TraceError` with `conflicting experience content` and the record
+ID, preserving the original bytes. A failed write can leave an unreadable partial
 file, which fails verification rather than becoming a usable experience. Reads
 check both the externally retained record digest and all referenced evidence,
 then recompute the record. Returned dictionaries are detached. Moving the common
@@ -489,8 +492,36 @@ lineage also contains the after pin. An empty `references=[]` records a complete
 exposure without adding experience. Preserve every snapshot and its external pin
 to follow the lineage. Restart by explicitly loading the latest retained snapshot;
 it becomes that session's declared starting point. No directory scan or automatic
-restart recovery is performed. Duplicate admission/retry recovery is separate
-work (#106); partial files from interrupted writes must not be treated as sealed.
+restart recovery is performed. Partial files from interrupted writes must not be
+treated as sealed.
+
+## Idempotent outcome processing (#106)
+
+Experience IDs are derived from the sealed episode ID and intervention proposal
+ID, so separate interventions in the same episode remain distinct. Repeating
+`InterventionMemory.append` verifies the supplied evidence and requires identical
+record bytes before returning the existing pin. Changed provenance, alternate
+content under the same identity, legacy schema bytes and partial records are not
+silently replaced or migrated.
+
+Adaptation snapshots also retain `metadata.completed_episodes`: one receipt per
+completed exposure, containing its episode ID, sealed trace digest and sorted
+admitted pins. Receipts accumulate across subsequent completions and explicit
+restarts, including episodes admitting no records. Reprocessing a receipt through
+`complete_episode` requires no `begin_episode`, verifies the trace and selected
+records again, and returns `replayed=True` with `before == after` at the current
+snapshot. It does not create the requested snapshot path, change retrieval, add
+records, or increment the exposure count. Changed selections or trace content
+under a completed episode ID raise a conflicting-admission diagnostic. A retry
+cannot complete a different active episode; a completed ID cannot begin another
+exposure or retrieve its own experience.
+
+Restart from the latest externally pinned snapshot, then retry the retained
+trace/record pins as needed. Preserve that pin separately: this API does not scan
+for orphaned publications or recover a lost pin. An older #105 snapshot can seed
+the receipt history with its most recent recorded completion only; it cannot
+reconstruct earlier empty exposures. The original immutable snapshots remain
+unchanged. Fixed-memory evaluation never uses these adaptation admissions.
 
 This policy is an API boundary, not filesystem access control. Split permissions
 and live experiment gates remain the host's responsibility. Fixed evaluation

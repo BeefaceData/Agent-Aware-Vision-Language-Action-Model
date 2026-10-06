@@ -28,11 +28,12 @@ offset, and absence of position clipping. It used LIBERO-10 task 0 with no
 policy loaded and zero episode steps. This verifies command-to-goal mapping,
 not achieved displacement, correction safety, or task performance.
 
-The generated capture stays in artifact storage, outside this implementation
-commit. Obtain its exact bytes from the evidence custodian, or make a new
-permitted controller capture and retain its identity. Do not silently replace
-the recorded file. A missing artifact leaves conversion disabled; synthetic
-test evidence is not a runtime calibration substitute.
+The capture and its package-version record are retained in `docs/evidence/`.
+Git attributes preserve their exact bytes across Windows and Linux checkouts.
+For a different controller environment, make a new permitted capture and retain
+its identity. Do not silently replace the recorded file. A missing artifact
+leaves conversion disabled; synthetic test evidence is not a runtime calibration
+substitute.
 
 ## Host setup and use
 

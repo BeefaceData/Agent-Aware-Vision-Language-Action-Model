@@ -25,3 +25,10 @@ checkpoints/
 # Local AFK worktrees, reports, locks and model transcripts
 .ralph/
 .ralph-run/
+
+# Pasted AFK loop context and history
+.agent/
+
+# Local issue-publishing scratch files and generated skill junctions
+.scratch/
+.claude/skills/

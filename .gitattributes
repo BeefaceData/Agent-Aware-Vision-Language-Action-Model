@@ -1,4 +1,5 @@
+# Retained evidence is addressed by byte hashes; preserve it across checkouts.
+docs/evidence/* -text
+
+# Keep the Bash launcher executable in Windows and Linux checkouts.
 ralph/*.sh text eol=lf
-ralph/*.jq text eol=lf
-ralph/tests/*.sh text eol=lf
-tests/fixtures/recorded_episode/*.jsonl text eol=lf

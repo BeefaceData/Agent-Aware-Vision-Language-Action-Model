@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-05T10:09:21.168998+00:00",
+  "python": "3.10.22",
+  "executable": "/home/almon/.venvs/neotix-simulator/bin/python",
+  "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "versions": {
+    "lerobot": "0.4.3",
+    "hf-libero": "0.1.4",
+    "robosuite": "1.4.0",
+    "mujoco": "3.3.7",
+    "numpy": "1.26.4"
+  },
+  "scope": "New local simulator controller verification; not historical baseline reconstruction",
+  "environment": {
+    "suite": "libero_10",
+    "task_id": 0,
+    "seed": 0,
+    "bddl_file": "LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket.bddl",
+    "control_mode": "relative",
+    "episode_steps": 0,
+    "policy_loaded": false,
+    "rendering": false
+  },
+  "controller": {
+    "name": "OSC_POSE",
+    "robot": "OnTheGroundPanda",
+    "class": "robosuite.controllers.osc.OperationalSpaceController",
+    "reference_frame": "world",
+    "translation_unit": "m",
+    "input_min": [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    "input_max": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "output_min": [
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.5,
+      -0.5,
+      -0.5
+    ],
+    "output_max": [
+      0.05,
+      0.05,
+      0.05,
+      0.5,
+      0.5,
+      0.5
+    ],
+    "metres_per_native_translation_unit": [
+      0.05,
+      0.05,
+      0.05
+    ],
+    "native_translation_indices": [
+      0,
+      1,
+      2
+    ],
+    "native_action_dimension": 7,
+    "use_delta": true,
+    "impedance_mode": "fixed",
+    "eef_position_world_m": [
+      -0.05846466056582397,
+      0.0,
+      0.6812794757296406
+    ],
+    "eef_orientation_world": [
+      [
+        -0.0004918296871690936,
+        0.9983867450712572,
+        -0.056777331476359764
+      ],
+      [
+        0.9999998786606131,
+        0.0004926243561613802,
+        0.0
+      ],
+      [
+        2.7969896363104485e-05,
+        -0.05677732458703325,
+        -0.9983868662149061
+      ]
+    ]
+  },
+  "verification": {
+    "passed": true,
+    "probes": [
+      {
+        "native_pose_command": [
+          -0.2,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "goal_delta_world_m": [
+          -0.010000000000000009,
+          0.0,
+          0.0
+        ],
+        "recovered_native_translation": [
+          -0.20000000000000018,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "native_pose_command": [
+          0.2,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "goal_delta_world_m": [
+          0.010000000000000002,
+          0.0,
+          0.0
+        ],
+        "recovered_native_translation": [
+          0.20000000000000004,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "native_pose_command": [
+          0.0,
+          -0.2,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "goal_delta_world_m": [
+          0.0,
+          -0.010000000000000002,
+          0.0
+        ],
+        "recovered_native_translation": [
+          0.0,
+          -0.20000000000000004,
+          0.0
+        ]
+      },
+      {
+        "native_pose_command": [
+          0.0,
+          0.2,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "goal_delta_world_m": [
+          0.0,
+          0.010000000000000002,
+          0.0
+        ],
+        "recovered_native_translation": [
+          0.0,
+          0.20000000000000004,
+          0.0
+        ]
+      },
+      {
+        "native_pose_command": [
+          0.0,
+          0.0,
+          -0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "goal_delta_world_m": [
+          0.0,
+          0.0,
+          -0.010000000000000009
+        ],
+        "recovered_native_translation": [
+          0.0,
+          0.0,
+          -0.20000000000000018
+        ]
+      },
+      {
+        "native_pose_command": [
+          0.0,
+          0.0,
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "goal_delta_world_m": [
+          0.0,
+          0.0,
+          0.010000000000000009
+        ],
+        "recovered_native_translation": [
+          0.0,
+          0.0,
+          0.20000000000000018
+        ]
+      }
+    ],
+    "components": [
+      "translation_x",
+      "translation_y",
+      "translation_z"
+    ],
+    "meaning": "Command-to-goal mapping, not achieved physical displacement"
+  },
+  "installed_source_sha256": {
+    "lerobot/envs/libero.py": "34e3c652166691af345f4551b5598eafa6f2765adc31446fc19d9981a68b7494",
+    "libero/libero/envs/env_wrapper.py": "a782fb76c9792268d28979474fe72849e1e98ada49c8e997a65359a8d6b6acd0",
+    "robosuite/controllers/config/osc_pose.json": "07f3a8b41d3eecc8a36700a85bd8207ee3fbc36eb73f6a2248340c96770d1e45",
+    "robosuite/controllers/osc.py": "cfa62a0e719bc53ef0c701efa66f7b3e2272d4fca2150ec73c05bb145eba85cb",
+    "robosuite/controllers/base_controller.py": "61f99a2daeb4eb6e39bfb996d94c5a5689ef3bc771d030d070193ea56d6a8332",
+    "robosuite/utils/control_utils.py": "1d0f1a063894b1e8289339e223665e14e8aec492c31e9e00f42edea8dc735f43",
+    "libero/libero/bddl_files/libero_10/LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket.bddl": "2e661058917f683a25bce480015197f0a2c1911bcbc2b9dd9d947199069c9618"
+  }
+}

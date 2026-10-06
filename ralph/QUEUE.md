@@ -1,8 +1,7 @@
 # Simulation supervisor queue
 
 `queues/simulation-supervisor.json` contains the 50 dependency-ordered issues.
-Launch with `bash ralph/codex-afk.sh 50`; use Git Bash's explicit executable from
-PowerShell as shown in [README.md](README.md).
+It is planning context only; `afk.sh` selects work through its prompt and counts completed issues.
 
 This batch reaches an observation-only simulation supervisor, pinned VLM identity,
 both bounded correction paths in replay and frozen-asset checks. It does not
@@ -10,8 +9,7 @@ complete active corrective simulation evaluation, establish a +10 percentage-poi
 result, or prove physical towel folding. Those require later issues and experiments.
 
 Use deterministic public module tests and complete-episode replay. Keep heavy
-simulator/model imports lazy and inject provider transports. The pinned validation
-image runs the project's unittest suite without GPU, network or client credentials.
+simulator/model imports lazy and inject provider transports. Run relevant project checks with synthetic fixtures and injected transports.
 
 ## Supervisor allowance
 
@@ -28,5 +26,4 @@ shared remaining allowance with durable reservation/accounting and current verif
 pricing. Implement and test its contract through injected transports first;
 a shell queue must never claim the removed gateway still enforces spend.
 
-The old queue state is retained. On the first shell launch, its active issue and
-original deadline are imported only if no legacy issue worker state exists.
+Historical queue state is retained as evidence; `afk.sh` does not import it.

@@ -4,13 +4,23 @@ Investigating an AI supervisor that observes a frozen vision-language-action (VL
 
 The current implementation runs **SmolVLA in LIBERO simulation**, recording an episode video, every executed action, and the final task outcome. It establishes the baseline for developing and evaluating the supervisor.
 
-**Status:** baseline inference and simulation are working. The observation-only supervisor, corrective interventions, and memory are planned; they are not implemented in this repository yet. No GRPO training or policy fine-tuning has been performed.
+**Status:** the reusable harness now includes supervisor decision handling,
+failure-assessment signals, checked recovery and action-adjustment mechanisms,
+recording/replay, and most cross-episode memory features. These are verified
+primarily through deterministic behavioral and complete-episode replay tests.
+The standalone command still runs the frozen baseline; live supervised integration,
+detector/correction calibration, and comparative evaluation remain to be completed.
+No measured improvement from supervision or memory is claimed, and no GRPO
+training or policy fine-tuning has been performed.
 
 ## What is included
 
 - `run_smolvla_episode.py`: standalone runner for one selected LIBERO task.
 - `README.md`: environment setup, usage, output descriptions, and initial results.
 - `.gitignore`: excludes generated runs, model weights, caches, and local environments.
+- `episode_harness.py`: shared episode execution with optional supervision and memory.
+- `tests/`: behavioral tests using public interfaces and complete replay episodes.
+- `docs/`: implemented workflows, controller evidence, and accepted design decisions.
 - [Client interface handoff packet](docs/client-interface-handoff.md): unsent checklist for Boniface to coordinate the client contract, timing and permissions; missing answers remain explicit.
 
 The runner loads [`HuggingFaceVLA/smolvla_libero`](https://huggingface.co/HuggingFaceVLA/smolvla_libero), freezes its weights, uses LeRobot's observation and action processors, and steps one simulation environment until success, termination, truncation, or the step limit.
@@ -933,3 +943,9 @@ per-family precision/recall, onset-interval delay bounds, unmatched events,
 unknown/abstention counts and executed interventions during reviewed productive
 intervals. Synthetic fixtures verify the calculations without establishing
 detector calibration or intervention readiness.
+
+## Simulator controller verification
+
+For controller scaling and reference-frame evidence required by correction
+conversion, see [the controller verification workflow](docs/simulator-controller.md).
+It uses an isolated WSL environment and a simulator-only probe.

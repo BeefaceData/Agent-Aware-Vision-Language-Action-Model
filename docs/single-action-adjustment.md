@@ -49,6 +49,21 @@ Successful overrides retain their source episode, observation and proposal in
 returned for a later proposal, including after recovery. Hosts must preserve
 this binding when forwarding an executor result.
 
+A supervisor response selects exactly one `kind`: `pass`, `abstain`, `recovery`
+or `adjustment`. `SupervisorResponseDecoder` rejects fields from another mode
+before decoding a correction, including empty or zero residuals attached to a
+recovery request. A host selector likewise returns one `ActionResolution`;
+combining an override action and a recovery sequence fails before dispatch.
+During recovery the harness consumes the bounded replacement commands without
+calling the selector again. An earlier adjustment is never added to those
+commands or to the next baseline proposal.
+
+Run `python -m unittest discover -s tests -p test_correction_modes.py -v` for
+the #87 exclusivity checks. These include provider and host conflict rejection
+and a sealed four-action episode: one adjustment, two recovery commands, then
+an unchanged baseline action. Replay checks the exact commands and retained
+recovery provenance. All inputs are synthetic software-contract fixtures.
+
 The harness dispatches the returned override once, counts it toward the episode
 action horizon, records the original proposal separately from the selected and
 acknowledged execution, and resumes a compatible policy from the fresh result

@@ -127,6 +127,15 @@ class SupervisorResponseDecoder:
         kind = response.get('kind')
         if type(kind) is not str or kind not in ('pass', 'abstain', 'recovery', 'adjustment'):
             raise SupervisorResponseError('unknown supervisor decision type')
+        # Select one mode before invoking either correction decoder. Even an
+        # empty/zero residual on a recovery request is an ambiguous decision.
+        recovery_fields = {'tool_name', 'parameters', 'evidence'}
+        adjustment_fields = {'scope', 'target', 'frame', 'units', 'residual'}
+        foreign_fields = (adjustment_fields if kind == 'recovery' else
+                          recovery_fields if kind == 'adjustment' else
+                          recovery_fields | adjustment_fields)
+        if foreign_fields.intersection(response):
+            raise SupervisorResponseError('conflicting supervisor decision fields')
         if kind in ('recovery', 'adjustment'):
             decoder = self.recovery if kind == 'recovery' else self.adjustment
             if decoder is None:

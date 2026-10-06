@@ -32,17 +32,18 @@ class InterventionMemoryTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.make_episode()
 
-    def make_episode(self, name='source', *, success=False, historical_check=None):
+    def make_episode(self, name='source', *, success=False, historical_check=None,
+                     assessment_missing=False, truncated=False, diagnosis_unknown=False):
         self.source = self.root / name
         self.source.mkdir()
         fixture = fixtures.InterventionLimitTests()
         fixture.setUp()
         config, policy, environment, select, _ = fixture.episode([fixtures.TOOL, fixtures.TOOL])
-        if success:
+        if success or truncated:
             step = environment.step
 
             def succeed(action):
-                return replace(step(action), success=True)
+                return replace(step(action), success=success, truncated=truncated)
 
             environment.step = succeed
         supervisor = FrozenSupervisorManifest.freeze(self.source / 'supervisor.json',
@@ -64,6 +65,9 @@ class InterventionMemoryTests(unittest.TestCase):
                     'evidence': [{'observation_sequence': proposal.observation.sequence,
                                  'source': 'main', 'description': 'Synthetic open gripper'}]},
                 'request': resolution.recovery.request}
+            if diagnosis_unknown:
+                context['diagnosis'] = {'category': 'unknown',
+                    'summary': 'Synthetic evidence is inconclusive', 'evidence': []}
             path = self.source / f'context-{len(contexts)}.json'
             with path.open('x') as stream:
                 json.dump(context, stream)
@@ -86,7 +90,8 @@ class InterventionMemoryTests(unittest.TestCase):
         recorder = HistoricalTrace if historical_check else TraceRecorder
         trace = recorder(self.source / 'trace', config, identity)
         self.outcome = run_episode(config, policy, environment, trace,
-            action_selector=retain_context, recovery_observer=fixture.recovery.observe,
+            action_selector=retain_context,
+            recovery_observer=(lambda *args: None) if assessment_missing else fixture.recovery.observe,
             clock=lambda: 10.)
         trace.seal(self.outcome)
         self.contexts = contexts
@@ -152,14 +157,94 @@ class InterventionMemoryTests(unittest.TestCase):
     def test_legacy_record_reads_without_rewriting_immutable_bytes(self):
         reference = self.store.append(**self.arguments)
         record = self.read(reference)
-        record['version'] = 1
-        del record['local_outcome']
+        del record['task_outcome']
+        del record['evidence_limitations']
         path = self.store.directory / (reference['record_id'] + '.json')
-        path.write_text(json.dumps(record))
-        original = path.read_bytes()
-        loaded = self.store.read(reference['record_id'], expected_sha256=pinned(path)[1])
-        self.assertEqual(loaded, record)
-        self.assertEqual(path.read_bytes(), original)
+        for version in (2, 1):
+            record['version'] = version
+            if version == 1:
+                del record['local_outcome']
+            path.write_text(json.dumps(record))
+            original = path.read_bytes()
+            ref = dict(reference, sha256=pinned(path)[1])
+            loaded = self.read(ref)
+            self.assertEqual(loaded, record)
+            self.assertEqual(self.store.candidates([ref], task=record['task'],
+                robot_capabilities=record['robot_capabilities']), [record])
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_negative_and_uncertain_candidates_survive_reopen_and_complete_replay(self):
+        cases = [
+            ('failed-task', {}, 'completed', 'failure', []),
+            ('aborted', {'assessment_missing': True}, 'aborted', 'unknown',
+             ['local_assessment_missing', 'task_outcome_unverified']),
+            ('unknown-local', {'success': True, 'historical_check': 'continuing'},
+             'unknown', 'success', ['local_outcome_unverified']),
+            ('truncated', {'truncated': True}, 'aborted', 'unknown',
+             ['task_outcome_unverified']),
+            ('unknown-diagnosis', {'diagnosis_unknown': True}, 'completed', 'failure',
+             ['diagnosis_unknown']),
+        ]
+        references, expected = [], []
+        for name, options, local, task, limitations in cases:
+            with self.subTest(name=name):
+                self.make_episode(name, **options)
+                reference = self.store.append(**self.arguments)
+                record = self.read(reference)
+                self.assertEqual(record['version'], 3)
+                self.assertEqual(record['local_outcome']['status'], local)
+                self.assertEqual(record['task_outcome']['status'], task)
+                self.assertEqual(record['task_outcome']['reason'], self.outcome.stop_reason)
+                for limitation in ['causal_benefit_unverified', *limitations]:
+                    self.assertIn(limitation, record['evidence_limitations'])
+                replayed = load_recorded_replay(self.source / 'trace').run()
+                self.assertEqual((replayed.steps, replayed.success, replayed.stop_reason),
+                    (self.outcome.steps, self.outcome.success, self.outcome.stop_reason))
+                references.append(reference)
+                expected.append(record)
+
+        reopened = InterventionMemory(self.root / 'memory')
+        query = dict(task=expected[0]['task'], robot_capabilities=expected[0]['robot_capabilities'])
+        candidates = reopened.candidates(references, **query)
+        self.assertEqual(candidates, expected)
+        self.assertEqual(candidates[1]['local_outcome']['reason'], 'missing_assessment')
+        candidates[2]['local_outcome']['status'] = 'completed'
+        self.assertEqual(reopened.candidates(references, **query), expected)
+
+    def test_candidates_require_exact_context_and_verify_all_pinned_evidence(self):
+        reference = self.store.append(**self.arguments)
+        record = self.read(reference)
+        query = dict(task=record['task'], robot_capabilities=record['robot_capabilities'])
+        self.assertEqual(self.store.candidates([reference], **query), [record])
+        foreign_task = record['task'] | {'instruction': 'different task'}
+        self.assertEqual(self.store.candidates([reference], **(query | {'task': foreign_task})), [])
+        foreign_robot = record['robot_capabilities'] | {'control_frequency_hz': 10}
+        self.assertEqual(self.store.candidates([reference],
+            **(query | {'robot_capabilities': foreign_robot})), [])
+        for key in query:
+            with self.subTest(key=key), self.assertRaises(TraceError):
+                self.store.candidates([reference], **(query | {key: {}}))
+        for invalid in ({}, None, dict(reference, sha256='0' * 64)):
+            with self.subTest(reference=invalid), self.assertRaises(TraceError):
+                self.store.candidates([invalid], **query)
+        self.contexts[0].unlink()
+        # Incompatible context must not silently hide corrupt source evidence.
+        with self.assertRaises(TraceError):
+            self.store.candidates([reference], **(query | {'task': foreign_task}))
+
+    def test_uncertain_outcomes_and_limitations_cannot_be_rewritten_as_success(self):
+        self.make_episode('uncertain', assessment_missing=True, diagnosis_unknown=True)
+        reference = self.store.append(**self.arguments)
+        original = self.read(reference)
+        path = self.store.directory / (reference['record_id'] + '.json')
+        for key, replacement in (
+                ('task_outcome', {'status': 'success', 'reason': 'success'}),
+                ('local_outcome', {'status': 'completed', 'reason': None}),
+                ('evidence_limitations', [])):
+            path.write_text(json.dumps(original | {key: replacement}))
+            with self.subTest(key=key), self.assertRaises(TraceError):
+                self.store.candidates([dict(reference, sha256=pinned(path)[1])],
+                    task=original['task'], robot_capabilities=original['robot_capabilities'])
 
     def test_append_preserves_prior_bytes_and_duplicate_is_rejected(self):
         first = self.store.append(**self.arguments)

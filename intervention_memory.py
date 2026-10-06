@@ -1,6 +1,7 @@
 """Offline, append-only intervention memory derived from pinned episode evidence.
 
 This is evaluator storage, not a supervisor observation or retrieval policy.
+Exact-context candidate lookup never filters on success or supplies authority.
 Callers retain diagnosis/request context at decision time and pin its digest.
 No caller-supplied outcome is accepted. File hashes detect changes, not forgery.
 """
@@ -55,8 +56,8 @@ class InterventionMemory:
                  'memory evidence digest mismatch')
         return path, _read(raw)
 
-    def _build(self, provenance, version=2):
-        _require(type(version) is int and version in (1, 2),
+    def _build(self, provenance, version=3):
+        _require(type(version) is int and version in (1, 2, 3),
                  'unsupported memory record version')
         _require(set(provenance) == {'trace', 'attempt', 'supervisor', 'context'},
                  'complete memory provenance required')
@@ -144,7 +145,7 @@ class InterventionMemory:
                 'configuration': {'episode': evidence['config'], 'settings': attempt['settings']},
                 'diagnosis': diagnosis, 'request': request, 'execution': rows,
                 'episode_outcome': evidence['outcome'], 'provenance': provenance}
-        if version == 2:
+        if version >= 2:
             # Execution completion is not evidence of causal task benefit.
             local = {'status': 'unknown', 'reason': 'no_local_assessment'}
             if recovery is not None:
@@ -153,6 +154,30 @@ class InterventionMemory:
                 if check['status'] == 'continuing':
                     local = {'status': 'unknown', 'reason': 'no_terminal_local_check'}
             record['local_outcome'] = local
+        if version >= 3:
+            outcome = evidence['outcome']
+            # Match EpisodeOutcome.task_status: early stops do not establish
+            # task failure, and successful tasks do not establish local benefit.
+            status = ('success' if outcome['success'] else
+                      'failure' if outcome['stop_reason'] in ('terminated', 'step_limit')
+                      else 'unknown')
+            record['task_outcome'] = {'status': status, 'reason': outcome['stop_reason']}
+            limitations = ['causal_benefit_unverified']
+            if diagnosis['category'] == 'unknown':
+                limitations.append('diagnosis_unknown')
+            if diagnosis.get('conflicts'):
+                limitations.append('diagnosis_conflicting_evidence')
+            if local['status'] == 'unknown':
+                limitations.append('local_outcome_unverified')
+            if recovery is not None:
+                check = rows[-1]['action_record']['recovery']['check']
+                if check['assessment'] is None:
+                    limitations.append('local_assessment_missing')
+                if check['reason'] == 'stale_observation':
+                    limitations.append('local_assessment_stale')
+            if status == 'unknown':
+                limitations.append('task_outcome_unverified')
+            record['evidence_limitations'] = limitations
         return record
 
     def append(self, *, trace, attempt, supervisor, context):
@@ -186,3 +211,26 @@ class InterventionMemory:
             return record
         except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
             raise TraceError(f'invalid intervention memory: {exc}') from exc
+
+    def candidates(self, references, *, task, robot_capabilities):
+        """Read pinned candidates for an exact task/control context, in input order.
+
+        Outcome-neutral evaluator lookup, not supervisor-ready retrieval. The
+        caller supplies the permitted reference set; every reference is verified
+        before filtering. Model compatibility, splits, ranking and redaction
+        belong to the retrieval policy. Legacy records retain their own schema.
+        """
+        _require(type(task) is dict and bool(task) and
+                 type(robot_capabilities) is dict and bool(robot_capabilities),
+                 'explicit task and robot context required')
+        records = []
+        for reference in references:
+            try:
+                record = self.read(reference['record_id'],
+                                   expected_sha256=reference['sha256'])
+            except (TypeError, KeyError) as exc:
+                raise TraceError('invalid memory candidate reference') from exc
+            if (record['task'] == task and
+                    record['robot_capabilities'] == robot_capabilities):
+                records.append(record)
+        return records

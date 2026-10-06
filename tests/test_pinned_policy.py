@@ -1,6 +1,7 @@
 """Offline asset and adapter contracts; these are not model-quality results."""
 
 import hashlib
+from dataclasses import replace
 from contextlib import redirect_stderr
 import io
 import json
@@ -10,12 +11,13 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from episode_harness import run_episode
+from episode_harness import EpisodeConfig, SupervisorPass, run_episode
 from pinned_policy import (ASSET_LOCK, BACKBONE_REPOSITORY, POLICY_REPOSITORY,
                            POLICY_REVISION, resolve_policy_assets)
 from policy_adapter import ResetOnResumePolicyAdapter
 from recorded_replay import TraceRecorder, load_recorded_replay
-from replay_adapters import successful_replay
+from replay_adapters import (ReplayEnvironment, ReplayPolicy, ReplayRecorder,
+                             ReplayStep, successful_replay)
 from run_smolvla_episode import parse_args
 
 
@@ -157,6 +159,108 @@ class PinnedPolicyTests(unittest.TestCase):
                 policy_loader=Mock(side_effect=RuntimeError('missing weight')),
                 processor_factory=processors)
         processors.assert_not_called()
+
+    def test_always_pass_matches_baseline_with_identical_pinned_settings(self):
+        assets = self.resolve()
+        # Non-identity processing makes bypassing either processor fail the
+        # scripted policy's observation or environment's native-action check.
+        observations = [{'task': 'place item', 'robot_state': {'position': [i]}}
+                        for i in range(3)]
+        processed = [{'task': 'place item', 'robot_state': {'position': [i + 10]}}
+                     for i in range(3)]
+        proposed = [[0.125, -0.25], [-0.5, 0.75]]
+        native = [[0.25, -0.5], [-1.0, 1.5]]
+        cases = [('success', True, True, False, 3),
+                 ('terminated', False, True, False, 3),
+                 ('truncated', False, False, True, 3),
+                 ('step_limit', False, False, False, 2)]
+        for reason, success, terminated, truncated, horizon in cases:
+            with self.subTest(reason=reason):
+                runs, settings = [], []
+                config = EpisodeConfig(17, horizon)
+                for supervised in (False, True):
+                    scripted = ReplayPolicy(tuple(zip(processed, proposed)))
+                    model_config = SimpleNamespace(vlm_model_name=BACKBONE_REPOSITORY)
+                    model = SimpleNamespace(config=model_config, reset=scripted.reset,
+                                            select_action=scripted.act)
+                    model.to = Mock(return_value=model)
+                    model.eval = Mock(return_value=model)
+                    model.requires_grad_ = Mock()
+                    pre_inputs, post_inputs = [], []
+
+                    def preprocess(packet):
+                        pre_inputs.append(packet.observation)
+                        position = packet.observation['robot_state']['position'][0]
+                        return replace(packet, observation={
+                            'task': packet.observation['task'],
+                            'robot_state': {'position': [position + 10]}})
+
+                    def postprocess(action):
+                        post_inputs.append(action)
+                        return [2 * value for value in action]
+
+                    config_loader = Mock(return_value=model_config)
+                    policy_loader = Mock(return_value=model)
+                    processors = Mock(return_value=(preprocess, postprocess))
+                    policy, pre, post = assets.load(
+                        'cpu', config_loader=config_loader, policy_loader=policy_loader,
+                        processor_factory=processors)
+                    settings.append((assets.identity(), config_loader.call_args,
+                                     policy_loader.call_args, processors.call_args))
+                    adapter = ResetOnResumePolicyAdapter(
+                        policy.reset, lambda packet: post(policy.select_action(pre(packet))))
+                    environment = ReplayEnvironment(17, observations[0], (
+                        (native[0], ReplayStep(observations[1], 0.25, False, False, False)),
+                        (native[1], ReplayStep(observations[2], 0.75, success,
+                                             terminated, truncated))))
+                    recorder = ReplayRecorder()
+                    directory = self.root / f'{reason}-{supervised}'
+                    trace = TraceRecorder(directory, config, recorder)
+                    passes = []
+
+                    def decide(proposal):
+                        response = SupervisorPass(proposal.observation.episode_id,
+                                                  proposal.observation.sequence,
+                                                  proposal.proposal_id)
+                        passes.append(response)
+                        return response
+
+                    outcome = run_episode(
+                        config, adapter, environment, trace,
+                        supervisor_decider=decide if supervised else None)
+                    trace.seal(outcome)
+                    replay = load_recorded_replay(directory)
+                    replay_outcome = replay.run()
+                    for result in (outcome, replay_outcome):
+                        self.assertEqual((result.success, result.steps, result.stop_reason,
+                                          result.sum_rewards), (success, 2, reason, 1.0))
+                    self.assertEqual(pre_inputs, observations[:2])
+                    self.assertEqual(post_inputs, proposed)
+                    self.assertEqual(environment.actions, native)
+                    self.assertEqual(len(passes), 2 if supervised else 0)
+                    records = [row[3].action_record for row in recorder.steps]
+                    self.assertEqual([r.supervisor_pass for r in records],
+                                     passes if supervised else [None, None])
+                    for record in records:
+                        self.assertEqual(record.proposed_action, record.selected_action)
+                        self.assertEqual(record.proposed_action, record.executed_action)
+                        self.assertEqual(record.disposition, 'unmodified')
+                    self.assertTrue(recorder.finalized)
+                    self.assertEqual(recorder.failures, [])
+                    runs.append((environment.actions,
+                                 [(p.sequence, p.captured_at, p.observation)
+                                  for p in recorder.observations],
+                                 [(r.proposed_action, r.selected_action, r.executed_action,
+                                   r.disposition) for r in records],
+                                 [(r.reward, r.success, r.terminated, r.truncated)
+                                  for _, _, _, r, _ in recorder.steps],
+                                 outcome.success, outcome.steps, outcome.stop_reason,
+                                 outcome.sum_rewards, outcome.task_status,
+                                 (outcome.terminal_observation.sequence
+                                  if outcome.terminal_observation else None),
+                                 outcome.artifact_status, outcome.artifact_diagnostics))
+                self.assertEqual(settings[0], settings[1], 'policy/processor settings differ')
+                self.assertEqual(runs[0], runs[1], 'baseline/pass-through execution differs')
 
 
 if __name__ == '__main__':

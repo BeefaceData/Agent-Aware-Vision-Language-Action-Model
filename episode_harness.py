@@ -21,6 +21,7 @@ from uuid import uuid4
 from temporal_diagnosis import valid_temporal_diagnosis
 from intervention_budget import InterventionBudget
 from correction_expiry import check_expiry
+from episode_deadline import EpisodeDeadline, EpisodeDeadlineExceeded, workers_busy
 
 if TYPE_CHECKING:
     from baseline_fallback import BaselineFallback
@@ -46,6 +47,11 @@ class EpisodeConfig:
     Exhaustion stops dispatch by default; baseline_fallback explicitly opts into
     current-input/health/native-action admission checks. See docs/supervisor-allowance.md.
 
+    max_episode_seconds bounds active rollout time, including model waits and
+    corrections, from the ready initial observation through termination. None
+    preserves legacy uncapped operation. Capped adapters must support concurrent,
+    bounded interruption; reset/setup and artifact finalization are outside it.
+
     Declare both correction validity limits for expiry-enforced operation.
     None/None preserves the legacy trusted-selector/replay interface; it is
     not an expiry-ready active configuration. No physical limits are inferred.
@@ -60,6 +66,7 @@ class EpisodeConfig:
     correction_max_age_seconds: float | None = None
     max_supervisor_calls: int | None = None
     supervisor_exhaustion_policy: str = "stop"
+    max_episode_seconds: float | None = None
 
     def __post_init__(self):
         if (type(self.supervisor_interval_actions) is not int or
@@ -79,6 +86,10 @@ class EpisodeConfig:
             raise ValueError('max_supervisor_calls must be a nonnegative integer')
         if self.supervisor_exhaustion_policy not in ('stop', 'baseline_fallback'):
             raise ValueError('invalid supervisor exhaustion policy')
+        if self.max_episode_seconds is not None and (
+                type(self.max_episode_seconds) not in (int, float) or
+                not isfinite(self.max_episode_seconds) or self.max_episode_seconds <= 0):
+            raise ValueError('max_episode_seconds must be positive and finite')
         expiry_limits = (self.correction_timeout_seconds, self.correction_max_age_seconds)
         if expiry_limits != (None, None) and any(
                 type(value) not in (int, float) or not isfinite(value) or value <= 0
@@ -808,6 +819,8 @@ class EpisodeOutcome:
     artifact_status: Literal['incomplete', 'completed'] = 'incomplete'
     artifact_diagnostics: tuple[str, ...] = ()
     supervisor_call_budget: dict | None = None
+    wall_clock_limit: dict | None = None
+    episode_clock: dict | None = None
     task_status: str = field(init=False)
 
     def __post_init__(self):
@@ -918,7 +931,11 @@ def _exclusive_episode(run):
         # The call holds strong references until release, preventing ID reuse.
         identities = {id(policy), id(environment), id(recorder)}
         with _ownership_lock:
-            if identities & _active_adapters:
+            if identities & _active_adapters or workers_busy(identities | {
+                id(kwargs[key]) for key in ('supervisor', 'window_supervisor',
+                    'supervisor_decider', 'action_selector', 'recovery_observer',
+                    'assessment_trigger', 'on_step', 'baseline_fallback') if kwargs.get(key) is not None
+            }):
                 raise ExecutionBusy('episode adapter already has an execution owner')
             _active_adapters.update(identities)
         try:
@@ -1047,6 +1064,7 @@ def run_episode(
     from environment_interruption import require_interruption, interrupt
     interruption_contract = (require_interruption(environment) if any(
         item is not None for item in (action_selector, supervisor_decider, baseline_fallback))
+        or config.max_episode_seconds is not None
         or (config.max_supervisor_calls < config.max_steps and
             (supervisor is not None or window_supervisor is not None))
         else None)
@@ -1094,7 +1112,12 @@ def run_episode(
         startup_stage = None
         recorder_started = True
         recorder.begin(observation)
-        rollout_start = clock()
+        deadline = EpisodeDeadline(config.max_episode_seconds, clock,
+            (policy, environment, recorder, supervisor, window_supervisor,
+             supervisor_decider, action_selector, recovery_observer, assessment_trigger,
+             on_step, baseline_fallback))
+        rollout_start = deadline.started_at
+        wall_clock_limit = None
         reward_sum = 0.0
         stop_reason = 'step_limit'
         success = False
@@ -1112,12 +1135,14 @@ def run_episode(
         supervisor_exhausted = False
 
         for step in range(1, config.max_steps + 1):
+            call_budget = None
+            deadline.check('policy')
             budget_record = recovery_budget if recovery_sequence is not None else None
             if recovery_sequence is not None and history is not None:
                 history.append(observation)
             # A pending recovery owns execution. Do not infer, assess or select
             # another policy action until its last accepted nonterminal packet.
-            action = (policy.act(observation) if recovery_sequence is None
+            action = (deadline.call('policy', policy.act, observation) if recovery_sequence is None
                       else proposed_action)
             proposed_action = deepcopy(action)
             proposal_id = f'{episode_id}:{step}'
@@ -1140,7 +1165,7 @@ def run_episode(
                 try:
                     assessment_due = (step - 1) % config.supervisor_interval_actions == 0
                     if assessment_trigger is not None:
-                        triggered = assessment_trigger(ActionProposal(
+                        triggered = deadline.call('assessment_trigger', assessment_trigger, ActionProposal(
                             proposal_id, supervisor_observation(observation),
                             deepcopy(proposed_action)))
                         if type(triggered) is not bool:
@@ -1167,7 +1192,7 @@ def run_episode(
                     if allowance_refused:
                         pass
                     elif supervisor_decider is not None and assessment_due:
-                        response = supervisor_decider(ActionProposal(
+                        response = deadline.call('supervisor', supervisor_decider, ActionProposal(
                             proposal_id, supervisor_observation(observation),
                             deepcopy(proposed_action)))
                         if (type(response) not in (SupervisorPass, SupervisorAbstention) or
@@ -1193,9 +1218,11 @@ def run_episode(
                         else:
                             pass_response = deepcopy(response)
                     elif window_supervisor is not None:
-                        window_supervisor(history.snapshot(), proposal_for_supervisor)
+                        deadline.call('supervisor', window_supervisor, history.snapshot(), proposal_for_supervisor)
                     elif supervisor is not None:
-                        supervisor(supervisor_observation(observation), proposal_for_supervisor)
+                        deadline.call('supervisor', supervisor, supervisor_observation(observation), proposal_for_supervisor)
+                except EpisodeDeadlineExceeded:
+                    raise
                 except BaseException as exc:
                     if baseline_fallback is not None and isinstance(exc, Exception):
                         # Retain a safe error category, never provider payloads.
@@ -1226,7 +1253,7 @@ def run_episode(
                 resolution = ActionResolution('pass')
             else:
                 try:
-                    resolution = action_selector(ActionProposal(
+                    resolution = deadline.call('selection', action_selector, ActionProposal(
                         proposal_id, observation, deepcopy(proposed_action)))
                     if not isinstance(resolution, ActionResolution) or resolution.kind not in (
                         'pass', 'override', 'reject', 'recovery'
@@ -1264,6 +1291,8 @@ def run_episode(
                             resolution = ActionResolution('reject', reason='insufficient recovery action horizon')
                         else:
                             recovery_sequence, recovery_index = plan, 0
+                except EpisodeDeadlineExceeded:
+                    raise
                 except BaseException as exc:
                     selection_finished_at = clock()
                     cumulative_wait += selection_finished_at - response_at
@@ -1284,7 +1313,7 @@ def run_episode(
             if fallback_cause is not None:
                 proposal = ActionProposal(proposal_id, deepcopy(observation),
                                           deepcopy(proposed_action))
-                fallback = (baseline_fallback.assess(proposal, fallback_cause, clock)
+                fallback = (deadline.call('fallback', baseline_fallback.assess, proposal, fallback_cause, clock)
                             if baseline_fallback is not None and not (allowance_refused and
                                 config.supervisor_exhaustion_policy == 'stop') else
                             fallback_evidence(proposal, fallback_cause, clock()))
@@ -1301,6 +1330,7 @@ def run_episode(
             recovery_evidence = (dict(sequence=asdict(recovery_sequence), action_index=recovery_index)
                                  if recovery_sequence is not None else None)
             transport_action = deepcopy(selected_action)
+            deadline.check('dispatch')
             execution_started_at = clock()
             if resolution.kind in ('override', 'recovery'):
                 if config.correction_timeout_seconds is not None:
@@ -1343,7 +1373,8 @@ def run_episode(
                 break
             disposition = 'unmodified' if resolution.kind == 'pass' else 'overridden'
             try:
-                result = environment.step(transport_action)
+                result = deadline.call('execution', environment.step, transport_action,
+                                       accept_late_return=True)
                 if not isinstance(result, StepResult):
                     from execution_failure import ExecutionFailure
                     raise ExecutionFailure('adapter returned no valid step acknowledgement')
@@ -1425,6 +1456,7 @@ def run_episode(
                     terminal_reason = ('success' if result.success else
                                        'terminated' if result.terminated else 'truncated')
             recovery_aborted = False
+            expired_after_action = None
             if recovery_sequence is not None:
                 from recovery_monitor import aborted, check_recovery
                 if not ingestion.accepted:
@@ -1434,12 +1466,17 @@ def run_episode(
                     recovery_sequence = None
                 else:
                     try:
-                        assessment = recovery_observer(deepcopy(recovery_sequence), recovery_index,
-                                                       supervisor_observation(result.observation))
+                        assessment = deadline.call('recovery', recovery_observer, deepcopy(recovery_sequence),
+                            recovery_index, supervisor_observation(result.observation))
+                    except EpisodeDeadlineExceeded as exc:
+                        expired_after_action = exc
+                        assessment = None
                     except Exception:
                         assessment = None
                     check = check_recovery(recovery_sequence, recovery_index,
                                            result.observation, assessment, clock())
+                if expired_after_action is not None:
+                    check = aborted('episode_wall_clock', recovery_index + 1)
                 recovery_evidence['check'] = check
                 result = replace(result, action_record=replace(result.action_record,
                                  recovery=deepcopy(recovery_evidence)))
@@ -1454,8 +1491,12 @@ def run_episode(
                     observation.sequence, proposal_id, proposed_action,
                     selected_action, execution_finished_at))
             success = result.success
+            if expired_after_action is not None:
+                raise expired_after_action
+            if terminal_reason is None:
+                deadline.check('after_execution')
             if on_step is not None:
-                on_step(step, result)
+                deadline.call('on_step', on_step, step, result)
             if terminal_reason is not None:
                 stop_reason = terminal_reason
                 break
@@ -1475,25 +1516,42 @@ def run_episode(
             if (resolution.kind == 'override' or recovery_finished) and step < config.max_steps:
                 # Only accepted, nonterminal evidence can seed the next proposal.
                 # Keep adapter mutation separate from recorded environment evidence.
-                policy.resume(deepcopy(observation))
+                deadline.call('resume', policy.resume, deepcopy(observation))
 
     except BaseException as exc:
-        if recorder_started:
-            try:
-                recorder.finish()
-            except BaseException as cleanup_error:
-                interruption_diagnostics.append(
-                    f'{type(cleanup_error).__name__}: {cleanup_error}')
-        exc.episode_interruption = EpisodeInterruption(
-            episode_id, exception_stop_reason(exc),
-            type(exc).__name__, steps, reward_sum, last_observation,
-            tuple(acknowledged_actions), tuple(interruption_diagnostics), task_status,
-            pre_start_failure=(PreStartFailure(
-                startup_stage, config.seed, policy_reset_completed,
-                environment_reset_completed) if startup_stage is not None else None),
-            failed_action=deepcopy(failed_action),
-            terminal_observation=terminal_observation, terminal_reason=terminal_reason)
-        raise
+        if (isinstance(exc, EpisodeDeadlineExceeded) and failed_action is None
+                and terminal_reason is None):
+            # No further policy, supervisor or recovery work can reach dispatch.
+            # The last accepted observation binds the stop even if no proposal exists.
+            stop = interrupt(environment, interruption_contract,
+                ActionProposal(f'{episode_id}:{steps + 1}', last_observation, None),
+                'episode wall-clock limit exhausted', clock)
+            if exc.stage in ('supervisor', 'assessment_trigger'):
+                cumulative_wait += max(0., clock() - request_at)
+            elif exc.stage in ('selection', 'fallback'):
+                cumulative_wait += max(0., clock() - response_at)
+            pending = call_budget if steps < step else None
+            wall_clock_limit = deadline.evidence(exc.stage, stop, deepcopy(pending))
+            stop_reason = 'wall_clock_limit' if stop['confirmed'] else 'interruption_failed'
+            success = False
+            recovery_sequence = None
+        else:
+            if recorder_started:
+                try:
+                    recorder.finish()
+                except BaseException as cleanup_error:
+                    interruption_diagnostics.append(
+                        f'{type(cleanup_error).__name__}: {cleanup_error}')
+            exc.episode_interruption = EpisodeInterruption(
+                episode_id, exception_stop_reason(exc),
+                type(exc).__name__, steps, reward_sum, last_observation,
+                tuple(acknowledged_actions), tuple(interruption_diagnostics), task_status,
+                pre_start_failure=(PreStartFailure(
+                    startup_stage, config.seed, policy_reset_completed,
+                    environment_reset_completed) if startup_stage is not None else None),
+                failed_action=deepcopy(failed_action),
+                terminal_observation=terminal_observation, terminal_reason=terminal_reason)
+            raise
 
     rollout_seconds = clock() - rollout_start
     artifacts = {}
@@ -1521,4 +1579,6 @@ def run_episode(
                           artifact_status, diagnostics,
                           dict(limit=config.max_supervisor_calls, attempted=supervisor_calls,
                                exhausted=supervisor_exhausted,
-                               policy=config.supervisor_exhaustion_policy))
+                               policy=config.supervisor_exhaustion_policy), wall_clock_limit,
+                          (dict(started_at=deadline.started_at, deadline=deadline.deadline)
+                           if config.max_episode_seconds is not None else None))

@@ -11,6 +11,7 @@ from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime
 from hashlib import sha256
+from math import isfinite
 import json
 from pathlib import Path
 
@@ -159,6 +160,8 @@ class TraceRecorder:
             'version': 1, 'source_episode_id': self._episode_id,
             'config': asdict(self.config), 'outcome': _summary(outcome),
             'supervisor_call_budget': outcome.supervisor_call_budget,
+            'wall_clock_limit': outcome.wall_clock_limit,
+            'episode_clock': outcome.episode_clock,
             'files': {name: sha256((self.directory / name).read_bytes()).hexdigest()
                       for name in ('observations.jsonl', 'decisions.jsonl')},
         }
@@ -227,7 +230,18 @@ def _load(directory, manifest):
         ingestion = ingestor.ingest(packet)
         _require(ingestion.accepted, f'invalid observation ordering/identity: {ingestion.code}')
     decisions = data['decisions.jsonl']
-    _require(0 < len(decisions) <= config.max_steps, 'invalid decision count')
+    wall_limit = manifest.get('wall_clock_limit')
+    episode_clock = manifest.get('episode_clock')
+    if config.max_episode_seconds is not None:
+        _require(type(episode_clock) is dict and set(episode_clock) == {'started_at', 'deadline'} and
+                 all(type(v) in (int, float) and isfinite(v) for v in episode_clock.values()) and
+                 packets[0].captured_monotonic <= episode_clock['started_at'] < episode_clock['deadline'] and
+                 episode_clock['deadline'] == episode_clock['started_at'] + config.max_episode_seconds,
+                 'invalid episode wall-clock declaration')
+    else:
+        _require(episode_clock is None, 'episode clock without configured cap')
+    _require(0 <= len(decisions) <= config.max_steps and (decisions or wall_limit is not None),
+             'invalid decision count')
     executed = 0
     reward = 0.0
     success = False
@@ -310,7 +324,11 @@ def _load(directory, manifest):
             try:
                 assessment = (RecoveryAssessment(**check['assessment'])
                               if check['assessment'] is not None else None)
-                if check.get('reason') == 'episode_terminated':
+                if check.get('reason') == 'episode_wall_clock':
+                    _require(wall_limit is not None and index == len(decisions) - 1,
+                             'recovery cancelled without episode expiry')
+                    expected = aborted('episode_wall_clock', offset + 1)
+                elif check.get('reason') == 'episode_terminated':
                     _require(type(row['result']) is dict and any(
                         row['result'].get(key) is True
                         for key in ('success', 'terminated', 'truncated')),
@@ -475,6 +493,9 @@ def _load(directory, manifest):
             _require(interruption is not None, 'missing interruption evidence')
         if 'timing' in row:
             timing = StepTiming(**row['timing'])
+            if episode_clock is not None:
+                _require(episode_clock['started_at'] <= timing.execution_started_at <
+                         episode_clock['deadline'], 'dispatch outside episode wall-clock limit')
             _require(timing.capture_at == packets[index].captured_monotonic,
                      'timing does not reference source capture')
         last = index == len(decisions) - 1
@@ -513,6 +534,47 @@ def _load(directory, manifest):
         elif recovery is not None and recovery['check']['status'] == 'aborted':
             _require(last, 'decisions after recovery abort')
             stop = 'recovery_aborted'
+    if wall_limit is not None:
+        from environment_interruption import validate_interruption
+        _require(type(wall_limit) is dict and set(wall_limit) == {
+            'limit_seconds', 'started_at', 'deadline', 'expired_at', 'stage',
+            'interruption', 'pending_supervisor_call'}, 'invalid wall-clock evidence')
+        _require(config.max_episode_seconds is not None and
+                 type(wall_limit['limit_seconds']) in (int, float) and
+                 wall_limit['limit_seconds'] == config.max_episode_seconds and
+                 wall_limit['started_at'] == episode_clock['started_at'] and
+                 wall_limit['deadline'] == episode_clock['deadline'] and
+                 all(type(wall_limit[k]) in (int, float) and isfinite(wall_limit[k])
+                     for k in ('started_at', 'deadline', 'expired_at')) and
+                 wall_limit['deadline'] == wall_limit['started_at'] + config.max_episode_seconds and
+                 packets[0].captured_monotonic <= wall_limit['started_at'] <
+                 wall_limit['deadline'] <= wall_limit['expired_at'] and
+                 wall_limit['stage'] in ('policy', 'assessment_trigger', 'supervisor',
+                     'selection', 'fallback', 'dispatch', 'recovery', 'after_execution',
+                     'on_step', 'resume'), 'wall-clock evidence does not match limit')
+        _require(executed == len(decisions) and not success and
+                 (not decisions or not any(decisions[-1]['result'][k]
+                    for k in ('success', 'terminated', 'truncated'))),
+                 'wall-clock expiry follows terminal decision')
+        for row in decisions:
+            _require('timing' in row and
+                     wall_limit['started_at'] <= row['timing']['execution_started_at'] <
+                     wall_limit['deadline'], 'dispatch outside episode wall-clock limit')
+        evidence = wall_limit['interruption']
+        validate_interruption(evidence, ActionProposal(f'{episode_id}:{executed + 1}',
+                              packets[-1], None), 'episode wall-clock limit exhausted')
+        _require(wall_limit['deadline'] <= evidence['requested_at'] <=
+                 evidence['finished_at'] <= wall_limit['expired_at'],
+                 'interruption precedes episode wall-clock expiry')
+        pending_call = wall_limit['pending_supervisor_call']
+        if pending_call is not None:
+            admitted = supervisor_calls < config.max_supervisor_calls
+            supervisor_calls += int(admitted)
+            supervisor_exhausted = supervisor_exhausted or not admitted
+            _require(pending_call == dict(limit=config.max_supervisor_calls,
+                attempted=supervisor_calls, admitted=admitted,
+                policy=config.supervisor_exhaustion_policy), 'invalid pending supervisor call')
+        stop = 'wall_clock_limit' if evidence['confirmed'] else 'interruption_failed'
     _require(len(packets) == executed + 1, 'missing or extra observation artifacts')
     _require(stop != 'step_limit' or executed == config.max_steps, 'unfinished trace')
     _require(manifest['outcome'] == dict(success=success, steps=executed,
@@ -524,7 +586,7 @@ def _load(directory, manifest):
         _require(manifest.get('supervisor_call_budget') == summary,
                  'supervisor call budget outcome mismatch')
     return RecordedReplay(episode_id, config, packets, decisions, manifest['outcome'],
-                          manifest['config'], manifest.get('supervisor_call_budget'))
+                          manifest['config'], manifest.get('supervisor_call_budget'), wall_limit, episode_clock)
 
 
 def load_recorded_replay(directory):
@@ -544,7 +606,9 @@ class RecordedReplay:
     """Validated trace; run() creates fresh replay-only adapters on every call."""
 
     def __init__(self, episode_id, config, packets, decisions, outcome, recorded_config=None,
-                 supervisor_call_budget=None):
+                 supervisor_call_budget=None, wall_clock_limit=None, episode_clock=None):
+        self._episode_clock = deepcopy(episode_clock)
+        self._wall_clock_limit = deepcopy(wall_clock_limit)
         self.source_episode_id = episode_id
         self.config = config
         self._packets = packets
@@ -557,7 +621,7 @@ class RecordedReplay:
         if recorded_config is not None:
             for name in ('max_interventions', 'recovery_attempt_limits', 'recovery_cooldown_actions',
                          'correction_timeout_seconds', 'correction_max_age_seconds',
-                         'max_supervisor_calls', 'supervisor_exhaustion_policy'):
+                         'max_supervisor_calls', 'supervisor_exhaustion_policy', 'max_episode_seconds'):
                 if name not in recorded_config:
                     self._recorded_config.pop(name)
 
@@ -567,21 +631,29 @@ class RecordedReplay:
         Includes private evaluator observations; this is not a supervisor input.
         Timestamps retain their original meaning, not replay execution timing.
         """
-        return _plain({
+        result = {
             'source_episode_id': self.source_episode_id,
             'config': self._recorded_config,
             'observations': [asdict(packet) for packet in self._packets],
             'decisions': self._decisions,
             'outcome': self._outcome,
-        })
+        }
+        if self._episode_clock is not None:
+            result['episode_clock'] = self._episode_clock
+        if self._wall_clock_limit is not None:
+            result['wall_clock_limit'] = self._wall_clock_limit
+        return _plain(result)
 
     def run(self, recorder=None):
         packets, decisions = deepcopy((self._packets, self._decisions))
         config = self.config
         # Historical timestamps are evidence, not measurements of replay latency.
-        now = packets[0].captured_monotonic
+        wall_limit = self._wall_clock_limit
+        now = (self._episode_clock['started_at'] if self._episode_clock else
+               packets[0].captured_monotonic)
         from environment_interruption import InterruptionContract
-        interruption = decisions[-1]['action_record'].get('interruption')
+        interruption = (wall_limit['interruption'] if wall_limit else
+                        decisions[-1]['action_record'].get('interruption'))
         contract = (InterruptionContract(**interruption['contract']) if interruption else
                     InterruptionContract('recorded-replay-stop-v1', 'stop',
                         'Stop scripted playback without a controller.'))
@@ -597,6 +669,9 @@ class RecordedReplay:
 
             def act(self, packet):
                 nonlocal now
+                if wall_limit and packet.sequence == len(decisions):
+                    now = wall_limit['expired_at']
+                    return None
                 expiry = decisions[packet.sequence]['action_record'].get('correction_expiry')
                 if expiry is not None:
                     now = expiry['requested_at']
@@ -612,8 +687,8 @@ class RecordedReplay:
                          request.operation == contract.operation and
                          request.observation_sequence == self.index,
                          'replay interruption diverged')
-                record = decisions[self.index]['action_record']
-                evidence = record.get('interruption')
+                record = decisions[self.index]['action_record'] if self.index < len(decisions) else {}
+                evidence = wall_limit['interruption'] if wall_limit else record.get('interruption')
                 if evidence is not None:
                     _require(request.reason == evidence['request']['reason'],
                              'replay interruption reason diverged')
@@ -654,6 +729,10 @@ class RecordedReplay:
             return ActionResolution('pass')
 
         def observe(plan, offset, packet):
+            nonlocal now
+            if wall_limit and packet.sequence == len(decisions) and wall_limit['stage'] == 'recovery':
+                now = wall_limit['expired_at']
+                return None
             from recovery_monitor import RecoveryAssessment
             data = deepcopy(decisions[packet.sequence - 1]['action_record']['recovery']
                             ['check']['assessment'])
@@ -665,6 +744,8 @@ class RecordedReplay:
 
         def after_step(step, result):
             nonlocal now
+            if wall_limit and step == len(decisions):
+                now = wall_limit['expired_at']
             if step < len(decisions):
                 expiry = decisions[step]['action_record'].get('correction_expiry')
                 if expiry is not None:
@@ -675,7 +756,9 @@ class RecordedReplay:
                               clock=lambda: now, action_selector=select,
                               recovery_observer=observe, on_step=after_step)
         _require(_summary(outcome) == self._outcome, 'replayed outcome diverged')
-        return replace(outcome, supervisor_call_budget=deepcopy(self._supervisor_call_budget))
+        return replace(outcome, supervisor_call_budget=deepcopy(self._supervisor_call_budget),
+                       wall_clock_limit=deepcopy(self._wall_clock_limit),
+                       episode_clock=deepcopy(self._episode_clock))
 
 
 if __name__ == '__main__':

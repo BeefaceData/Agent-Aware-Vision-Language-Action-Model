@@ -44,3 +44,48 @@ python -m unittest discover -s tests -p test_correction_expiry.py -v
 
 Synthetic evidence verifies software contracts only; no live trials or physical
 stopping guarantees are established.
+
+## Episode operational cap
+
+Issue #85 adds `EpisodeConfig(max_episode_seconds=...)`. Use a positive finite
+host-declared duration on the observation/harness monotonic clock. `None` keeps
+historical uncapped operation and does not establish operational readiness.
+The allowance begins after reset, initial observation validation and recorder
+startup. It includes policy inference, supervisor waits, selectors, fallback
+checks, command execution, local recovery assessment, callbacks and resumption.
+Setup and artifact finalization are outside the active rollout allowance.
+
+The episode deadline is independent of correction validity and action count.
+Equality expires it. A new episode establishes a new deadline; fresh observations,
+recovery commands and new requests never extend the existing one. Once expired,
+the harness invalidates pending results, dispatches no further commands and calls
+the adapter's declared hold/stop operation. It does not select baseline fallback.
+`wall_clock_limit` reports a confirmed interruption; `interruption_failed` retains
+an unconfirmed stop. Neither is task success. A terminal evaluator result already
+accepted by the harness remains terminal evidence.
+
+Capped execution bounds callback waiting with daemon workers. Python cannot kill
+an uncooperative callback or cancel a remote request: late results are discarded,
+and affected adapters/callbacks remain busy until their worker exits. Adapters
+must support interruption concurrently with an outstanding step and provide their
+own bounded stop transport. The cap is a software dispatch/wait limit, not a
+physical stopping-time guarantee. Recorder writes and finalization must also be
+bounded by the embedding application; they are not asynchronous controller work.
+
+An environment step still outstanding at expiry has unknown execution status.
+The harness requests interruption and raises `EpisodeDeadlineExceeded`, retaining
+unconfirmed dispatch and partial outcome evidence through `episode_interruption`.
+It does not retry, count the command as acknowledged, or seal a complete trace.
+An acknowledged action retains its count even if subsequent recovery assessment
+expires; remaining recovery commands are discarded.
+
+`EpisodeOutcome.episode_clock` retains the configured rollout start and deadline.
+`wall_clock_limit` retains expiry stage/time, interruption acknowledgement and any
+supervisor call reserved before expiry but not attached to an executed action.
+Sealed replay validates these against configuration, dispatch times, observations,
+call accounting and outcomes, including expiry before the first action. Historical
+bundles retain their original configuration and annotation fingerprints.
+
+```powershell
+python -m unittest discover -s tests -p test_episode_deadline.py -v
+```

@@ -535,6 +535,42 @@ next-episode retrieval, immutable lineage, explicit restart, foreign/corrupt
 evidence rejection and failed snapshot publication. Complete provider pass and
 abstention replays compare supplied context with recorded snapshot provenance.
 
+## Conflicting historical outcomes (#107)
+
+Selected summaries preserve each record's local `completed`, `aborted` or
+`unknown` outcome and exact reason, even for the same task, progress, diagnosis
+and intervention kind. They are not combined into a majority vote or a recommended
+correction. Ranking does not favor success; context limits omit whole summaries
+with recorded reasons and may therefore leave only part of a conflicting history.
+Do not interpret omitted evidence as agreement.
+
+Local completion does not establish causal benefit or task success. The historical
+task verdict remains evaluator-only (`task_outcome.status == "withheld"`), including
+when an aborted local recovery precedes task success. Every selected example keeps
+its evidence limitations and immutable record pin. The existing summary contract
+already preserves these distinctions; no prompt, schema or ranking change is needed.
+
+`tests/test_memory_conflicts.py` builds three pinned synthetic recovery histories
+with completed, aborted and uncertain local outcomes, replays their complete
+episodes, and supplies all three through `DecisionMemory` to the chronological
+adapter. Captured provider payloads and complete successful/unsuccessful episode
+replays show that abstention retains the conflicting histories. The provider is
+scripted: this verifies the available decision path, not how a live VLM reasons.
+
+Abstention continues the unchanged policy action only when the current proposal
+passes the host's baseline fallback guard. Without that guard, even a successful
+historical recovery cannot prevent rejection and the declared environment stop.
+Historical context cannot satisfy an unavailable current observation reference.
+Both recovery and adjustment requests with enabled retrieval remain rejected by
+the response boundary until current-scene correction integration (#108); these
+tests do not enable or claim to validate active memory-informed corrections.
+
+Run the conflict fixture with:
+
+```powershell
+python -m unittest discover -s tests -p test_memory_conflicts.py -v
+```
+
 Run the public offline contracts:
 
 ```powershell

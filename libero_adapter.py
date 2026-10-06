@@ -65,12 +65,14 @@ class LiberoEnvironmentAdapter:
         self.ended = True
         return True
 
-    def __init__(self, environment, clock=monotonic):
+    def __init__(self, environment, clock=monotonic, *, initial_state=None):
         if environment.num_envs != 1:
             raise ValueError('exactly one environment is required')
         self.environment = environment
         self.clock = clock
         self.ended = True
+        self.initial_state = initial_state
+        self.initial_state_evidence = {}
 
     def _packet(self, observation):
         captured = self.clock()
@@ -85,7 +87,12 @@ class LiberoEnvironmentAdapter:
         self.ended = True
         self.episode_id = episode_id
         self.sequence = 0
-        observation, _ = self.environment.reset(seed=[seed])
+        if self.initial_state is None:
+            observation, _ = self.environment.reset(seed=[seed])
+        else:
+            from libero_initial_state import reset_selected_state
+            observation, _ = reset_selected_state(
+                self.environment, seed, self.initial_state, self.initial_state_evidence)
         packet = self._packet(observation)
         self.ended = False
         return packet

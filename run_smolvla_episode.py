@@ -31,6 +31,7 @@ from baseline_environment import capture_environment
 from camera_evidence import CameraEvidenceRecorder
 from artifact_finalization import ArtifactResources
 from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon
+from libero_initial_state import select_initial_state
 from episode_harness import EpisodeConfig, exception_stop_reason, run_episode
 from recorded_replay import TraceRecorder
 from policy_adapter import ResetOnResumePolicyAdapter
@@ -52,6 +53,8 @@ def parse_args(argv=None):
     parser.add_argument('--suite', default='libero_10', choices=[
         'libero_10', 'libero_spatial', 'libero_object', 'libero_goal', 'libero_90'])
     parser.add_argument('--task-id', type=int, default=0)
+    parser.add_argument('--initial-state-id', type=int, default=0,
+                        help='Explicit index in the task initial-state catalog (default: 0).')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--policy', default=POLICY_REPOSITORY,
                         choices=[POLICY_REPOSITORY],
@@ -68,10 +71,11 @@ def parse_args(argv=None):
 
 def main():
     args = parse_args()
-    if args.task_id < 0 or args.video_fps <= 0 or (
+    if args.task_id < 0 or args.initial_state_id < 0 or args.video_fps <= 0 or (
         args.max_steps is not None and args.max_steps <= 0
     ):
-        raise ValueError('Task ID must be nonnegative; FPS and max steps must be positive.')
+        raise ValueError('Task and initial-state IDs must be nonnegative; '
+                         'FPS and max steps must be positive.')
     # Must precede simulator imports. Respect an explicitly selected backend.
     os.environ.setdefault('MUJOCO_GL', 'egl')
     out = args.output_dir or Path('outputs') / (
@@ -96,7 +100,7 @@ def main():
     frames_path = out / 'frames.jsonl'
     summary = {
         'status': 'initializing', 'suite': args.suite, 'task_id': args.task_id,
-        'seed': args.seed, 'initial_state_index': 0, 'policy': args.policy,
+        'seed': args.seed, 'initial_state_index': args.initial_state_id, 'policy': args.policy,
         'policy_revision': POLICY_REVISION, 'policy_assets': None,
         'device': args.device, 'video_fps': args.video_fps,
         'render_backend': os.environ['MUJOCO_GL'],
@@ -108,9 +112,11 @@ def main():
         'artifact_status': 'incomplete', 'artifact_diagnostics': [],
         'task_status': 'unknown',
     }
-    env = recorder = None
+    env = recorder = adapter = None
     start = monotonic()
     try:
+        selection = select_initial_state(args.suite, args.task_id, args.initial_state_id)
+        summary['initial_state'] = selection.identity()
         print('Loading policy...', flush=True)
         assets = resolve_policy_assets(args.policy)
         summary['policy_assets'] = assets.identity()
@@ -170,6 +176,9 @@ def main():
                 self.camera_evidence.record(packet)
 
             def begin(self, packet):
+                # Retain verified readback before the first policy proposal.
+                (out / 'initial-state.json').write_text(
+                    json.dumps(adapter.initial_state_evidence, indent=2), encoding='utf-8')
                 self.camera_evidence = CameraEvidenceRecorder(
                     video_path, wrist_video_path, frames_path,
                     lambda path: imageio.get_writer(
@@ -276,8 +285,9 @@ def main():
 
         episode_config = EpisodeConfig(args.seed, limit)
         trace_recorder = TraceRecorder(out / 'replay', episode_config, recorder)
+        adapter = LiberoEnvironmentAdapter(env, initial_state=selection)
         outcome = run_episode(episode_config, BaselinePolicy(),
-                              LiberoEnvironmentAdapter(env), trace_recorder, show_progress)
+                              adapter, trace_recorder, show_progress)
         summary.update(status=('completed' if outcome.artifact_status == 'completed'
                                else 'error'), steps=outcome.steps,
                        artifact_status=outcome.artifact_status,
@@ -319,6 +329,8 @@ def main():
                 summary['status'] = 'pre_start_failure'
         raise
     finally:
+        if adapter is not None:
+            summary['initial_state'] = dict(adapter.initial_state_evidence)
         summary['total_seconds'] = monotonic() - start
         if recorder is not None:
             summary['cumulative_wait_seconds'] = recorder.cumulative_wait_seconds

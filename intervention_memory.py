@@ -31,7 +31,8 @@ class InterventionMemory:
 
     append takes four (path, expected_sha256) pairs: a sealed trace manifest,
     pre-action attempt identity, frozen supervisor identity, and decision context.
-    Context is {episode_id, proposal_id, observation_sequence, diagnosis, request}.
+    Context is {episode_id, proposal_id, observation_sequence, diagnosis, request},
+    optionally with a host-declared progress_context (nonempty string mapping).
     Diagnosis uses the temporal-diagnosis schema. Evidence paths are relative to
     this store, so moving their common parent preserves the record references.
     The API has no update/delete operation. Filesystem owners can still tamper;
@@ -56,8 +57,8 @@ class InterventionMemory:
                  'memory evidence digest mismatch')
         return path, _read(raw)
 
-    def _build(self, provenance, version=3):
-        _require(type(version) is int and version in (1, 2, 3),
+    def _build(self, provenance, version=4):
+        _require(type(version) is int and version in (1, 2, 3, 4),
                  'unsupported memory record version')
         _require(set(provenance) == {'trace', 'attempt', 'supervisor', 'context'},
                  'complete memory provenance required')
@@ -85,9 +86,15 @@ class InterventionMemory:
             tuple(ActionComponent(**item) for item in capabilities['components']),
             capabilities['control_frequency_hz'], tuple(capabilities['operations']),
             capabilities['layout'])
-        _require(type(context) is dict and set(context) == {
-            'episode_id', 'proposal_id', 'observation_sequence', 'diagnosis', 'request'},
+        required_context = {
+            'episode_id', 'proposal_id', 'observation_sequence', 'diagnosis', 'request'}
+        allowed_contexts = [required_context]
+        if version >= 4:
+            allowed_contexts.append(required_context | {'progress_context'})
+        _require(type(context) is dict and set(context) in allowed_contexts,
             'complete decision context required')
+        if 'progress_context' in context:
+            _validate_progress(context['progress_context'])
         sequence = context['observation_sequence']
         _require(context['episode_id'] == episode and type(sequence) is int and
                  0 <= sequence < len(evidence['decisions']), 'foreign decision context')
@@ -178,6 +185,8 @@ class InterventionMemory:
             if status == 'unknown':
                 limitations.append('task_outcome_unverified')
             record['evidence_limitations'] = limitations
+        if version >= 4:
+            record['progress_context'] = context.get('progress_context')
         return record
 
     def append(self, *, trace, attempt, supervisor, context):
@@ -234,3 +243,73 @@ class InterventionMemory:
                     record['robot_capabilities'] == robot_capabilities):
                 records.append(record)
         return records
+
+    def filter_candidates(self, references, *, task, robot_capabilities, progress_context):
+        """Return verified candidates and pinned exclusions with ordered reasons.
+
+        Conservative exact compatibility: no implicit frame conversion, arm
+        remapping, range widening or task synonym inference. Progress must be
+        explicitly declared at decision time; missing evidence is excluded.
+        This outcome-neutral result is evaluator data, not supervisor input.
+        """
+        _require(type(task) is dict and bool(task) and
+                 isinstance(task.get('instruction'), str) and
+                 bool(task['instruction'].strip()), 'explicit task instruction required')
+        _validate_progress(progress_context)
+        active = _capabilities(robot_capabilities)
+        candidates, excluded = [], []
+        for reference in references:
+            try:
+                record = self.read(reference['record_id'],
+                                   expected_sha256=reference['sha256'])
+            except (TypeError, KeyError) as exc:
+                raise TraceError('invalid memory candidate reference') from exc
+            reasons = []
+            if record['task'] != task:
+                reasons.append('task_mismatch')
+            progress = record.get('progress_context')
+            if progress is None:
+                reasons.append('progress_context_missing')
+            elif progress != progress_context:
+                reasons.append('progress_context_mismatch')
+            retained = _capabilities(record['robot_capabilities'])
+            for field in ('layout', 'control_frequency_hz'):
+                if getattr(retained, field) != getattr(active, field):
+                    reasons.append(field + '_mismatch')
+            if set(retained.operations) != set(active.operations):
+                reasons.append('operations_mismatch')
+            if len(retained.components) != len(active.components):
+                reasons.append('component_count_mismatch')
+            else:
+                for field in ('name', 'arm', 'group', 'frame', 'representation',
+                              'unit', 'scale', 'minimum', 'maximum'):
+                    if any(getattr(old, field) != getattr(new, field)
+                           for old, new in zip(retained.components, active.components)):
+                        reasons.append(field + '_mismatch')
+            if reasons:
+                excluded.append({'record_id': reference['record_id'],
+                                 'sha256': reference['sha256'], 'reasons': reasons})
+            else:
+                candidates.append(record)
+        return {'candidates': candidates, 'excluded': excluded}
+
+
+def _validate_progress(value):
+    _require(type(value) is dict and bool(value) and
+             all(type(key) is str and key.strip() and
+                 type(item) is str and item.strip() for key, item in value.items()),
+             'explicit progress context requires nonempty string identifiers')
+
+
+def _capabilities(value):
+    try:
+        _require(type(value) is dict and set(value) == {
+            'components', 'control_frequency_hz', 'operations', 'layout'},
+            'complete robot capabilities required')
+        _require(isinstance(value['operations'], (list, tuple)),
+                 'robot operations must be a sequence')
+        return ActionCapabilities(
+            tuple(ActionComponent(**item) for item in value['components']),
+            value['control_frequency_hz'], tuple(value['operations']), value['layout'])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise TraceError(f'invalid robot context: {exc}') from exc

@@ -157,11 +157,13 @@ class InterventionMemoryTests(unittest.TestCase):
     def test_legacy_record_reads_without_rewriting_immutable_bytes(self):
         reference = self.store.append(**self.arguments)
         record = self.read(reference)
-        del record['task_outcome']
-        del record['evidence_limitations']
+        del record['progress_context']
         path = self.store.directory / (reference['record_id'] + '.json')
-        for version in (2, 1):
+        for version in (3, 2, 1):
             record['version'] = version
+            if version == 2:
+                del record['task_outcome']
+                del record['evidence_limitations']
             if version == 1:
                 del record['local_outcome']
             path.write_text(json.dumps(record))
@@ -191,7 +193,7 @@ class InterventionMemoryTests(unittest.TestCase):
                 self.make_episode(name, **options)
                 reference = self.store.append(**self.arguments)
                 record = self.read(reference)
-                self.assertEqual(record['version'], 3)
+                self.assertEqual(record['version'], 4)
                 self.assertEqual(record['local_outcome']['status'], local)
                 self.assertEqual(record['task_outcome']['status'], task)
                 self.assertEqual(record['task_outcome']['reason'], self.outcome.stop_reason)

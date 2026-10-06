@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from episode_harness import (
-    ActionResolution, EpisodeConfig, FrameReference, ObservationIngestor,
+    ActionResolution, EpisodeConfig, FrameReference, ObservationIngestor, RecoverySequence,
     ObservationPacket, RobotStateCapture, StepResult, StepTiming, run_episode,
     supervisor_observation, valid_abstention_details,
 )
@@ -238,6 +238,34 @@ def _load(directory, manifest):
         record = row['action_record']
         _require(record['proposal_id'] == f'{episode_id}:{index + 1}', 'foreign proposal')
         _require(record['proposed_action'] is not None, 'proposal missing')
+        recovery = record.get('recovery')
+        previous = decisions[index - 1]['action_record'].get('recovery') if index else None
+        pending = (previous is not None and
+                   previous['action_index'] + 1 < len(previous['sequence']['actions']))
+        if recovery is not None:
+            _require(type(recovery) is dict and set(recovery) == {'sequence', 'action_index'} and
+                     type(recovery['action_index']) is int and
+                     type(recovery['sequence']) is dict, 'invalid recovery evidence')
+            try:
+                plan = RecoverySequence(**recovery['sequence'])
+            except (ValueError, TypeError) as exc:
+                raise TraceError('invalid recovery sequence') from exc
+            offset = recovery['action_index']
+            _require(0 <= offset < len(plan.actions) and offset <= index and
+                     record['disposition'] == 'overridden' and
+                     record['selected_action'] == plan.actions[offset], 'invalid recovery command')
+            source = index - offset
+            _require(plan.request['episode_id'] == episode_id and
+                     plan.request['proposal_id'] == f'{episode_id}:{source + 1}' and
+                     plan.request['observation_sequence'] == source and
+                     record['proposed_action'] == decisions[source]['action_record']['proposed_action'],
+                     'invalid recovery source')
+            _require((offset == 0 and not pending) or
+                     (pending and previous['sequence'] == recovery['sequence'] and
+                      offset == previous['action_index'] + 1), 'invalid recovery ordering')
+            _require(source + len(plan.actions) <= config.max_steps, 'recovery exceeds horizon')
+        else:
+            _require(not pending, 'missing recovery continuation')
         response = record.get('supervisor_pass')
         if response is not None:
             _require(type(response) is dict and
@@ -382,6 +410,11 @@ class RecordedReplay:
 
         def select(proposal):
             record = decisions[proposal.observation.sequence]['action_record']
+            if record.get('recovery') is not None:
+                data = deepcopy(record['recovery']['sequence'])
+                data['request']['episode_id'] = proposal.observation.episode_id
+                data['request']['proposal_id'] = proposal.proposal_id
+                return ActionResolution('recovery', recovery=RecoverySequence(**data))
             if record['disposition'] == 'rejected':
                 return ActionResolution('reject', reason=record['rejection_reason'])
             if record['disposition'] == 'overridden':

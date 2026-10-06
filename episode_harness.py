@@ -9,7 +9,7 @@ policy through this interface.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from math import isfinite
 from time import monotonic
@@ -625,12 +625,47 @@ def valid_abstention_details(reason, evidence_availability):
 
 
 @dataclass(frozen=True)
+class RecoverySequence:
+    """Host-validated finite commands; no model code or environment ownership.
+
+    The original suspended proposal remains in each action record. ``request``
+    identifies its source; subsequent step IDs identify execution, not inference.
+    Local physical completion is separate from exhausting these commands.
+    """
+
+    actions: tuple
+    action_limit: int
+    request: dict
+    envelope_id: str
+    controller_evidence_sha256: str
+
+    def __post_init__(self):
+        if (type(self.actions) not in (list, tuple) or not self.actions or
+                type(self.action_limit) is not int or
+                not 0 < len(self.actions) <= self.action_limit or
+                any(action is None for action in self.actions) or
+                type(self.request) is not dict or
+                any(type(self.request.get(key)) is not str or not self.request[key]
+                    for key in ('episode_id', 'proposal_id', 'decision_id', 'tool_name')) or
+                type(self.request.get('observation_sequence')) is not int or
+                self.request['observation_sequence'] < 0 or
+                type(self.envelope_id) is not str or not self.envelope_id or
+                type(self.controller_evidence_sha256) is not str or
+                len(self.controller_evidence_sha256) != 64 or
+                any(c not in '0123456789abcdef' for c in self.controller_evidence_sha256)):
+            raise ValueError('invalid bounded recovery sequence')
+        object.__setattr__(self, 'actions', tuple(deepcopy(self.actions)))
+        object.__setattr__(self, 'request', deepcopy(self.request))
+
+
+@dataclass(frozen=True)
 class ActionResolution:
     """A deterministic execution choice; rejection does not call the environment."""
 
-    kind: Literal['pass', 'override', 'reject']
+    kind: Literal['pass', 'override', 'reject', 'recovery']
     action: Any = None
     reason: str | None = None
+    recovery: RecoverySequence | None = None
 
 
 @dataclass(frozen=True)
@@ -663,6 +698,7 @@ class ActionRecord:
     rejection_reason: str | None = None
     supervisor_pass: SupervisorPass | None = None
     supervisor_abstention: SupervisorAbstention | None = None
+    recovery: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -823,6 +859,12 @@ def run_episode(
     mutate the policy proposal or recorded evidence. Its rejection is recorded and
     ends the attempt without an environment call. Supervisor and selector wait is
     measured. Overrides must come from a separately validated executor.
+    A recovery resolution supplies a finite host-validated RecoverySequence.
+    It pauses policy inference and callbacks, counts each command in max_steps,
+    and resumes once from the final accepted nonterminal packet. The whole
+    sequence must fit the remaining horizon before its first command executes.
+    Per-action recovery evidence links the suspended original policy proposal;
+    later execution IDs do not represent additional policy inference.
     Policy inference, recorder and ``on_step`` time are excluded from that wait.
     ``window_supervisor(window, proposed_action)`` is the temporal alternative to
     ``supervisor``. It receives bounded sanitized history and acknowledged prior
@@ -909,9 +951,16 @@ def run_episode(
         cumulative_wait = 0.0
         step_timings: list[StepTiming] = []
         terminal_observation = None
+        recovery_sequence = None
+        recovery_index = 0
 
         for step in range(1, config.max_steps + 1):
-            action = policy.act(observation)
+            if recovery_sequence is not None and history is not None:
+                history.append(observation)
+            # A pending recovery owns execution. Do not infer, assess or select
+            # another policy action until its last accepted nonterminal packet.
+            action = (policy.act(observation) if recovery_sequence is None
+                      else proposed_action)
             proposed_action = deepcopy(action)
             proposal_id = f'{episode_id}:{step}'
             pass_response = None
@@ -922,7 +971,7 @@ def run_episode(
             request_at = clock()
             if observation.captured_monotonic > request_at:
                 raise ValueError('observation capture is in the future of the episode clock')
-            if (supervisor is not None or window_supervisor is not None or
+            if recovery_sequence is None and (supervisor is not None or window_supervisor is not None or
                 supervisor_decider is not None):
                 try:
                     assessment_due = (step - 1) % config.supervisor_interval_actions == 0
@@ -986,22 +1035,37 @@ def run_episode(
             else:
                 response_at = request_at
             cumulative_wait += response_at - request_at
-            if action_selector is None:
+            if recovery_sequence is not None:
+                resolution = ActionResolution('recovery', recovery=recovery_sequence)
+            elif action_selector is None:
                 resolution = ActionResolution('pass')
             else:
                 try:
                     resolution = action_selector(ActionProposal(
                         proposal_id, observation, deepcopy(proposed_action)))
                     if not isinstance(resolution, ActionResolution) or resolution.kind not in (
-                        'pass', 'override', 'reject'
+                        'pass', 'override', 'reject', 'recovery'
                     ) or (resolution.kind == 'reject' and not resolution.reason) or (
                         resolution.kind != 'reject' and resolution.reason is not None
                     ) or (resolution.kind != 'override' and resolution.action is not None):
                         raise ValueError('invalid action resolution')
-                    if resolution.kind == 'override' and not callable(
+                    if ((resolution.kind == 'recovery' and type(resolution.recovery) is not RecoverySequence) or
+                            (resolution.kind != 'recovery' and resolution.recovery is not None)):
+                        raise ValueError('invalid recovery resolution')
+                    if resolution.kind in ('override', 'recovery') and not callable(
                         getattr(policy, 'resume', None)
                     ):
                         raise NotImplementedError('policy does not support override/resume')
+                    if resolution.kind == 'recovery':
+                        plan = RecoverySequence(**asdict(resolution.recovery))
+                        if (plan.request['episode_id'] != episode_id or
+                                plan.request['proposal_id'] != proposal_id or
+                                plan.request['observation_sequence'] != observation.sequence):
+                            raise ValueError('recovery must reference the current proposal')
+                        if len(plan.actions) > config.max_steps - step + 1:
+                            resolution = ActionResolution('reject', reason='insufficient recovery action horizon')
+                        else:
+                            recovery_sequence, recovery_index = plan, 0
                 except BaseException as exc:
                     selection_finished_at = clock()
                     cumulative_wait += selection_finished_at - response_at
@@ -1027,8 +1091,11 @@ def run_episode(
                                      None, None, 'rejected', resolution.reason)))
                 stop_reason = 'proposal_rejected'
                 break
-            selected_action = deepcopy(proposed_action if resolution.kind == 'pass'
-                                       else resolution.action)
+            recovery_evidence = (dict(sequence=asdict(recovery_sequence), action_index=recovery_index)
+                                 if recovery_sequence is not None else None)
+            selected_action = deepcopy(recovery_sequence.actions[recovery_index]
+                                       if recovery_sequence is not None else
+                                       proposed_action if resolution.kind == 'pass' else resolution.action)
             disposition = 'unmodified' if resolution.kind == 'pass' else 'overridden'
             execution_started_at = clock()
             try:
@@ -1044,7 +1111,8 @@ def run_episode(
                         ActionRecord(proposal_id, deepcopy(proposed_action),
                                      deepcopy(selected_action), None, None,
                                      'unconfirmed', supervisor_pass=pass_response,
-                                     supervisor_abstention=abstention_response)))
+                                     supervisor_abstention=abstention_response,
+                                     recovery=recovery_evidence)))
                 raise
             execution_finished_at = clock()
             timing = StepTiming(observation.captured_monotonic, request_at,
@@ -1060,7 +1128,8 @@ def run_episode(
                 proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
                 deepcopy(selected_action), acknowledgement, disposition,
                 supervisor_pass=pass_response,
-                supervisor_abstention=abstention_response))
+                supervisor_abstention=abstention_response,
+                recovery=recovery_evidence))
             acknowledged_actions.append(deepcopy(result.action_record))
             reward_sum += result.reward
             steps = step
@@ -1092,7 +1161,13 @@ def run_episode(
                                'terminated' if result.terminated else 'truncated')
                 break
             observation = result.observation
-            if resolution.kind == 'override' and step < config.max_steps:
+            recovery_finished = False
+            if recovery_sequence is not None:
+                recovery_index += 1
+                recovery_finished = recovery_index == len(recovery_sequence.actions)
+                if recovery_finished:
+                    recovery_sequence = None
+            if (resolution.kind == 'override' or recovery_finished) and step < config.max_steps:
                 # Only accepted, nonterminal evidence can seed the next proposal.
                 # Keep adapter mutation separate from recorded environment evidence.
                 policy.resume(deepcopy(observation))

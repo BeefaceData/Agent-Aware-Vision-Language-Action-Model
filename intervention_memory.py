@@ -14,7 +14,7 @@ import re
 
 from action_capabilities import ActionCapabilities, ActionComponent
 from recorded_replay import TraceError, load_recorded_replay, _read
-from temporal_diagnosis import valid_temporal_diagnosis
+from temporal_diagnosis import CATEGORIES, valid_temporal_diagnosis
 
 
 def _bytes(value):
@@ -292,6 +292,34 @@ class InterventionMemory:
             else:
                 candidates.append(record)
         return {'candidates': candidates, 'excluded': excluded}
+
+    def rank_candidates(self, references, *, task, robot_capabilities,
+                        progress_context, failure_category):
+        """Rank compatible pinned evidence without preferring positive outcomes.
+
+        Task/progress/control compatibility is a hard gate. Within that context,
+        exact diagnosis-category matches precede other categories; record ID is
+        the ascending tie-breaker. Unknown is a category, never a wildcard.
+        Return evaluator records, exclusions and the reproducible ranking rule.
+        """
+        _require(type(failure_category) is str and failure_category in CATEGORIES,
+                 'declared diagnosis category required for ranking')
+        filtered = self.filter_candidates(references, task=task,
+            robot_capabilities=robot_capabilities, progress_context=progress_context)
+        # Verification above includes duplicates and excluded records. A repeated
+        # reference must not occupy multiple places in the relevance ordering.
+        unique = {record['record_id']: record for record in filtered['candidates']}
+        candidates = sorted(unique.values(), key=lambda record: (
+            record['diagnosis']['category'] != failure_category, record['record_id']))
+        return {'candidates': candidates,
+                'excluded': sorted(filtered['excluded'], key=lambda item: item['record_id']),
+                'ranking': {
+                    'policy': 'exact-context-failure-v1',
+                    'failure_category': failure_category,
+                    'progress_context': dict(progress_context),
+                    'compatibility': 'exact-task-progress-control',
+                    'order': ['failure_category_match_desc', 'record_id_asc'],
+                    'outcome_preference': 'none'}}
 
 
 def _validate_progress(value):

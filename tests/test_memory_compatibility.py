@@ -1,6 +1,7 @@
 """Outcome-neutral compatibility over pinned single/two-arm synthetic episodes."""
 
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +9,7 @@ import unittest
 
 from action_capabilities import libero_native_capabilities
 from attempt_identity import AttemptIdentityRecorder
-from episode_harness import ActionResolution, EpisodeConfig, run_episode
+from episode_harness import ActionResolution, EpisodeConfig, RobotStateCapture, run_episode
 from intervention_memory import InterventionMemory
 from recorded_replay import TraceError, TraceRecorder, load_recorded_replay
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
@@ -29,7 +30,8 @@ class MemoryCompatibilityTests(unittest.TestCase):
         self.store = InterventionMemory(self.root / 'memory')
         self.single = replace(libero_native_capabilities(), layout='flat')
 
-    def retain(self, name, capabilities=None, *, task=TASK, progress=PROGRESS, success=False):
+    def retain(self, name, capabilities=None, *, task=TASK, progress=PROGRESS, success=False,
+               category='unknown', truncated=False):
         capabilities = capabilities or self.single
         source = self.root / name
         source.mkdir()
@@ -45,7 +47,9 @@ class MemoryCompatibilityTests(unittest.TestCase):
         policy = ReplayPolicy([('start', action), ('middle', action)])
         environment = ReplayEnvironment(17, 'start', [
             (correction, ReplayStep('middle', 0, False, False, False)),
-            (action, ReplayStep('done', 0, success, True, False))])
+            (action, ReplayStep('done', 0, success, not truncated, truncated))],
+            initial_robot_state_capture=RobotStateCapture(
+                0, datetime(2026, 1, 1, tzinfo=timezone.utc), 10.))
         policy.action_capabilities = environment.action_capabilities = capabilities
         context_path = source / 'context.json'
 
@@ -55,7 +59,10 @@ class MemoryCompatibilityTests(unittest.TestCase):
             component = capabilities.components[0]
             context = {'episode_id': proposal.observation.episode_id,
                 'proposal_id': proposal.proposal_id, 'observation_sequence': 0,
-                'diagnosis': {'category': 'unknown', 'summary': 'synthetic', 'evidence': []},
+                'diagnosis': {'category': category, 'summary': 'synthetic',
+                    'evidence': [] if category == 'unknown' else [
+                        {'observation_sequence': 0, 'source': 'robot_state',
+                         'description': 'synthetic declared state assessment'}]},
                 'request': {'episode_id': proposal.observation.episode_id,
                     'proposal_id': proposal.proposal_id, 'observation_sequence': 0,
                     'decision_id': 'synthetic', 'kind': 'adjustment', 'scope': 'single_action',

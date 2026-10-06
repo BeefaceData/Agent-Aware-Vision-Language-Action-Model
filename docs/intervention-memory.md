@@ -1,7 +1,7 @@
 # Immutable intervention experience records
 
-`intervention_memory.InterventionMemory` implements issues #95 through #98 as an
-offline append-only store with outcome-neutral candidate lookup. It does not
+`intervention_memory.InterventionMemory` implements issues #95 through #99 as an
+offline append-only store with outcome-neutral candidate lookup and ranking. It does not
 enable supervisor retrieval, select development data, update fixed-memory
 evaluation snapshots, or authorize an intervention.
 
@@ -140,7 +140,7 @@ widening or task synonym matching is performed.
 
 Compatibility does not authorize execution or establish positive benefit.
 Failed/unknown outcomes remain eligible. Model compatibility, permitted data
-splits, ranking and supervisor-safe redaction still belong to subsequent
+splits and supervisor-safe redaction still belong to subsequent
 retrieval policy. The original `candidates` API retains its exact task/control
 lookup behavior and does not require progress evidence.
 
@@ -154,9 +154,52 @@ partial candidate set. Reopening the store does not change these rules.
 
 This is a storage-level candidate interface, not a compatibility or retrieval
 policy. The caller must supply permitted references. General compatibility
-filters (#98), model/configuration exclusions (#110), development/holdout splits,
-ranking, budgets and supervisor-safe context preparation remain separate work.
+filters and ranking are available through the APIs described here;
+model/configuration exclusions (#110), development/holdout splits,
+budgets and supervisor-safe context preparation remain separate work.
 Do not send these evaluator records directly to the supervisor.
+
+## Deterministic relevance ordering
+
+```python
+ranked = memory.rank_candidates(
+    permitted_references,
+    task=active_task,
+    robot_capabilities=active_capabilities,
+    progress_context={"stage": "grasp", "object": "target"},
+    failure_category="suspected_missed_grasp",
+)
+ordered_records = ranked["candidates"]
+ranking_settings = ranked["ranking"]
+exclusions = ranked["excluded"]
+```
+
+The `exact-context-failure-v1` policy first applies the same verified exact
+task, progress and control compatibility gates as `filter_candidates`. Progress
+is a hard applicability constraint, not a guessed distance between stages:
+an experience from a different stage cannot outrank an applicable experience.
+Among eligible records, exact matches to the declared diagnosis category rank
+first; all other categories follow. Ties use ascending immutable `record_id`,
+independent of input order, insertion time, outcome and store reopening.
+The category must be one of the temporal-diagnosis schema's categories, including
+`progress` and `unknown`. Unknown matches unknown only; it is not a wildcard.
+There is no inferred similarity between other failure families or free-text
+summaries, and no vector database or model call is involved.
+
+Failed, successful and uncertain experiences have identical ranking rules.
+Their original local/task outcomes and evidence limitations remain attached;
+relevance is neither causal benefit nor correction authority. Repeated candidate
+IDs occupy one place after **every** supplied reference has passed verification.
+Invalid or corrupt duplicate references still fail the whole query. Exclusions
+retain their pinned reasons and sort by record ID; repeated excluded references
+remain visible. Invalid query context is rejected even for an empty input.
+
+`ranking` records the policy version, queried failure category and progress
+context, compatibility rule, sort fields, and absence of outcome preference.
+Retain these settings along with the task/control query and permitted references
+to reproduce an ordering. Results are detached evaluator data. This API neither
+truncates nor prepares supervisor context; bounded/redacted context and decision
+logging are subsequent issues #100 and #101. No runtime execution path changes.
 
 Writes use exclusive file creation, flush, and fsync; a repeated episode/proposal
 cannot replace an existing record. A failed write can leave an unreadable partial
@@ -177,6 +220,7 @@ Run the public offline contracts:
 ```powershell
 python -m unittest discover -s tests -p test_intervention_memory.py -v
 python -m unittest discover -s tests -p test_memory_compatibility.py -v
+python -m unittest discover -s tests -p test_memory_ranking.py -v
 ```
 
 These tests cover completed recovery followed by task failure, failed local
@@ -189,3 +233,6 @@ removed evidence limitations. Synthetic evidence establishes storage behavior on
 Compatibility checks additionally cover mixed one-arm/two-arm records, complete
 sealed replay, task and progress mismatches, ordered control semantics, missing
 legacy progress, immutable progress provenance, and corrupt excluded evidence.
+Ranking fixtures additionally verify failure-category precedence, outcome-neutral
+ties, progress gates, permutations, reopening, duplicates, unknown queries and
+fail-closed evidence checks over complete sealed synthetic episode replays.

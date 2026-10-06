@@ -52,6 +52,8 @@ class SupervisorAdjustmentRequest:
 class AdjustmentRequestDecoder:
     """Trusted contract for one arm or coordinated group in one declared frame.
 
+    The target and exact component set declare the host-supported capability;
+    undeclared components are rejected even when their residual is zero.
     Components describe residuals, not replacements for the policy action.
     This interface does not convert units, map native action indices, validate
     final actions or authorize execution. Those require an intervention executor.
@@ -86,12 +88,24 @@ class AdjustmentRequestDecoder:
             raise ValueError('adjustment response must reference one current proposal')
         if not _label(response['decision_id']):
             raise ValueError('invalid adjustment decision identity')
-        if response['target'] != self.target or response['frame'] != self.frame:
-            raise ValueError('unsupported adjustment target or frame')
+        if response['target'] != self.target:
+            raise ValueError('unsupported adjustment target or coordinated group')
+        if response['frame'] != self.frame:
+            raise ValueError('unsupported adjustment frame')
         units, residual = response['units'], response['residual']
-        if (type(units) is not dict or units != {c.name: c.unit for c in self.components} or
-                type(residual) is not dict or set(residual) != {c.name for c in self.components}):
-            raise ValueError('invalid adjustment components or units')
+        if (type(units) is not dict or type(residual) is not dict or
+                any(not _label(name) for name in (*units, *residual))):
+            raise ValueError('invalid adjustment component maps')
+        expected = {c.name for c in self.components}
+        unsupported = (set(units) | set(residual)) - expected
+        if unsupported:
+            source = ' in units' if not set(residual) - expected else ''
+            raise ValueError('unsupported adjustment components: ' +
+                             ', '.join(sorted(unsupported)) + source)
+        if set(units) != expected or set(residual) != expected:
+            raise ValueError('missing required adjustment components')
+        if units != {c.name: c.unit for c in self.components}:
+            raise ValueError('unsupported adjustment units')
         for component in self.components:
             value = residual[component.name]
             if (not _number(value) or

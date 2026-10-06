@@ -48,7 +48,8 @@ calibration is enabled.
 
 Observation requirements are declared, not proof of current sensing or clearance.
 Evidence references retain the decoder's structural validation. Scene eligibility
-is #71, recovery execution is #72, completion/abort enforcement is #73 and active
+is enforced by the [recovery eligibility gate](recovery-eligibility.md) (#71),
+recovery execution is #72, completion/abort enforcement is #73 and active
 readiness is #94. Resolution neither invokes a controller nor changes
 `run_episode`; passing a recovery request to its current decision callback still
 fails closed. Consequently this change requires no new execution episode path.

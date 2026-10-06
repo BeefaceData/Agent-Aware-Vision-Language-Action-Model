@@ -11,7 +11,9 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+from functools import wraps
 from math import isfinite
+from threading import Lock
 from time import monotonic
 from typing import Any, Callable, Literal, Mapping, Protocol, TYPE_CHECKING
 from uuid import uuid4
@@ -828,6 +830,33 @@ class EpisodeRecorder(Protocol):
     def finish(self) -> Mapping[str, str]: ...
 
 
+class ExecutionBusy(RuntimeError):
+    """An overlapping episode was rejected before touching shared adapters."""
+
+
+_ownership_lock = Lock()
+_active_adapters: set[int] = set()
+
+
+def _exclusive_episode(run):
+    @wraps(run)
+    def owned(config, policy, environment, recorder, *args, **kwargs):
+        # Identity, not equality/hash: adapters may be mutable or unhashable.
+        # The call holds strong references until release, preventing ID reuse.
+        identities = {id(policy), id(environment), id(recorder)}
+        with _ownership_lock:
+            if identities & _active_adapters:
+                raise ExecutionBusy('episode adapter already has an execution owner')
+            _active_adapters.update(identities)
+        try:
+            return run(config, policy, environment, recorder, *args, **kwargs)
+        finally:
+            with _ownership_lock:
+                _active_adapters.difference_update(identities)
+    return owned
+
+
+@_exclusive_episode
 def run_episode(
     config: EpisodeConfig,
     policy: PolicyAdapter,
@@ -844,6 +873,14 @@ def run_episode(
     recovery_observer: Callable[[RecoverySequence, int, ObservationPacket], Any] | None = None,
 ) -> EpisodeOutcome:
     """Run one attempt and return task outcome and artifact finalization status.
+
+    One call owns its policy, environment and recorder from before reset through
+    finalization, including recovery and resumption. Concurrent or reentrant
+    calls sharing any adapter raise ExecutionBusy immediately without reset,
+    dispatch or recorder cleanup; they are never queued for later execution.
+    Independent adapters can run concurrently. This is an in-process ownership
+    boundary: callers must not bypass it with direct adapter calls or distinct
+    wrappers/processes controlling the same underlying robot.
 
     ``policy`` provides reset/act(packet); ``environment`` provides
     reset(seed, episode_id)/step(action); ``recorder`` provides begin(packet),

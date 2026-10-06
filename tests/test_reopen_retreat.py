@@ -7,10 +7,11 @@ import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 import unittest
 
 from correction_validation import CorrectionValidator
-from episode_harness import (ActionResolution, EpisodeConfig, ObservationRejected,
+from episode_harness import (ActionResolution, EpisodeConfig, ExecutionBusy, ObservationRejected,
                              RobotStateCapture, ViewCapture, run_episode)
 from recorded_replay import TraceError, TraceRecorder, load_recorded_replay
 from recovery_eligibility import ReopenRetreatEligibility
@@ -153,6 +154,82 @@ class ReopenRetreatTests(unittest.TestCase):
             self.assertIsNone(rows[2]['recovery'])
             self.assertEqual([r['recovery']['check']['status'] for r in rows[:2]],
                              ['continuing', 'completed'])
+
+    def test_overlapping_runs_cannot_reset_or_dispatch_during_recovery_and_resume(self):
+        for phase in ('selection', 'opening', 'assessment', 'retreat', 'resume', 'normal'):
+            with self.subTest(phase=phase), TemporaryDirectory() as tmp:
+                config, policy, environment, select, calls = self.episode()
+                entered, release = Event(), Event()
+                outcomes, errors = [], []
+
+                def pause():
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError('overlap test was not released')
+
+                step, resume = environment.step, policy.resume
+
+                def held_step(action):
+                    if phase == ('opening', 'retreat', 'normal')[len(environment.actions)]:
+                        pause()
+                    return step(action)
+
+                def held_resume(packet):
+                    if phase == 'resume':
+                        pause()
+                    return resume(packet)
+
+                def held_select(proposal):
+                    if phase == 'selection' and proposal.observation.sequence == 0:
+                        pause()
+                    return select(proposal)
+
+                def observe(plan, index, packet):
+                    if phase == 'assessment' and index == 0:
+                        pause()
+                    return self.observe(plan, index, packet)
+
+                environment.step, policy.resume = held_step, held_resume
+                trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
+
+                def run():
+                    try:
+                        outcomes.append(run_episode(config, policy, environment, trace,
+                            action_selector=held_select, recovery_observer=observe, clock=lambda: 10.))
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                worker = Thread(target=run)
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(3))
+                    expected_count = dict(selection=0, opening=0, assessment=1,
+                                          retreat=1, resume=2, normal=2)[phase]
+                    self.assertEqual(len(environment.actions), expected_count)
+                    # Both an exact duplicate call and a new policy sharing the
+                    # controller are rejected, never queued for after recovery.
+                    for competing_policy in (policy, ReplayPolicy(())):
+                        recorder = ReplayRecorder()
+                        with self.assertRaises(ExecutionBusy):
+                            run_episode(config, competing_policy, environment, recorder)
+                        self.assertEqual(recorder.observations, [])
+                        self.assertFalse(recorder.finalized)
+                    self.assertEqual(len(environment.actions), expected_count)
+                finally:
+                    release.set()
+                    worker.join(6)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+                self.assertTrue(outcomes[0].success)
+                self.assertEqual(environment.actions, [self.opening, self.retreat, [0.2] * 7])
+                self.assertEqual(calls, [0, 2])
+                self.assertEqual(policy.resumes, [2])
+                trace.seal(outcomes[0])
+                replay = load_recorded_replay(trace.directory)
+                self.assertTrue(replay.run().success)
+                self.assertEqual([row['action_record']['executed_action']
+                                  for row in replay.evidence()['decisions']],
+                                 [list(self.opening), list(self.retreat), [0.2] * 7])
 
     def test_local_failure_stops_with_sealed_partial_execution_and_no_resume(self):
         cases = (

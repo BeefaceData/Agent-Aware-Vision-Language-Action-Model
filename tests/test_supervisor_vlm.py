@@ -15,6 +15,7 @@ from episode_harness import (ActionProposal, EpisodeConfig, ObservationPacket,
                              frame_references_for_observation, run_episode)
 from recorded_replay import TraceRecorder, load_recorded_replay
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
+from robot_state_evidence import StateSpec, state_fields_for_observation
 from supervisor_provider import BoundedSupervisorProvider, ProviderRequestError
 from supervisor_vlm import (AnthropicMessagesTransport, ChronologicalVlmAdapter,
                             VlmSettings)
@@ -49,6 +50,32 @@ def pass_message(payload, deadline, cancellation):
 
 
 class VlmTests(unittest.TestCase):
+    def test_declared_arm_state_reaches_provider_with_frame_and_time(self):
+        current = proposal()
+        packet = current.observation
+        fields = state_fields_for_observation(
+            packet.observation,
+            (StateSpec('left', 'joint_position', 'robot_state/position', 'joint', 'rad', 1),),
+            packet.captured_at, packet.captured_monotonic)
+        current = replace(current, observation=replace(packet, state_fields=fields))
+        requests = []
+
+        def send(payload, deadline, cancellation):
+            requests.append(payload)
+            return pass_message(payload, deadline, cancellation)
+
+        provider = BoundedSupervisorProvider(ChronologicalVlmAdapter(
+            VlmSettings('fixture'), lambda frame: PNG, send), 1)
+        self.assertEqual(provider.request(current).status, 'response')
+        rows = [json.loads(block['text']) for block in requests[0]['messages'][0]['content']
+                if block['type'] == 'text']
+        state = next(row['state_fields'] for row in rows if 'robot_state' in row)[0]
+        self.assertEqual((state['arm'], state['frame'], state['units'], state['value']),
+                         ('left', 'joint', 'rad', [0.0]))
+        self.assertEqual(state['captured_at'], packet.captured_at.isoformat())
+        self.assertEqual(state['time_basis'], 'observation_return')
+        self.assertNotIn('HIDDEN', json.dumps(requests))
+
     def test_order_bound_missing_camera_and_episode_reset(self):
         requests, images = [], []
 

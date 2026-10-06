@@ -113,6 +113,8 @@ class SupervisorObservationTests(unittest.TestCase):
 
             def reset(self, seed):
                 raw = raw_observation()
+                # The LIBERO Panda exposes two measured gripper joints.
+                raw['robot_state']['gripper']['qpos'] = [[0.0, 0.0]]
                 raw['pixels']['image'] = np.zeros((1, 2, 2, 3), dtype=np.uint8)
                 return raw, {'metadata': SENTINEL}
 

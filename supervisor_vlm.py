@@ -204,6 +204,7 @@ class ChronologicalVlmAdapter:
                 'robot_state': observation.observation.get('robot_state'),
                 'robot_state_capture': (asdict(observation.robot_state_capture)
                                         if observation.robot_state_capture else None),
+                'state_fields': [asdict(item) for item in observation.state_fields],
             })})
             references = {ref.camera: ref for ref in observation.frame_references}
             if len(references) != 2 or len(observation.frame_references) != 2:

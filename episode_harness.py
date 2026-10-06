@@ -148,6 +148,26 @@ class ObservationPacket:
     captured_monotonic: float | None = None
     frame_references: tuple[FrameReference, ...] = ()
     robot_state_capture: RobotStateCapture | None = None
+    state_fields: tuple[StateField, ...] = ()
+
+
+@dataclass(frozen=True)
+class StateField:
+    """Deployable state for one arm, timed at observation return unless verified.
+
+    A missing measurement has no value or timestamp. ``observation_return`` is
+    not a claim of sensor capture time or synchronized robot and camera clocks.
+    """
+
+    arm: str
+    name: str
+    frame: str
+    units: str
+    availability: Literal['available', 'missing']
+    value: tuple[float, ...] | None
+    captured_at: datetime | None
+    captured_monotonic: float | None
+    time_basis: Literal['observation_return'] | None
 
 
 @dataclass(frozen=True)
@@ -266,9 +286,36 @@ def supervisor_observation(packet: ObservationPacket) -> ObservationPacket:
     state_capture = (RobotStateCapture(capture.observation_sequence,
                                       capture.captured_at, capture.captured_monotonic)
                      if type(capture) is RobotStateCapture else None)
+    state_fields = []
+    seen = set()
+    for item in packet.state_fields:
+        if (type(item) is not StateField or
+                any(type(text) is not str or not text for text in
+                    (item.arm, item.name, item.frame, item.units)) or
+                (item.arm, item.name) in seen):
+            raise ValueError('invalid supervisor state field')
+        seen.add((item.arm, item.name))
+        if item.availability == 'missing':
+            valid = all(value is None for value in (
+                item.value, item.captured_at, item.captured_monotonic, item.time_basis))
+        else:
+            valid = (item.availability == 'available' and
+                     type(item.value) is tuple and bool(item.value) and
+                     all(type(value) in (int, float) and isfinite(value)
+                         for value in item.value) and
+                     type(item.captured_at) is datetime and
+                     item.captured_at.utcoffset() is not None and
+                     type(item.captured_monotonic) in (int, float) and
+                     isfinite(item.captured_monotonic) and
+                     item.time_basis == 'observation_return')
+        if not valid:
+            raise ValueError('invalid supervisor state field')
+        state_fields.append(StateField(
+            item.arm, item.name, item.frame, item.units, item.availability,
+            item.value, item.captured_at, item.captured_monotonic, item.time_basis))
     return ObservationPacket(packet.episode_id, packet.sequence, packet.captured_at,
                              allowed, packet.captured_monotonic, references,
-                             state_capture)
+                             state_capture, tuple(state_fields))
 
 
 def frame_references_for_observation(

@@ -14,6 +14,7 @@ from time import monotonic
 from environment_interruption import InterruptionContract
 
 from episode_harness import ObservationPacket, StepResult, frame_references_for_observation
+from robot_state_evidence import LIBERO_STATE_SPECS, state_fields_for_observation
 
 
 @dataclass(frozen=True)
@@ -124,7 +125,9 @@ class LiberoEnvironmentAdapter:
         observation = deepcopy(observation)
         return ObservationPacket(
             self.episode_id, self.sequence, wall, observation, captured,
-            frame_references_for_observation(observation, self.sequence, wall, captured))
+            frame_references_for_observation(observation, self.sequence, wall, captured),
+            state_fields=state_fields_for_observation(
+                observation, LIBERO_STATE_SPECS, wall, captured))
 
     def reset(self, seed, episode_id):
         # Invalidate the previous attempt even if reset or packet capture fails.

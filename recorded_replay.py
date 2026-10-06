@@ -188,6 +188,15 @@ def _packet(row):
     if capture is not None:
         capture['captured_at'] = datetime.fromisoformat(capture['captured_at'])
         row['robot_state_capture'] = RobotStateCapture(**capture)
+    from episode_harness import StateField
+    state_fields = []
+    for item in row.get('state_fields', ()):
+        if item['captured_at'] is not None:
+            item['captured_at'] = datetime.fromisoformat(item['captured_at'])
+        if item['value'] is not None:
+            item['value'] = tuple(item['value'])
+        state_fields.append(StateField(**item))
+    row['state_fields'] = tuple(state_fields)
     if 'observation' not in row or row['observation'] is None:
         raise TraceError('observation payload missing')
     packet = ObservationPacket(**row)
@@ -700,10 +709,18 @@ class RecordedReplay:
         Includes private evaluator observations; this is not a supervisor input.
         Timestamps retain their original meaning, not replay execution timing.
         """
+        observations = []
+        for packet in self._packets:
+            observation = asdict(packet)
+            # Optional arm evidence must not change pre-existing annotation pins
+            # when the recorded episode contains no declared arm measurements.
+            if not packet.state_fields:
+                observation.pop('state_fields')
+            observations.append(observation)
         result = {
             'source_episode_id': self.source_episode_id,
             'config': self._recorded_config,
-            'observations': [asdict(packet) for packet in self._packets],
+            'observations': observations,
             'decisions': self._decisions,
             'outcome': self._outcome,
         }

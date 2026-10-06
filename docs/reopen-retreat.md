@@ -131,3 +131,49 @@ Legacy recovery traces without checks cannot establish monitored completion and
 are rejected. The synthetic tests cover missing/stale observations, failed
 opening/retreat, exhaustion, clearance uncertainty, assessor failures, and both
 successful and unsuccessful complete-episode replays.
+
+## Per-episode intervention and recovery attempt limits
+
+Set trusted limits before calling the harness, for example:
+
+```python
+config = EpisodeConfig(
+    seed=17, max_steps=100, max_interventions=3,
+    recovery_attempt_limits=(("reopen_and_retreat", 2),),
+)
+```
+
+`max_interventions` counts recovery sequences and single-action adjustments
+together. When omitted (`None`), it resolves to `max_steps` and the concrete
+integer is retained in new trace manifests. The default per-tool allowance is
+one `reopen_and_retreat` attempt. Unlisted tools have zero allowance. Counts
+must be nonnegative integers; zero disables the corresponding intervention or
+tool. These are execution limits, not reviewed physical readiness settings.
+
+The harness owns counters for the entire episode, independent of executor
+instances, policy resume, and tool state. Once identity, monitor and horizon
+checks pass, it charges the attempt immediately before dispatch. A two-command
+recovery consumes one intervention and one tool attempt, plus two actions from
+the shared horizon. A completed recovery never refunds either count. An abort
+or controller exception retains the charged attempt and ends the episode under
+the existing stop contract; there is no retry or counter reset through abort.
+Only a new `run_episode` call, with a new episode identity and environment reset,
+starts new counters.
+
+An exhausted request records `proposal_rejected`, its specific limit reason,
+and an `intervention_budget` snapshot containing the requested kind/tool,
+admission outcome and cumulative counts. It dispatches no command and makes no
+further selection call. Pass-through policy actions do not consume intervention
+counts and remain possible when no further correction is requested. Each
+admitted recovery command retains the same attempt snapshot, including partial
+abort/failure evidence.
+
+Sealed replay recomputes admissions and rejects inconsistent counts, exhaustion
+reasons or execution beyond declared limits. Older annotation fingerprints retain
+their historical configuration fields. Run the dedicated public tests with
+`python -m unittest discover -s tests -p test_intervention_limits.py -v`.
+The persistent-failure fixture completes local recovery without task success,
+then requests another recovery until the exact configured limit rejects it.
+Separate fixtures verify immediate abort, failed dispatch, independent tool
+counts, adjustments sharing the cap, new-episode reset and corrupted accounting.
+All evidence is synthetic and establishes execution behavior only.

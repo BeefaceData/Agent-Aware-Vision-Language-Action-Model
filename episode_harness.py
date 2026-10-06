@@ -19,6 +19,7 @@ from typing import Any, Callable, Literal, Mapping, Protocol, TYPE_CHECKING
 from uuid import uuid4
 
 from temporal_diagnosis import valid_temporal_diagnosis
+from intervention_budget import InterventionBudget
 
 if TYPE_CHECKING:
     from observation_window import ObservationWindow, WindowSettings
@@ -26,14 +27,35 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class EpisodeConfig:
+    """Trusted episode limits; None resolves the intervention cap to max_steps.
+
+    Each recovery sequence and each single-action override consumes one
+    intervention. Unlisted tools have zero attempts; zero disables a budget.
+    """
     seed: int
     max_steps: int
     supervisor_interval_actions: int = 1
+    max_interventions: int | None = None
+    recovery_attempt_limits: tuple[tuple[str, int], ...] = (('reopen_and_retreat', 1),)
 
     def __post_init__(self):
         if (type(self.supervisor_interval_actions) is not int or
                 self.supervisor_interval_actions <= 0):
             raise ValueError('supervisor_interval_actions must be a positive integer')
+        if self.max_interventions is None:
+            if type(self.max_steps) is not int or self.max_steps < 0:
+                raise ValueError('max_steps must be a positive integer')
+            object.__setattr__(self, 'max_interventions', self.max_steps)
+        if type(self.max_interventions) is not int or self.max_interventions < 0:
+            raise ValueError('max_interventions must be a nonnegative integer')
+        limits = self.recovery_attempt_limits
+        if (type(limits) not in (tuple, list) or
+                any(type(item) not in (tuple, list) or len(item) != 2 or
+                    type(item[0]) is not str or not item[0].isidentifier() or
+                    type(item[1]) is not int or item[1] < 0 for item in limits) or
+                len({item[0] for item in limits}) != len(limits)):
+            raise ValueError('recovery_attempt_limits require unique tool names and nonnegative integers')
+        object.__setattr__(self, 'recovery_attempt_limits', tuple(tuple(item) for item in limits))
 
 
 @dataclass(frozen=True)
@@ -710,6 +732,7 @@ class ActionRecord:
     supervisor_pass: SupervisorPass | None = None
     supervisor_abstention: SupervisorAbstention | None = None
     recovery: dict | None = None
+    intervention_budget: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -915,6 +938,10 @@ def run_episode(
     sequence must fit the remaining horizon before its first command executes.
     Per-action recovery evidence links the suspended original policy proposal;
     later execution IDs do not represent additional policy inference.
+    Episode-owned counters charge an intervention before its first dispatch,
+    with an additional per-tool charge for recovery. Continuation actions do
+    not charge another attempt. Aborts/failures never refund a charge; exhausted
+    requests are recorded and rejected without dispatch or further selection.
     Policy inference, recorder and ``on_step`` time are excluded from that wait.
     ``window_supervisor(window, proposed_action)`` is the temporal alternative to
     ``supervisor``. It receives bounded sanitized history and acknowledged prior
@@ -1003,8 +1030,11 @@ def run_episode(
         terminal_observation = None
         recovery_sequence = None
         recovery_index = 0
+        budget = InterventionBudget(config.max_interventions, config.recovery_attempt_limits)
+        recovery_budget = None
 
         for step in range(1, config.max_steps + 1):
+            budget_record = recovery_budget if recovery_sequence is not None else None
             if recovery_sequence is not None and history is not None:
                 history.append(observation)
             # A pending recovery owns execution. Do not infer, assess or select
@@ -1122,7 +1152,16 @@ def run_episode(
                         if len(plan.actions) > config.max_steps - step + 1:
                             resolution = ActionResolution('reject', reason='insufficient recovery action horizon')
                         else:
-                            recovery_sequence, recovery_index = plan, 0
+                            budget_record = budget.admit('recovery', plan.request['tool_name'])
+                            if not budget_record['admitted']:
+                                resolution = ActionResolution('reject', reason=budget_record['reason'])
+                            else:
+                                recovery_sequence, recovery_index = plan, 0
+                                recovery_budget = budget_record
+                    elif resolution.kind == 'override':
+                        budget_record = budget.admit('override')
+                        if not budget_record['admitted']:
+                            resolution = ActionResolution('reject', reason=budget_record['reason'])
                 except BaseException as exc:
                     selection_finished_at = clock()
                     cumulative_wait += selection_finished_at - response_at
@@ -1145,7 +1184,8 @@ def run_episode(
                         observation.captured_monotonic, request_at, response_at,
                         response_at, None, None, cumulative_wait),
                         ActionRecord(proposal_id, deepcopy(proposed_action), None,
-                                     None, None, 'rejected', resolution.reason)))
+                                     None, None, 'rejected', resolution.reason,
+                                     intervention_budget=deepcopy(budget_record))))
                 stop_reason = 'proposal_rejected'
                 break
             recovery_evidence = (dict(sequence=asdict(recovery_sequence), action_index=recovery_index)
@@ -1172,7 +1212,8 @@ def run_episode(
                                      deepcopy(selected_action), None, None,
                                      'unconfirmed', supervisor_pass=pass_response,
                                      supervisor_abstention=abstention_response,
-                                     recovery=recovery_evidence)))
+                                     recovery=recovery_evidence,
+                                     intervention_budget=deepcopy(budget_record))))
                 raise
             execution_finished_at = clock()
             timing = StepTiming(observation.captured_monotonic, request_at,
@@ -1189,7 +1230,7 @@ def run_episode(
                 deepcopy(selected_action), acknowledgement, disposition,
                 supervisor_pass=pass_response,
                 supervisor_abstention=abstention_response,
-                recovery=recovery_evidence))
+                recovery=recovery_evidence, intervention_budget=deepcopy(budget_record)))
             acknowledged_actions.append(deepcopy(result.action_record))
             reward_sum += result.reward
             steps = step

@@ -21,6 +21,7 @@ from episode_harness import (
 )
 from replay_adapters import ReplayRecorder
 from execution_progress import ExecutionJournal
+from intervention_budget import InterventionBudget
 
 
 class TraceError(ValueError):
@@ -230,6 +231,8 @@ def _load(directory, manifest):
     reward = 0.0
     success = False
     stop = 'step_limit'
+    budget = InterventionBudget(config.max_interventions, config.recovery_attempt_limits)
+    budget_required = 'max_interventions' in manifest['config']
     for index, row in enumerate(decisions):
         _require(type(row['step']) is int and type(row['source_sequence']) is int and
                  row['step'] == index + 1 and row['source_sequence'] == index and
@@ -279,6 +282,34 @@ def _load(directory, manifest):
             _require(check == expected, 'recovery check does not match evidence')
         else:
             _require(not pending, 'missing recovery continuation')
+        accounting = record.get('intervention_budget')
+        if budget_required and record['disposition'] == 'rejected' and (
+            record.get('rejection_reason') == 'episode intervention limit exhausted' or
+            str(record.get('rejection_reason', '')).startswith('recovery attempt limit exhausted: ')
+        ):
+            _require(accounting is not None, 'missing intervention exhaustion evidence')
+        expected_budget = None
+        if recovery is not None:
+            expected_budget = (budget.admit('recovery', plan.request['tool_name'])
+                               if offset == 0 else
+                               decisions[index - 1]['action_record'].get('intervention_budget'))
+        elif record['disposition'] == 'overridden':
+            expected_budget = budget.admit('override')
+        elif accounting is not None:
+            _require(type(accounting) is dict and record['disposition'] == 'rejected' and
+                     accounting.get('kind') in ('recovery', 'override') and
+                     ((accounting['kind'] == 'recovery' and
+                       type(accounting.get('tool')) is str and accounting['tool'].isidentifier()) or
+                      (accounting['kind'] == 'override' and accounting.get('tool') is None)),
+                     'invalid exhausted intervention evidence')
+            expected_budget = budget.admit(accounting['kind'], accounting['tool'])
+            _require(not expected_budget['admitted'] and
+                     record['rejection_reason'] == expected_budget['reason'],
+                     'intervention exhaustion does not match counts')
+        if expected_budget is not None and record['disposition'] != 'rejected':
+            _require(expected_budget['admitted'], 'execution exceeds intervention limits')
+        if budget_required or accounting is not None:
+            _require(_json(accounting) == _json(expected_budget), 'invalid intervention accounting')
         response = record.get('supervisor_pass')
         if response is not None:
             _require(type(response) is dict and
@@ -350,7 +381,8 @@ def _load(directory, manifest):
     _require(manifest['outcome'] == dict(success=success, steps=executed,
                                        stop_reason=stop, sum_rewards=reward),
              'outcome does not match recorded sequence')
-    return RecordedReplay(episode_id, config, packets, decisions, manifest['outcome'])
+    return RecordedReplay(episode_id, config, packets, decisions, manifest['outcome'],
+                          manifest['config'])
 
 
 def load_recorded_replay(directory):
@@ -369,12 +401,19 @@ def load_recorded_replay(directory):
 class RecordedReplay:
     """Validated trace; run() creates fresh replay-only adapters on every call."""
 
-    def __init__(self, episode_id, config, packets, decisions, outcome):
+    def __init__(self, episode_id, config, packets, decisions, outcome, recorded_config=None):
         self.source_episode_id = episode_id
         self.config = config
         self._packets = packets
         self._decisions = deepcopy(decisions)
         self._outcome = deepcopy(outcome)
+        self._recorded_config = asdict(config)
+        # Historical annotation fingerprints include pre-existing config defaults,
+        # but must not acquire fields introduced after the trace was sealed.
+        if recorded_config is not None:
+            for name in ('max_interventions', 'recovery_attempt_limits'):
+                if name not in recorded_config:
+                    self._recorded_config.pop(name)
 
     def evidence(self):
         """Return detached, JSON-compatible historical evidence for inspection.
@@ -384,7 +423,7 @@ class RecordedReplay:
         """
         return _plain({
             'source_episode_id': self.source_episode_id,
-            'config': asdict(self.config),
+            'config': self._recorded_config,
             'observations': [asdict(packet) for packet in self._packets],
             'decisions': self._decisions,
             'outcome': self._outcome,

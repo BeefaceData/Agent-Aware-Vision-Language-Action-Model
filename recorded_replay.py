@@ -269,15 +269,23 @@ def _load(directory, manifest):
                      (pending and previous['sequence'] == recovery['sequence'] and
                       offset == previous['action_index'] + 1), 'invalid recovery ordering')
             _require(source + len(plan.actions) <= config.max_steps, 'recovery exceeds horizon')
-            from recovery_monitor import RecoveryAssessment, check_recovery
+            from recovery_monitor import RecoveryAssessment, aborted, check_recovery
             check = recovery['check']
             _require(type(check) is dict and index + 1 < len(packets),
                      'missing recovery check or result observation')
             try:
                 assessment = (RecoveryAssessment(**check['assessment'])
                               if check['assessment'] is not None else None)
-                expected = check_recovery(plan, offset, packets[index + 1], assessment,
-                                          check['checked_at'])
+                if check.get('reason') == 'episode_terminated':
+                    _require(type(row['result']) is dict and any(
+                        row['result'].get(key) is True
+                        for key in ('success', 'terminated', 'truncated')),
+                        'recovery cancelled without terminal result')
+                    expected = aborted('episode_terminated', offset + 1)
+                else:
+                    # Historical traces may retain a local check at termination.
+                    expected = check_recovery(plan, offset, packets[index + 1], assessment,
+                                              check['checked_at'])
             except (ValueError, TypeError, KeyError) as exc:
                 raise TraceError('invalid recovery check') from exc
             _require(check == expected, 'recovery check does not match evidence')
@@ -532,6 +540,7 @@ class RecordedReplay:
                 self.index += 1
                 recovery = row['action_record'].get('recovery')
                 now = (recovery['check']['checked_at'] if recovery is not None
+                       and recovery['check']['checked_at'] is not None
                        else max(now, packets[self.index].captured_monotonic))
                 return StepResult(replace(deepcopy(packets[self.index]),
                                           episode_id=self.episode_id), **row['result'])

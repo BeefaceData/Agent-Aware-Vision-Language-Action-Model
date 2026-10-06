@@ -830,6 +830,8 @@ class EpisodeInterruption:
     artifact_status: str = 'incomplete'
     pre_start_failure: PreStartFailure | None = None
     failed_action: ActionRecord | None = None
+    terminal_observation: ObservationReference | None = None
+    terminal_reason: str | None = None
 
 
 class PolicyAdapter(Protocol):
@@ -989,6 +991,11 @@ def run_episode(
     adds assessments between these fixed boundaries; it never postpones them.
     Coincident periodic/event requests use one call and pending calls block the
     loop. Skipped assessments retain no supervisor response in action evidence.
+    An accepted terminal result ends correction processing before recovery
+    assessment or user callbacks. Remaining recovery commands are cancelled;
+    no decision queue is drained and no policy resume occurs. Late provider
+    work has no dispatch authority. A new attempt gets a new episode identity,
+    so a cached executor resolution cannot be reused across that boundary.
     """
     from baseline_fallback import BaselineFallback, fallback_evidence
     if baseline_fallback is not None and type(baseline_fallback) is not BaselineFallback:
@@ -1029,6 +1036,8 @@ def run_episode(
     steps = 0
     interruption_diagnostics = []
     failed_action = None
+    terminal_observation = None
+    terminal_reason = None
     task_status = 'unknown'
     startup_stage = 'policy_reset'
     policy_reset_completed = False
@@ -1328,11 +1337,29 @@ def run_episode(
             steps = step
             step_timings.append(timing)
             ingestion = ingestor.ingest(result.observation, execution_finished_at)
+            if ingestion.accepted:
+                # Capture evaluator evidence before any extension callback can
+                # fail or mutate its copy of the terminal observation.
+                last_observation = deepcopy(result.observation)
+                if result.success:
+                    task_status = 'success'
+                elif result.terminated:
+                    task_status = 'failure'
+                elif not result.truncated and step == config.max_steps:
+                    task_status = 'failure'
+                if result.success or result.terminated or result.truncated:
+                    terminal_observation = ObservationReference(
+                        result.observation.episode_id, result.observation.sequence)
+                    terminal_reason = ('success' if result.success else
+                                       'terminated' if result.terminated else 'truncated')
             recovery_aborted = False
             if recovery_sequence is not None:
                 from recovery_monitor import aborted, check_recovery
                 if not ingestion.accepted:
                     check = aborted('stale_observation', recovery_index + 1)
+                elif terminal_reason is not None:
+                    check = aborted('episode_terminated', recovery_index + 1)
+                    recovery_sequence = None
                 else:
                     try:
                         assessment = recovery_observer(deepcopy(recovery_sequence), recovery_index,
@@ -1346,14 +1373,6 @@ def run_episode(
                                  recovery=deepcopy(recovery_evidence)))
                 acknowledged_actions[-1] = deepcopy(result.action_record)
                 recovery_aborted = check['status'] == 'aborted'
-            if ingestion.accepted:
-                last_observation = deepcopy(result.observation)
-                if result.success:
-                    task_status = 'success'
-                elif result.terminated:
-                    task_status = 'failure'
-                elif not result.truncated and step == config.max_steps:
-                    task_status = 'failure'
             recorder.record_step(step, observation, deepcopy(selected_action), result,
                                  ingestion)
             if not ingestion.accepted:
@@ -1365,11 +1384,8 @@ def run_episode(
             success = result.success
             if on_step is not None:
                 on_step(step, result)
-            if success or result.terminated or result.truncated:
-                terminal_observation = ObservationReference(
-                    result.observation.episode_id, result.observation.sequence)
-                stop_reason = ('success' if success else
-                               'terminated' if result.terminated else 'truncated')
+            if terminal_reason is not None:
+                stop_reason = terminal_reason
                 break
             if recovery_aborted:
                 stop_reason = 'recovery_aborted'
@@ -1403,7 +1419,8 @@ def run_episode(
             pre_start_failure=(PreStartFailure(
                 startup_stage, config.seed, policy_reset_completed,
                 environment_reset_completed) if startup_stage is not None else None),
-            failed_action=deepcopy(failed_action))
+            failed_action=deepcopy(failed_action),
+            terminal_observation=terminal_observation, terminal_reason=terminal_reason)
         raise
 
     rollout_seconds = clock() - rollout_start
@@ -1423,7 +1440,8 @@ def run_episode(
             steps, reward_sum, last_observation, tuple(acknowledged_actions),
             (f'{type(exc).__name__}: {exc}',),
             'success' if success else 'failure' if stop_reason in
-            ('terminated', 'step_limit') else 'unknown')
+            ('terminated', 'step_limit') else 'unknown',
+            terminal_observation=terminal_observation, terminal_reason=terminal_reason)
         raise
     return EpisodeOutcome(episode_id, success, steps, stop_reason, reward_sum,
                           rollout_seconds, artifacts, cumulative_wait,

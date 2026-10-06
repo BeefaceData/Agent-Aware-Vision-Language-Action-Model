@@ -1,8 +1,25 @@
 """One-proposal translation composition at the harness action-selector seam."""
 
+from math import isfinite
+
 from episode_harness import ActionProposal, ActionResolution
 from supervisor_adjustment import SupervisorAdjustmentRequest
 from translation_conversion import LiberoTranslationConverter
+
+
+def _validate_native_action(action):
+    """Check the complete command for the converter's verified Panda mapping."""
+    if type(action) not in (list, tuple) or len(action) != 7:
+        raise ValueError('adjusted action must have seven native components')
+    try:
+        finite = all(type(value) in (int, float) and isfinite(value)
+                     for value in action)
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise ValueError('adjusted action must contain finite numeric values')
+    if any(not -1 <= value <= 1 for value in action):
+        raise ValueError('adjusted action outside native action bounds')
 
 
 class SingleActionAdjustment:
@@ -42,8 +59,7 @@ class SingleActionAdjustment:
                 raise ValueError('original proposal outside native action bounds')
             for index in range(3):
                 action[index] += converted.native_residual[index]
-            if any(not -1 <= value <= 1 for value in action):
-                raise ValueError('adjusted action outside native action bounds')
+            _validate_native_action(action)
         except ValueError as exc:
             return ActionResolution('reject', reason=str(exc))
         self._consumed.add(identity)

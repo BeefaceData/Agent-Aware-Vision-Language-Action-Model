@@ -26,6 +26,14 @@ offsets. Rotation and gripper values remain unchanged. Both original and final
 commands must fit the native [-1, 1] range; rejection never clips a command or
 silently substitutes baseline execution.
 
+After composition, the complete command is explicitly revalidated as seven
+finite numeric components (booleans are invalid), each inside the inclusive
+native [-1, 1] bounds. These bounds apply to the verified Panda mapping only.
+An invalid command returns `reject` with a reason and no override action.
+The harness records that reason as `rejection_reason`, leaves execution absent,
+and ends the episode with `proposal_rejected` without calling the environment.
+This implements #69; rejection does not consume an action or attempt clipping.
+
 A successful resolution consumes that episode/proposal identity before dispatch.
 Further adjustments for the same identity are rejected, even under a new decision
 ID. This is conservative after a failed dispatch: an uncertain command is not
@@ -48,7 +56,8 @@ the existing action record retains proposal/execution evidence, not a new reques
 schema.
 
 Run `python -m unittest discover -s tests -p test_single_action_adjustment.py -v`.
-Six public tests cover composition, unchanged nontranslation components, inclusive
-bounds, invalid and stale requests, duplicate consumption, and complete sealed
+Eight public tests cover composition, unchanged nontranslation components, inclusive
+bounds, malformed commands across all seven components, signed overflow on all
+translation axes, invalid and stale requests, duplicate consumption, and complete sealed
 successful/rejected replays. Synthetic controller evidence establishes software
 contract behavior only, not task improvement or physical correction safety.

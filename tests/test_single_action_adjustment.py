@@ -84,6 +84,38 @@ class SingleActionAdjustmentTests(unittest.TestCase):
             self.assertEqual(result.kind, 'override')
             self.assertEqual(result.action, [sign, 0, 0, 0, 0, 0, sign])
 
+    def test_rejects_invalid_dimensions_and_every_invalid_component(self):
+        invalid_actions = [[], self.action[:-1], self.action + [0], None, 'invalid']
+        for index in range(7):
+            for value in (float('nan'), float('inf'), -float('inf'),
+                          True, '0', None, 10 ** 400, -1.01, 1.01):
+                action = self.action.copy()
+                action[index] = value
+                invalid_actions.append(action)
+        for action in invalid_actions:
+            with self.subTest(action=action):
+                proposal = replace(self.proposal, action=action)
+                result = self.executor.resolve(proposal, self.request(proposal))
+                self.assertEqual(result.kind, 'reject')
+                self.assertIsNone(result.action)
+                self.assertTrue(result.reason)
+
+    def test_valid_inputs_exceed_final_bounds_on_each_translation_axis(self):
+        for axis, component in enumerate(('translation_x', 'translation_y', 'translation_z')):
+            for sign in (-1, 1):
+                with self.subTest(axis=axis, sign=sign):
+                    action = [0] * 7
+                    action[axis] = sign * 0.9
+                    proposal = replace(self.proposal, action=action)
+                    request = self.request(proposal)
+                    request['residual'] = dict.fromkeys(request['residual'], 0)
+                    request['residual'][component] = sign * 0.01
+                    result = self.executor.resolve(proposal, request)
+                    self.assertEqual(result.kind, 'reject')
+                    self.assertEqual(result.reason, 'adjusted action outside native action bounds')
+                    self.assertIsNone(result.action)
+                    self.assertEqual(proposal.action, action)
+
     def test_complete_sealed_episode_has_one_override_and_no_carryover(self):
         with TemporaryDirectory() as tmp:
             initial, current, final = {'task': 'place'}, {'task': 'place', 'time': 1}, {'task': 'done'}
@@ -126,7 +158,13 @@ class SingleActionAdjustmentTests(unittest.TestCase):
             recorder.seal(result)
             self.assertEqual(result.stop_reason, 'proposal_rejected')
             self.assertEqual(environment.actions, [])
-            self.assertEqual(load_recorded_replay(directory).run().stop_reason, 'proposal_rejected')
+            replay = load_recorded_replay(directory)
+            self.assertEqual(replay.run().stop_reason, 'proposal_rejected')
+            record = replay.evidence()['decisions'][0]['action_record']
+            self.assertEqual(record['disposition'], 'rejected')
+            self.assertEqual(record['rejection_reason'], 'adjusted action outside native action bounds')
+            self.assertEqual(record['proposed_action'], action)
+            self.assertIsNone(record['executed_action'])
 
 
 if __name__ == '__main__':

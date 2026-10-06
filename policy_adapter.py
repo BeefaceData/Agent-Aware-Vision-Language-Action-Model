@@ -15,7 +15,8 @@ class ResetOnResumePolicyAdapter:
     """
 
     def __init__(self, reset: Callable[[], None],
-                 infer: Callable[[ObservationPacket], Any]):
+                 infer: Callable[[ObservationPacket], Any], *, action_capabilities=None):
+        self.action_capabilities = action_capabilities
         self._reset = reset
         self._infer = infer
         self._resume_identity = None

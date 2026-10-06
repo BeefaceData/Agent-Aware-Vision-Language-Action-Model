@@ -1068,6 +1068,8 @@ def run_episode(
     work has no dispatch authority. A new attempt gets a new episode identity,
     so a cached executor resolution cannot be reused across that boundary.
     """
+    from action_capabilities import validate_action_pair
+    validate_action_pair(policy, environment)
     from baseline_fallback import BaselineFallback, fallback_evidence
     if baseline_fallback is not None and type(baseline_fallback) is not BaselineFallback:
         raise ValueError('BaselineFallback required')

@@ -54,6 +54,48 @@ def read_action_horizon(environment, requested_override=None) -> ActionHorizon:
                          'environment_default' if requested is None else 'explicit_override')
 
 
+def read_native_capabilities(environment):
+    """Check installed synchronous LIBERO controller and transport before reset.
+
+    Read only: no simulation stepping, asset loading or calibration is done.
+    Unknown wrappers/controllers fail closed instead of inheriting Panda facts.
+    """
+    import numpy as np
+    from action_capabilities import libero_native_capabilities
+
+    try:
+        if environment.num_envs != 1 or len(environment.envs) != 1:
+            raise ValueError('exactly one environment is required')
+        wrapper = environment.envs[0].unwrapped
+        simulator = wrapper._env
+        robots = simulator.robots
+        controller = robots[0].controller
+        space = environment.single_action_space
+        checks = (
+            wrapper.control_mode == 'relative',
+            len(robots) == 1,
+            type(robots[0].robot_model).__name__ == 'OnTheGroundPanda',
+            controller.name == 'OSC_POSE',
+            controller.impedance_mode == 'fixed',
+            bool(controller.use_delta),
+            controller.position_limits is None,
+            controller.orientation_limits is None,
+            simulator.env.control_freq == 20,
+            space.shape == (7,),
+            np.array_equal(space.low, [-1.] * 7),
+            np.array_equal(space.high, [1.] * 7),
+            np.array_equal(controller.input_min, [-1.] * 6),
+            np.array_equal(controller.input_max, [1.] * 6),
+            np.array_equal(controller.output_min, [-0.05] * 3 + [-0.5] * 3),
+            np.array_equal(controller.output_max, [0.05] * 3 + [0.5] * 3),
+        )
+        if not all(checks):
+            raise ValueError('unsupported LIBERO native action configuration')
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise ValueError('LIBERO native action readback unavailable') from exc
+    return libero_native_capabilities()
+
+
 class LiberoEnvironmentAdapter:
     interruption_contract = InterruptionContract(
         'libero-synchronous-stop-v1', 'stop',
@@ -65,10 +107,12 @@ class LiberoEnvironmentAdapter:
         self.ended = True
         return True
 
-    def __init__(self, environment, clock=monotonic, *, initial_state=None):
+    def __init__(self, environment, clock=monotonic, *, initial_state=None,
+                 action_capabilities=None):
         if environment.num_envs != 1:
             raise ValueError('exactly one environment is required')
         self.environment = environment
+        self.action_capabilities = action_capabilities
         self.clock = clock
         self.ended = True
         self.initial_state = initial_state

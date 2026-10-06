@@ -31,7 +31,8 @@ from baseline_environment import capture_environment
 from attempt_identity import AttemptIdentityRecorder, reserve_attempt
 from camera_evidence import CameraEvidenceRecorder
 from artifact_finalization import ArtifactResources
-from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon
+from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon, read_native_capabilities
+from action_capabilities import libero_native_capabilities
 from libero_initial_state import select_initial_state
 from episode_harness import EpisodeConfig, exception_stop_reason, run_episode
 from recorded_replay import TraceRecorder
@@ -137,6 +138,8 @@ def main():
             control_mode=cfg.control_mode, episode_length=args.max_steps,
         )
         env = selected[args.suite][args.task_id]
+        native_capabilities = read_native_capabilities(env)
+        summary['action_capabilities'] = asdict(native_capabilities)
         horizon = read_action_horizon(env, args.max_steps)
         limit = horizon.effective
         summary['action_horizon'] = asdict(horizon)
@@ -147,7 +150,8 @@ def main():
 
         class BaselinePolicy(ResetOnResumePolicyAdapter):
             def __init__(self):
-                super().__init__(policy.reset, self.infer)
+                super().__init__(policy.reset, self.infer,
+                                 action_capabilities=libero_native_capabilities())
 
             def infer(self, packet):
                 # Same processing order as LeRobot 0.4.3 rollout().
@@ -285,7 +289,8 @@ def main():
                       flush=True)
 
         episode_config = EpisodeConfig(args.seed, limit)
-        adapter = LiberoEnvironmentAdapter(env, initial_state=selection)
+        adapter = LiberoEnvironmentAdapter(env, initial_state=selection,
+                                          action_capabilities=native_capabilities)
         identity_recorder = AttemptIdentityRecorder(out, episode_config, lambda: {
             'task': {'suite': args.suite, 'task_id': args.task_id,
                      'instruction': instruction},
@@ -294,6 +299,7 @@ def main():
             'policy_assets': summary['policy_assets'],
             'environment': environment,
             'settings': {'device': args.device, 'video_fps': args.video_fps,
+                         'action_capabilities': asdict(native_capabilities),
                          'render_backend': os.environ['MUJOCO_GL'],
                          'action_horizon': asdict(horizon),
                          'environment_config': {

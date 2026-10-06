@@ -14,7 +14,7 @@ from datetime import datetime
 from functools import wraps
 from math import isfinite
 from threading import Lock
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Callable, Literal, Mapping, Protocol, TYPE_CHECKING
 from uuid import uuid4
 
@@ -22,6 +22,7 @@ from temporal_diagnosis import valid_temporal_diagnosis
 from intervention_budget import InterventionBudget
 from correction_expiry import check_expiry
 from episode_deadline import EpisodeDeadline, EpisodeDeadlineExceeded, workers_busy
+from supervisor_retry import RECOVERABLE_ERRORS
 
 if TYPE_CHECKING:
     from baseline_fallback import BaselineFallback
@@ -67,8 +68,23 @@ class EpisodeConfig:
     max_supervisor_calls: int | None = None
     supervisor_exhaustion_policy: str = "stop"
     max_episode_seconds: float | None = None
+    supervisor_max_retries: int = 0
+    supervisor_retry_delay_seconds: float = 0.0
+    supervisor_retry_errors: tuple[str, ...] = RECOVERABLE_ERRORS
 
     def __post_init__(self):
+        if type(self.supervisor_max_retries) is not int or self.supervisor_max_retries < 0:
+            raise ValueError('supervisor retry count must be a nonnegative integer')
+        delay = self.supervisor_retry_delay_seconds
+        if type(delay) not in (int, float) or not 0 <= delay < float('inf'):
+            raise ValueError('supervisor retry delay must be nonnegative and finite')
+        errors = self.supervisor_retry_errors
+        if (type(errors) not in (tuple, list) or
+                any(type(e) is not str or e not in RECOVERABLE_ERRORS for e in errors) or
+                len(set(errors)) != len(errors)):
+            raise ValueError('invalid supervisor retry error classes')
+        if self.supervisor_max_retries and (not errors or self.max_episode_seconds is None):
+            raise ValueError('supervisor retries require eligible errors and an episode time cap')
         if (type(self.supervisor_interval_actions) is not int or
                 self.supervisor_interval_actions <= 0):
             raise ValueError('supervisor_interval_actions must be a positive integer')
@@ -1047,6 +1063,8 @@ def run_episode(
         raise ValueError('BaselineFallback required')
     if type(config.max_steps) is not int or config.max_steps <= 0:
         raise ValueError('max_steps must be a positive integer')
+    if config.supervisor_max_retries and supervisor_decider is None:
+        raise ValueError('supervisor retries require a supervisor decider')
     if supervisor is not None and window_supervisor is not None:
         raise ValueError('choose one supervisor callback')
     if assessment_trigger is not None and (
@@ -1192,9 +1210,50 @@ def run_episode(
                     if allowance_refused:
                         pass
                     elif supervisor_decider is not None and assessment_due:
-                        response = deadline.call('supervisor', supervisor_decider, ActionProposal(
-                            proposal_id, supervisor_observation(observation),
-                            deepcopy(proposed_action)))
+                        from supervisor_provider import ProviderRequestError
+                        attempts = []
+                        if config.supervisor_max_retries:
+                            call_budget['retry_attempts'] = attempts
+                        while True:
+                            attempt = dict(started_at=clock(), finished_at=None,
+                                           status='pending', error_class=None)
+                            attempts.append(attempt)
+                            try:
+                                response = deadline.call('supervisor', supervisor_decider, ActionProposal(
+                                    proposal_id, supervisor_observation(observation),
+                                    deepcopy(proposed_action)))
+                            except BaseException as exc:
+                                attempt.update(finished_at=clock(), status='error')
+                                if isinstance(exc, EpisodeDeadlineExceeded):
+                                    attempt['status'] = 'timeout'
+                                if isinstance(exc, ProviderRequestError):
+                                    attempt.update(status=exc.result.status,
+                                                   error_class=exc.result.error_class)
+                                eligible = (isinstance(exc, ProviderRequestError) and
+                                            exc.result.status == 'error' and
+                                            exc.result.error_class in config.supervisor_retry_errors)
+                                if not eligible or len(attempts) > config.supervisor_max_retries:
+                                    raise
+                                deadline.check('supervisor')
+                                if supervisor_calls >= config.max_supervisor_calls:
+                                    supervisor_exhausted = allowance_refused = True
+                                    call_budget['admitted'] = False
+                                    fallback_cause = 'supervisor call allowance exhausted'
+                                    break
+                                # The main thread waits; no abandoned worker can initiate a retry.
+                                delay_end = clock() + config.supervisor_retry_delay_seconds
+                                while clock() < delay_end:
+                                    deadline.check('supervisor')
+                                    sleep(min(.01, max(0, delay_end - clock())))
+                                deadline.check('supervisor')
+                                supervisor_calls += 1
+                                call_budget['attempted'] = supervisor_calls
+                            else:
+                                attempt.update(finished_at=clock(), status='response')
+                                break
+                        if allowance_refused:
+                            # Enter the existing guarded fallback/stop path below.
+                            raise SupervisorResponseError('supervisor call allowance exhausted')
                         if (type(response) not in (SupervisorPass, SupervisorAbstention) or
                             type(response.episode_id) is not str or
                             type(response.proposal_id) is not str or
@@ -1224,9 +1283,10 @@ def run_episode(
                 except EpisodeDeadlineExceeded:
                     raise
                 except BaseException as exc:
-                    if baseline_fallback is not None and isinstance(exc, Exception):
+                    if allowance_refused or (baseline_fallback is not None and isinstance(exc, Exception)):
                         # Retain a safe error category, never provider payloads.
-                        fallback_cause = f'supervisor unavailable or rejected: {type(exc).__name__}'
+                        if not allowance_refused:
+                            fallback_cause = f'supervisor unavailable or rejected: {type(exc).__name__}'
                     else:
                         request_finished_at = clock()
                         cumulative_wait += request_finished_at - request_at

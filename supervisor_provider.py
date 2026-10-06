@@ -12,6 +12,7 @@ from typing import Any, Literal
 from episode_harness import (ActionProposal, SupervisorResponseError,
                              supervisor_observation)
 from supervisor_response import SupervisorResponseDecoder
+from supervisor_retry import RecoverableProviderError
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class ProviderResult:
     status: Literal['response', 'timeout', 'error', 'cancelled', 'busy', 'rejected']
     decision: Any = None
     reason: str | None = None
+    error_class: str | None = None
 
 
 class ProviderRequestError(SupervisorResponseError):
@@ -68,9 +70,9 @@ class BoundedSupervisorProvider:
                     proposal.observation.sequence, proposal.proposal_id)
         cancel = cancellation if cancellation is not None else Event()
 
-        def result(status, decision=None, reason=None):
+        def result(status, decision=None, reason=None, error_class=None):
             return ProviderResult(*identity, started, deadline, monotonic(),
-                                  status, decision, reason)
+                                  status, decision, reason, error_class)
 
         if cancel.is_set():
             return result('cancelled', reason='request cancelled')
@@ -85,6 +87,9 @@ class BoundedSupervisorProvider:
                                          deepcopy(proposal.action))
                 try:
                     response = self._provider(deepcopy(current), deadline, cancel)
+                except RecoverableProviderError as exc:
+                    mailbox.put(('error', None, 'recoverable provider failure', exc.error_class))
+                    return
                 except BaseException:
                     mailbox.put(('error', None, 'provider transport or processing failed'))
                     return
@@ -111,7 +116,9 @@ class BoundedSupervisorProvider:
                 cancel.set()
                 return result('timeout', reason='configured request deadline exceeded')
             try:
-                status, decision, reason = mailbox.get(timeout=min(remaining, .01))
+                entry = mailbox.get(timeout=min(remaining, .01))
+                status, decision, reason = entry[:3]
+                error_class = entry[3] if len(entry) == 4 else None
             except Empty:
                 continue
             if cancel.is_set():
@@ -119,7 +126,7 @@ class BoundedSupervisorProvider:
             if monotonic() >= deadline:
                 cancel.set()
                 return result('timeout', reason='configured request deadline exceeded')
-            return result(status, decision, reason)
+            return result(status, decision, reason, error_class)
 
     def __call__(self, proposal: ActionProposal):
         """Use as run_episode(supervisor_decider=adapter).

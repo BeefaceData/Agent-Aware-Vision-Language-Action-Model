@@ -23,6 +23,7 @@ from episode_harness import (
 from replay_adapters import ReplayRecorder
 from execution_progress import ExecutionJournal
 from intervention_budget import InterventionBudget
+from supervisor_retry import RECOVERABLE_ERRORS
 
 
 class TraceError(ValueError):
@@ -207,6 +208,59 @@ def _require(condition, message):
         raise TraceError(message)
 
 
+def _supervisor_budget(evidence, config, previous, episode_clock):
+    """Validate reservations, including all attempts within a retried decision."""
+    _require(type(evidence) is dict and type(evidence.get('admitted')) is bool and
+             type(evidence.get('attempted')) is int and type(evidence.get('limit')) is int,
+             'invalid supervisor call budget')
+    attempts = evidence.get('retry_attempts') if type(evidence) is dict else None
+    if attempts is None:
+        admitted = previous < config.max_supervisor_calls
+        _require(not (config.supervisor_max_retries and admitted),
+                 'missing supervisor retry attempts')
+        count = previous + int(admitted)
+        _require(evidence == dict(limit=config.max_supervisor_calls, attempted=count,
+                 admitted=admitted, policy=config.supervisor_exhaustion_policy),
+                 'supervisor call budget does not match allowance')
+        return count, not admitted
+    _require(config.supervisor_max_retries > 0 and type(attempts) is list and
+             1 <= len(attempts) <= config.supervisor_max_retries + 1,
+             'invalid supervisor retry count')
+    count = previous + len(attempts)
+    _require(count <= config.max_supervisor_calls, 'supervisor retry exceeds allowance')
+    last = None
+    for attempt in attempts:
+        _require(type(attempt) is dict and set(attempt) ==
+                 {'started_at', 'finished_at', 'status', 'error_class'},
+                 'invalid supervisor retry evidence')
+        start, end = attempt['started_at'], attempt['finished_at']
+        _require(all(type(t) in (int, float) and isfinite(t) for t in (start, end)) and
+                 episode_clock['started_at'] <= start < episode_clock['deadline'] and
+                 start <= end and attempt['status'] in
+                 ('response', 'error', 'timeout', 'cancelled', 'busy', 'rejected') and
+                 (attempt['error_class'] is None or
+                  (attempt['status'] == 'error' and
+                   attempt['error_class'] in RECOVERABLE_ERRORS)),
+                 'invalid supervisor retry timing or disposition')
+        if last is not None:
+            _require(last['status'] == 'error' and
+                     last['error_class'] in config.supervisor_retry_errors and
+                     start >= last['finished_at'] + config.supervisor_retry_delay_seconds,
+                     'ineligible supervisor retry or missing delay')
+        last = attempt
+    admitted = evidence.get('admitted')
+    _require(type(admitted) is bool and evidence == dict(
+        limit=config.max_supervisor_calls, attempted=count, admitted=admitted,
+        policy=config.supervisor_exhaustion_policy, retry_attempts=attempts),
+        'invalid supervisor retry budget')
+    if not admitted:
+        _require(count == config.max_supervisor_calls and
+                 len(attempts) <= config.supervisor_max_retries and
+                 last['status'] == 'error' and last['error_class'] in config.supervisor_retry_errors,
+                 'invalid supervisor retry allowance refusal')
+    return count, not admitted
+
+
 def _load(directory, manifest):
     _require(type(manifest['version']) is int and manifest['version'] == 1,
              'unsupported trace version')
@@ -261,18 +315,17 @@ def _load(directory, manifest):
         _require(record['proposed_action'] is not None, 'proposal missing')
         call_budget = record.get('supervisor_call_budget')
         if call_budget is not None:
-            _require(type(call_budget) is dict and
-                     type(call_budget.get('admitted')) is bool and
-                     type(call_budget.get('attempted')) is int and
-                     type(call_budget.get('limit')) is int,
-                     'invalid supervisor call budget')
-            admitted = supervisor_calls < config.max_supervisor_calls
-            supervisor_calls += int(admitted)
-            supervisor_exhausted = supervisor_exhausted or not admitted
-            _require(call_budget == dict(limit=config.max_supervisor_calls,
-                     attempted=supervisor_calls, admitted=admitted,
-                     policy=config.supervisor_exhaustion_policy),
-                     'supervisor call budget does not match allowance')
+            supervisor_calls, refused = _supervisor_budget(
+                call_budget, config, supervisor_calls, episode_clock)
+            admitted = not refused
+            supervisor_exhausted = supervisor_exhausted or refused
+            attempts = call_budget.get('retry_attempts')
+            if attempts:
+                returned = record.get('supervisor_pass') or record.get('supervisor_abstention')
+                _require(not returned or attempts[-1]['status'] == 'response',
+                         'supervisor response without a returned attempt')
+                _require(attempts[-1]['finished_at'] < episode_clock['deadline'],
+                         'supervisor retry completed outside episode deadline')
             if not admitted:
                 fallback = record.get('fallback')
                 _require(fallback is not None and
@@ -568,12 +621,9 @@ def _load(directory, manifest):
                  'interruption precedes episode wall-clock expiry')
         pending_call = wall_limit['pending_supervisor_call']
         if pending_call is not None:
-            admitted = supervisor_calls < config.max_supervisor_calls
-            supervisor_calls += int(admitted)
-            supervisor_exhausted = supervisor_exhausted or not admitted
-            _require(pending_call == dict(limit=config.max_supervisor_calls,
-                attempted=supervisor_calls, admitted=admitted,
-                policy=config.supervisor_exhaustion_policy), 'invalid pending supervisor call')
+            supervisor_calls, refused = _supervisor_budget(
+                pending_call, config, supervisor_calls, episode_clock)
+            supervisor_exhausted = supervisor_exhausted or refused
         stop = 'wall_clock_limit' if evidence['confirmed'] else 'interruption_failed'
     _require(len(packets) == executed + 1, 'missing or extra observation artifacts')
     _require(stop != 'step_limit' or executed == config.max_steps, 'unfinished trace')
@@ -621,7 +671,9 @@ class RecordedReplay:
         if recorded_config is not None:
             for name in ('max_interventions', 'recovery_attempt_limits', 'recovery_cooldown_actions',
                          'correction_timeout_seconds', 'correction_max_age_seconds',
-                         'max_supervisor_calls', 'supervisor_exhaustion_policy', 'max_episode_seconds'):
+                         'max_supervisor_calls', 'supervisor_exhaustion_policy', 'max_episode_seconds',
+                         'supervisor_max_retries', 'supervisor_retry_delay_seconds',
+                         'supervisor_retry_errors'):
                 if name not in recorded_config:
                     self._recorded_config.pop(name)
 
@@ -751,7 +803,7 @@ class RecordedReplay:
                 if expiry is not None:
                     now = expiry['checked_at']
 
-        outcome = run_episode(config, Policy(), Environment(),
+        outcome = run_episode(replace(config, supervisor_max_retries=0), Policy(), Environment(),
                               recorder if recorder is not None else ReplayRecorder(),
                               clock=lambda: now, action_selector=select,
                               recovery_observer=observe, on_step=after_step)

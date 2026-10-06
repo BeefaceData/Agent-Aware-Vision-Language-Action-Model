@@ -5,6 +5,7 @@ or construction; callers remain responsible for resource and data-use gates.
 """
 
 from base64 import b64encode
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import http.client
@@ -15,6 +16,7 @@ from time import monotonic
 from observation_window import ObservationWindowBuilder, WindowSettings
 from model_usage import ModelReply
 from supervisor_response import WindowedSupervisorResponse
+from supervisor_retry import RecoverableProviderError
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,9 @@ class AnthropicMessagesTransport:
                                         'anthropic-version': '2023-06-01',
                                         'x-api-key': key})
             response = connection.getresponse()
+            if response.status in (429, 503):
+                raise RecoverableProviderError(
+                    'rate_limited' if response.status == 429 else 'unavailable')
             if response.status != 200:
                 raise RuntimeError('provider request failed')
             data = response.read(1_048_577)
@@ -93,6 +98,7 @@ class ChronologicalVlmAdapter:
         self._transport = transport if transport is not None else AnthropicMessagesTransport()
         self._history = None
         self._call_journal = call_journal
+        self._retry_proposal = None
 
     def __call__(self, proposal, deadline, cancellation):
         if cancellation.is_set() or monotonic() >= deadline:
@@ -102,7 +108,9 @@ class ChronologicalVlmAdapter:
             self._history = ObservationWindowBuilder(
                 packet.episode_id, packet.observation.get('task'),
                 WindowSettings(self.settings.max_observations, 0))
-        self._history.append(packet)
+        if self._retry_proposal != proposal:
+            self._history.append(packet)
+        self._retry_proposal = None
         window = self._history.snapshot()
         identity = dict(episode_id=packet.episode_id,
                         observation_sequence=packet.sequence,
@@ -183,9 +191,13 @@ class ChronologicalVlmAdapter:
                 reported = reported or None
             return ModelReply(response, usage=reported)
 
-        response = (send() if self._call_journal is None else
-                    self._call_journal.call(proposal, 'anthropic',
-                                            self.settings.model, send))
+        try:
+            response = (send() if self._call_journal is None else
+                        self._call_journal.call(proposal, 'anthropic',
+                                                self.settings.model, send))
+        except RecoverableProviderError:
+            self._retry_proposal = deepcopy(proposal)
+            raise
         if (type(response) is not dict or response.get('type') != 'message' or
                 response.get('stop_reason') != 'end_turn'):
             raise ValueError('provider did not return a complete message')

@@ -11,7 +11,8 @@ cost none. Reserve before invoking the callback: transport errors, timeouts,
 invalid responses and cancellation do not refund the request. A busy provider
 also consumes a reservation conservatively, even though it sends no new request.
 The existing `BoundedSupervisorProvider` and `ChronologicalVlmAdapter` make at
-most one provider attempt per callback, with no automatic retry. Custom callbacks
+most one provider attempt per callback. The harness can explicitly retry a
+decider using the policy below. Custom callbacks
 must obey that same single-attempt contract; hidden transport retries or model
 calls from an assessment trigger are unsupported. `ModelCallJournal` retains
 actual transport accounting separately, including late completion and unknown
@@ -44,3 +45,38 @@ Fixtures cover mixed scheduling, errors, invalid responses, timeout/busy account
 zero allowance, stop versus guarded fallback, observation callbacks, per-episode
 reset and resealed accounting tampering. They establish software behavior only;
 no paid calls, live benchmark or physical stopping performance is established.
+
+## Explicit supervisor retries
+
+Retries are disabled by default. Declare, for example,
+`supervisor_max_retries=1`, `supervisor_retry_delay_seconds=0.25`,
+`supervisor_retry_errors=('rate_limited', 'unavailable')`, together with
+`max_episode_seconds` and `max_supervisor_calls` in `EpisodeConfig`.
+The retry count is additional attempts per due assessment. Retry-enabled
+episodes require a decider and a finite episode time cap. No delay or retry
+extends the episode deadline or changes the proposal identity or instruction.
+
+Only a completed transport failure explicitly classified with
+`RecoverableProviderError` can qualify. The supplied HTTPS transport classifies
+HTTP 429 as `rate_limited` and 503 as `unavailable`. Other HTTP failures,
+arbitrary exceptions, malformed/invalid control responses, provider timeouts,
+cancellation and busy refusals do not qualify. The bounded provider still makes
+one attempt; it carries the safe class to the harness without raw error text.
+Custom transports must not hide retries or classify decoding failures as
+recoverable. The VLM adapter reuses the same observation history for an identical
+proposal after a recoverable transport error; each transport attempt is journaled.
+
+Every retry reserves another call before invocation. Delays and all attempts
+consume the original episode time allowance. A depleted call allowance invokes
+the declared stop or guarded baseline fallback policy. Retry-count exhaustion
+and noneligible failures use the existing supervisor-error path: guarded fallback
+when configured, otherwise an exceptional attempt with recorded failure evidence.
+Episode-time exhaustion always interrupts; it cannot fall back or dispatch a late
+response. Python workers and remote requests may outlive caller waiting, so actual
+usage/cost remains in the model-call journal and may be unknown until completion.
+
+Decision budgets retain `retry_attempts` with start/end times, status and safe
+error class. Deadline outcomes retain the pending decision's attempts, including
+expiry during the retry delay. Sealed replay checks eligibility, delay, count and
+episode/call limits without contacting a provider. Run
+`python -m unittest discover -s tests -p test_supervisor_retry.py -v`.

@@ -280,7 +280,8 @@ rejected pending the current-scene integration in #108.
 The optional `snapshot={"snapshot_id": ..., "sha256": ...}` records an externally
 declared pin; `None` explicitly means no snapshot was declared. This field does
 not create or verify snapshot membership, development splits or read-only
-evaluation; those remain #102/#103/#109. It is not authorization for a live run.
+evaluation. Use the snapshot API below for creation/integrity; runtime enforcement
+and development split certification remain #103/#109. It is not authorization for a live run.
 
 Without this option, assessments explicitly retain `retrieval="disabled"` and
 empty context/settings; an enabled query with no selected records instead has
@@ -321,6 +322,58 @@ directly to a supervisor or exported without the applicable data-use permission.
 Retrieval policy and evaluation splits remain separate work; these storage
 contracts supply no claims about memory improving task performance.
 
+## Immutable snapshots (#102)
+
+Create a manifest from explicitly permitted development record pins. Supply
+nonempty JSON metadata recording the selection provenance, plus the declared
+retrieval policies and budgets. Model/task/control/configuration metadata and
+outcomes are already bound by each record digest and its verified source evidence.
+
+```python
+from memory_snapshot import MemorySnapshot
+
+snapshot = MemorySnapshot.freeze(snapshot_path, memory,
+    permitted_development_references,
+    metadata={"population": "development", "selection_revision": "review-1"},
+    retrieval={"ranking_policy": "exact-context-failure-v1",
+               "summary_policy": "whole-historical-summary-v1",
+               "max_entries": 4, "max_summary_bytes": 1024,
+               "max_context_bytes": 4096})
+pin = snapshot.reference  # Retain separately in trusted experiment provenance.
+loaded = MemorySnapshot(snapshot_path, expected_reference=pin)
+manifest = loaded.read()
+```
+
+The content-derived `snapshot_id` covers sorted unique record pins, metadata,
+retrieval configuration, schema version and relative store location. `sha256`
+also pins the exact manifest bytes. Input order does not change identity;
+duplicates are rejected. Empty snapshots are supported. Unsupported policies,
+incomplete settings and invalid budgets fail before writing. Creation is
+exclusive, flushed and fsynced; existing snapshots cannot be overwritten by the
+API. Returned references and documents are detached copies.
+
+Construction and every `read()` verify the manifest against the external pin,
+recompute its identity, and verify **every** member through `InterventionMemory.read`,
+including sealed replay payloads. Missing/changed records or their source evidence
+raise `TraceError` identifying the affected record. Missing/changed manifests
+also fail closed. Added store records do not enter snapshot membership.
+
+This is a manifest over retained evidence, not a self-contained archive. Preserve
+the snapshot, store, and all record-referenced evidence in their relative layout;
+moving their common parent preserves validity. Only evidence bound by the memory
+record and sealed trace contract is covered, not arbitrary auxiliary files in
+the directories. Hashes detect drift against a trusted pin; they do not establish
+authenticity or protect against filesystem owners replacing both artifacts and
+pins. An interrupted write may leave an invalid file, which loading rejects.
+
+To reproduce a query, use `manifest["records"]` with the store relative to the
+snapshot directory and its three `max_*` settings. Supply the current task,
+control, progress and failure-category query separately. This API records and
+validates configuration; it does not automatically wire a runtime retriever,
+prevent writes to the underlying store (#103), or certify development-only
+selection (#109). `DecisionMemory` still treats a supplied snapshot pin as a
+declaration. No execution policy, frozen prompt or model weights are changed.
+
 Run the public offline contracts:
 
 ```powershell
@@ -329,6 +382,7 @@ python -m unittest discover -s tests -p test_memory_compatibility.py -v
 python -m unittest discover -s tests -p test_memory_ranking.py -v
 python -m unittest discover -s tests -p test_memory_context.py -v
 python -m unittest discover -s tests -p test_decision_memory.py -v
+python -m unittest discover -s tests -p test_memory_snapshot.py -v
 ```
 
 These tests cover completed recovery followed by task failure, failed local

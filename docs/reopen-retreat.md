@@ -178,6 +178,32 @@ Separate fixtures verify immediate abort, failed dispatch, independent tool
 counts, adjustments sharing the cap, new-episode reset and corrupted accounting.
 All evidence is synthetic and establishes execution behavior only.
 
+## Matched action horizon
+
+`EpisodeConfig.max_steps` is the same environment-action allowance for baseline
+and supervised attempts. An adjusted action replaces the policy proposal and
+costs one action. A two-command recovery costs two actions, even though it is
+one intervention. Policy proposals, local checks and resume calls do not add
+environment actions. A terminal result or abort counts only commands already
+executed; the remaining recovery commands are never dispatched.
+
+The entire recovery must fit before its first command is dispatched. With one
+action remaining, a two-command recovery is rejected without consuming an
+action or intervention attempt. If recovery finishes on the last allowed
+action, the episode ends with `step_limit` unless that action reports success,
+termination, truncation or a recovery abort. No resume or new policy inference
+occurs after exhaustion. Local recovery completion alone is not task success.
+
+The public contract checks compare baseline, numerical adjustments and recovery
+under the same horizon, including consecutive recoveries, insufficient remaining
+budget, terminal interruption and sealed complete-episode replay:
+
+```powershell
+python -m unittest discover -s tests -p test_corrective_action_horizon.py -v
+```
+
+These synthetic checks establish accounting behavior, not measured task gains.
+
 ## Recovery cooldown
 
 `EpisodeConfig.recovery_cooldown_actions` declares a nonnegative integer count

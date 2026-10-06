@@ -33,6 +33,11 @@ class EpisodeConfig:
     intervention. Unlisted tools have zero attempts; zero disables a budget.
     Recovery cooldown counts accepted baseline actions after local completion;
     zero disables cooldown, and early correction requests stop the episode.
+
+    max_steps is the shared action horizon: a baseline or adjusted command
+    costs one action, and each recovery command costs one action. Recovery
+    admission requires room for the entire sequence; unused commands after
+    terminal outcomes or aborts are not counted as executed actions.
     """
     seed: int
     max_steps: int

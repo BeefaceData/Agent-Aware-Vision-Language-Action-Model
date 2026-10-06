@@ -243,6 +243,8 @@ def _load(directory, manifest):
         _require(record['proposal_id'] == f'{episode_id}:{index + 1}', 'foreign proposal')
         _require(record['proposed_action'] is not None, 'proposal missing')
         recovery = record.get('recovery')
+        expiry = record.get('correction_expiry')
+        expired = expiry is not None and expiry.get('valid') is False
         previous = decisions[index - 1]['action_record'].get('recovery') if index else None
         pending = (previous is not None and
                    previous['check']['status'] == 'continuing' and
@@ -290,7 +292,8 @@ def _load(directory, manifest):
                 raise TraceError('invalid recovery check') from exc
             _require(check == expected, 'recovery check does not match evidence')
         else:
-            _require(not pending, 'missing recovery continuation')
+            _require(not pending or (expired and record['disposition'] == 'rejected'),
+                     'missing recovery continuation')
         if record['disposition'] == 'overridden' and not pending:
             _require(cooldown_remaining == 0, 'intervention during recovery cooldown')
         reason = record.get('rejection_reason')
@@ -311,6 +314,8 @@ def _load(directory, manifest):
                                decisions[index - 1]['action_record'].get('intervention_budget'))
         elif record['disposition'] == 'overridden':
             expected_budget = budget.admit('override')
+        elif pending and expired:
+            expected_budget = decisions[index - 1]['action_record'].get('intervention_budget')
         elif accounting is not None:
             _require(type(accounting) is dict and record['disposition'] == 'rejected' and
                      accounting.get('kind') in ('recovery', 'override') and
@@ -326,6 +331,45 @@ def _load(directory, manifest):
             _require(expected_budget['admitted'], 'execution exceeds intervention limits')
         if budget_required or accounting is not None:
             _require(_json(accounting) == _json(expected_budget), 'invalid intervention accounting')
+        if config.correction_timeout_seconds is not None and (
+                record['disposition'] == 'overridden' or
+                record.get('rejection_reason') in (
+                    'correction request expired', 'correction observation too old')):
+            _require(expiry is not None, 'missing correction expiry evidence')
+        if expiry is not None:
+            from correction_expiry import check_expiry
+            _require(config.correction_timeout_seconds is not None,
+                     'expiry without declared limits')
+            try:
+                expected_expiry = check_expiry(config, expiry['requested_at'],
+                    expiry['captured_at'], expiry['source_proposal_id'], expiry['checked_at'])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise TraceError('invalid correction expiry evidence') from exc
+            _require(expiry == expected_expiry, 'correction expiry does not match limits')
+            if pending:
+                previous_expiry = decisions[index - 1]['action_record'].get('correction_expiry')
+                _require(previous_expiry is not None and all(
+                    expiry[key] == previous_expiry[key] for key in
+                    ('requested_at', 'captured_at', 'deadline', 'source_proposal_id')),
+                    'recovery renewed correction validity')
+                _require(expiry['checked_at'] >= previous_expiry['checked_at'],
+                         'recovery expiry clock moved backwards')
+            else:
+                _require(expiry['source_proposal_id'] == record['proposal_id'] and
+                         expiry['captured_at'] == packets[index].captured_monotonic,
+                         'expiry does not reference source proposal')
+            if expired:
+                _require(record['disposition'] == 'rejected' and
+                         record['rejection_reason'] == expiry['reason'],
+                         'expired correction dispatched')
+            elif record['disposition'] == 'rejected':
+                _require(accounting is not None and not accounting['admitted'],
+                         'valid expiry rejection lacks budget refusal')
+            else:
+                _require(record['disposition'] == 'overridden' and
+                         row['timing']['execution_started_at'] == expiry['checked_at'] and
+                         (pending or row['timing']['request_at'] == expiry['requested_at']),
+                         'expiry check is not at correction dispatch')
         response = record.get('supervisor_pass')
         if response is not None:
             _require(type(response) is dict and
@@ -389,6 +433,9 @@ def _load(directory, manifest):
             except (ValueError, TypeError, KeyError) as exc:
                 raise TraceError('invalid interruption evidence') from exc
             _require(record['disposition'] == 'rejected', 'interruption without refusal')
+            if expiry is not None:
+                _require(interruption['requested_at'] >= expiry['checked_at'],
+                         'interruption precedes expiry check')
             if fallback is not None:
                 _require(interruption['requested_at'] >= fallback['checked_at'],
                          'interruption precedes fallback check')
@@ -469,7 +516,8 @@ class RecordedReplay:
         # Historical annotation fingerprints include pre-existing config defaults,
         # but must not acquire fields introduced after the trace was sealed.
         if recorded_config is not None:
-            for name in ('max_interventions', 'recovery_attempt_limits', 'recovery_cooldown_actions'):
+            for name in ('max_interventions', 'recovery_attempt_limits', 'recovery_cooldown_actions',
+                         'correction_timeout_seconds', 'correction_max_age_seconds'):
                 if name not in recorded_config:
                     self._recorded_config.pop(name)
 
@@ -508,6 +556,10 @@ class RecordedReplay:
                          'replay resume observation diverged')
 
             def act(self, packet):
+                nonlocal now
+                expiry = decisions[packet.sequence]['action_record'].get('correction_expiry')
+                if expiry is not None:
+                    now = expiry['requested_at']
                 _require(packet.observation == packets[packet.sequence].observation,
                          'replay observation diverged')
                 return deepcopy(decisions[packet.sequence]['action_record']['proposed_action'])
@@ -546,7 +598,10 @@ class RecordedReplay:
                                           episode_id=self.episode_id), **row['result'])
 
         def select(proposal):
+            nonlocal now
             record = decisions[proposal.observation.sequence]['action_record']
+            if record.get('correction_expiry') is not None:
+                now = record['correction_expiry']['checked_at']
             if record.get('recovery') is not None:
                 data = deepcopy(record['recovery']['sequence'])
                 data['request']['episode_id'] = proposal.observation.episode_id
@@ -568,9 +623,17 @@ class RecordedReplay:
                 data['episode_id'] = packet.episode_id
             return RecoveryAssessment(**data)
 
+        def after_step(step, result):
+            nonlocal now
+            if step < len(decisions):
+                expiry = decisions[step]['action_record'].get('correction_expiry')
+                if expiry is not None:
+                    now = expiry['checked_at']
+
         outcome = run_episode(config, Policy(), Environment(),
                               recorder if recorder is not None else ReplayRecorder(),
-                              clock=lambda: now, action_selector=select, recovery_observer=observe)
+                              clock=lambda: now, action_selector=select,
+                              recovery_observer=observe, on_step=after_step)
         _require(_summary(outcome) == self._outcome, 'replayed outcome diverged')
         return outcome
 

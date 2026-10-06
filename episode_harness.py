@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from temporal_diagnosis import valid_temporal_diagnosis
 from intervention_budget import InterventionBudget
+from correction_expiry import check_expiry
 
 if TYPE_CHECKING:
     from baseline_fallback import BaselineFallback
@@ -39,6 +40,10 @@ class EpisodeConfig:
     costs one action, and each recovery command costs one action. Recovery
     admission requires room for the entire sequence; unused commands after
     terminal outcomes or aborts are not counted as executed actions.
+
+    Declare both correction validity limits for expiry-enforced operation.
+    None/None preserves the legacy trusted-selector/replay interface; it is
+    not an expiry-ready active configuration. No physical limits are inferred.
     """
     seed: int
     max_steps: int
@@ -46,6 +51,8 @@ class EpisodeConfig:
     max_interventions: int | None = None
     recovery_attempt_limits: tuple[tuple[str, int], ...] = (('reopen_and_retreat', 1),)
     recovery_cooldown_actions: int = 0
+    correction_timeout_seconds: float | None = None
+    correction_max_age_seconds: float | None = None
 
     def __post_init__(self):
         if (type(self.supervisor_interval_actions) is not int or
@@ -59,6 +66,11 @@ class EpisodeConfig:
             raise ValueError('max_interventions must be a nonnegative integer')
         if type(self.recovery_cooldown_actions) is not int or self.recovery_cooldown_actions < 0:
             raise ValueError('recovery_cooldown_actions must be a nonnegative integer')
+        expiry_limits = (self.correction_timeout_seconds, self.correction_max_age_seconds)
+        if expiry_limits != (None, None) and any(
+                type(value) not in (int, float) or not isfinite(value) or value <= 0
+                for value in expiry_limits):
+            raise ValueError('correction expiry requires two positive finite limits')
         limits = self.recovery_attempt_limits
         if (type(limits) not in (tuple, list) or
                 any(type(item) not in (tuple, list) or len(item) != 2 or
@@ -747,6 +759,7 @@ class ActionRecord:
     fallback: dict | None = None
     interruption: dict | None = None
     dispatch: dict | None = None
+    correction_expiry: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -1076,6 +1089,7 @@ def run_episode(
         recovery_index = 0
         budget = InterventionBudget(config.max_interventions, config.recovery_attempt_limits)
         recovery_budget = None
+        recovery_validity = None
         cooldown_remaining = 0
 
         for step in range(1, config.max_steps + 1):
@@ -1092,6 +1106,8 @@ def run_episode(
             abstention_response = None
             fallback_cause = None
             fallback = None
+            expiry = None
+            continuing_recovery = recovery_sequence is not None
             proposal_for_supervisor = (deepcopy(proposed_action)
                                        if supervisor is not None or window_supervisor is not None
                                        else None)
@@ -1209,16 +1225,7 @@ def run_episode(
                         if len(plan.actions) > config.max_steps - step + 1:
                             resolution = ActionResolution('reject', reason='insufficient recovery action horizon')
                         else:
-                            budget_record = budget.admit('recovery', plan.request['tool_name'])
-                            if not budget_record['admitted']:
-                                resolution = ActionResolution('reject', reason=budget_record['reason'])
-                            else:
-                                recovery_sequence, recovery_index = plan, 0
-                                recovery_budget = budget_record
-                    elif resolution.kind == 'override':
-                        budget_record = budget.admit('override')
-                        if not budget_record['admitted']:
-                            resolution = ActionResolution('reject', reason=budget_record['reason'])
+                            recovery_sequence, recovery_index = plan, 0
                 except BaseException as exc:
                     selection_finished_at = clock()
                     cumulative_wait += selection_finished_at - response_at
@@ -1247,7 +1254,36 @@ def run_episode(
                 response_at = checked_at
                 if fallback['selected'] == 'refuse':
                     resolution = ActionResolution('reject', reason=fallback['reason'])
+            # Prepare detached transport data before the final clock sample. No
+            # extension callback or queue wait may sit between this gate and step.
+            selected_action = deepcopy(recovery_sequence.actions[recovery_index]
+                                       if recovery_sequence is not None else
+                                       proposed_action if resolution.kind == 'pass' else resolution.action)
+            recovery_evidence = (dict(sequence=asdict(recovery_sequence), action_index=recovery_index)
+                                 if recovery_sequence is not None else None)
+            transport_action = deepcopy(selected_action)
+            execution_started_at = clock()
+            if resolution.kind in ('override', 'recovery'):
+                if config.correction_timeout_seconds is not None:
+                    if not continuing_recovery:
+                        validity = (request_at, observation.captured_monotonic, proposal_id)
+                        if resolution.kind == 'recovery':
+                            recovery_validity = validity
+                    else:
+                        validity = recovery_validity
+                    expiry = check_expiry(config, *validity, execution_started_at)
+                    if not expiry['valid']:
+                        resolution = ActionResolution('reject', reason=expiry['reason'])
+                if resolution.kind != 'reject' and not continuing_recovery:
+                    budget_record = budget.admit(resolution.kind,
+                        recovery_sequence.request['tool_name'] if recovery_sequence is not None else None)
+                    if not budget_record['admitted']:
+                        resolution = ActionResolution('reject', reason=budget_record['reason'])
+                    elif recovery_sequence is not None:
+                        recovery_budget = budget_record
             if resolution.kind == 'reject':
+                cumulative_wait += execution_started_at - response_at
+                response_at = execution_started_at
                 interruption = interrupt(environment, interruption_contract,
                     ActionProposal(proposal_id, observation, proposed_action),
                     resolution.reason, clock)
@@ -1261,19 +1297,13 @@ def run_episode(
                                      intervention_budget=deepcopy(budget_record),
                                      supervisor_abstention=abstention_response,
                                      fallback=deepcopy(fallback),
-                                     interruption=interruption)))
+                                     interruption=interruption, correction_expiry=expiry)))
                 stop_reason = ('proposal_rejected' if interruption['confirmed']
                                else 'interruption_failed')
                 break
-            recovery_evidence = (dict(sequence=asdict(recovery_sequence), action_index=recovery_index)
-                                 if recovery_sequence is not None else None)
-            selected_action = deepcopy(recovery_sequence.actions[recovery_index]
-                                       if recovery_sequence is not None else
-                                       proposed_action if resolution.kind == 'pass' else resolution.action)
             disposition = 'unmodified' if resolution.kind == 'pass' else 'overridden'
-            execution_started_at = clock()
             try:
-                result = environment.step(deepcopy(selected_action))
+                result = environment.step(transport_action)
                 if not isinstance(result, StepResult):
                     from execution_failure import ExecutionFailure
                     raise ExecutionFailure('adapter returned no valid step acknowledgement')
@@ -1303,7 +1333,7 @@ def run_episode(
                     None, None, 'unconfirmed', supervisor_pass=pass_response,
                     supervisor_abstention=abstention_response, recovery=recovery_evidence,
                     intervention_budget=deepcopy(budget_record), fallback=deepcopy(fallback),
-                    interruption=interruption,
+                    interruption=interruption, correction_expiry=expiry,
                     dispatch=dict(attempted=True,
                                   sent=exc.sent if isinstance(exc, ExecutionFailure) else None,
                                   acknowledged=False, error_type=type(exc).__name__))
@@ -1331,7 +1361,7 @@ def run_episode(
                 supervisor_pass=pass_response,
                 supervisor_abstention=abstention_response,
                 recovery=recovery_evidence, intervention_budget=deepcopy(budget_record),
-                fallback=deepcopy(fallback)))
+                fallback=deepcopy(fallback), correction_expiry=expiry))
             acknowledged_actions.append(deepcopy(result.action_record))
             reward_sum += result.reward
             steps = step

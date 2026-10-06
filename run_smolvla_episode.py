@@ -31,6 +31,7 @@ from baseline_environment import capture_environment
 from attempt_identity import AttemptIdentityRecorder, reserve_attempt
 from camera_evidence import CameraEvidenceRecorder
 from artifact_finalization import ArtifactResources
+from artifact_bundle import seal_artifact_bundle
 from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon, read_native_capabilities
 from action_capabilities import libero_native_capabilities
 from libero_initial_state import select_initial_state
@@ -398,6 +399,14 @@ def main():
                 print('Result:', out.resolve() / 'result.json', flush=True)
     if summary['artifact_status'] != 'completed':
         raise RuntimeError('Episode artifacts incomplete; see result.json diagnostics')
+    try:
+        seal_artifact_bundle(out)
+    except Exception as exc:
+        summary.update(status='error', artifact_status='incomplete')
+        summary['artifact_diagnostics'].append(f'bundle sealing: {type(exc).__name__}: {exc}')
+        (out / 'result.json').write_text(
+            json.dumps(summary, indent=2, default=evidence_json), encoding='utf-8')
+        raise
     print(f"Finished: success={summary['success']}, steps={summary['steps']}", flush=True)
     print('Videos:', summary['video_path'], summary['wrist_video_path'], flush=True)
 

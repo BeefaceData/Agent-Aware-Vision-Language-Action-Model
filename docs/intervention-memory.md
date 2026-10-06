@@ -444,6 +444,66 @@ the same adapter, captured provider history, sealed replay and forbidden
 persistent-access probes. These are offline synthetic contracts, not evidence
 of a performance improvement.
 
+## Post-episode adaptation admission (#105)
+
+`AdaptationMemory` is a separate experiment mode. Construct it from an explicitly
+declared, externally pinned starting snapshot and the same four-field query used
+by `FixedMemory`, then pass it as the adapter's `decision_memory`:
+
+```python
+from adaptation_memory import AdaptationMemory
+
+selection = AdaptationMemory(snapshot_path, expected_reference=pin, query=query)
+# Pass decision_memory=selection to ChronologicalVlmAdapter.
+# Its first proposal begins the episode automatically. A host without a
+# supervisor decision may instead call selection.begin_episode(episode_id).
+
+# After run_episode returns and the trace is successfully sealed:
+record_pin = memory.append(trace=trace_pin, attempt=attempt_pin,
+                           supervisor=supervisor_pin, context=context_pin)
+lineage = selection.complete_episode(
+    trace=trace_pin, references=[record_pin], snapshot_path=next_snapshot_path)
+next_pin = lineage["after"]  # Retain separately with the experiment provenance.
+```
+
+`trace_pin` is `(manifest_path, expected_sha256)`. Admission verifies the sealed
+replay, its active episode identity, every selected record and its source trace.
+Outcomes come from verified evidence; no outcome supplied by the caller is
+accepted. Failures and uncertain outcomes remain eligible. All selected records
+must already exist in the starting snapshot's store, written through the separate
+`InterventionMemory` API. Recording them does not itself make them retrievable.
+
+The episode retrieves only its pre-episode snapshot, even after new evidence is
+written to that store. Starting another episode before completion is rejected,
+as is starting an episode whose own records are in the current snapshot.
+Missing/unsealed, changed or foreign evidence cannot advance membership. Failed
+validation or snapshot publication preserves the previous retrieval view.
+The API serializes preparation and admission; the host still owns the serial
+episode stream and must wait for execution and recording to finish.
+
+Each completion exclusively creates a new immutable snapshot containing the old
+membership plus the explicitly admitted pins, with unchanged retrieval settings.
+Its metadata records adaptation mode, the session's declared starting snapshot,
+the before pin, episode ID, sealed trace digest and admitted pins. The returned
+lineage also contains the after pin. An empty `references=[]` records a completed
+exposure without adding experience. Preserve every snapshot and its external pin
+to follow the lineage. Restart by explicitly loading the latest retained snapshot;
+it becomes that session's declared starting point. No directory scan or automatic
+restart recovery is performed. Duplicate admission/retry recovery is separate
+work (#106); partial files from interrupted writes must not be treated as sealed.
+
+This policy is an API boundary, not filesystem access control. Split permissions
+and live experiment gates remain the host's responsibility. Fixed evaluation
+continues to use `FixedMemory`; never report an adaptively updated snapshot as
+the original fixed condition. Memory-informed active correction validation remains
+#108. No prompts or model weights change, and these tests make no performance claim.
+
+`python -m unittest discover -s tests -p test_adaptation_memory.py -v` exercises
+unsuccessful and successful complete intervention replay, pending-write isolation,
+next-episode retrieval, immutable lineage, explicit restart, foreign/corrupt
+evidence rejection and failed snapshot publication. Complete provider pass and
+abstention replays compare supplied context with recorded snapshot provenance.
+
 Run the public offline contracts:
 
 ```powershell

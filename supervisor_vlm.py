@@ -20,6 +20,7 @@ from supervisor_response import WindowedSupervisorResponse
 from supervisor_retry import RecoverableProviderError
 from decision_memory import DecisionMemory, NoMemory
 from fixed_memory import FixedMemory
+from adaptation_memory import AdaptationMemory
 
 
 PROVIDER_API_VERSION = '2023-06-01'
@@ -159,8 +160,9 @@ class ChronologicalVlmAdapter:
         self._history = None
         self._call_journal = call_journal
         self._retry_proposal = None
-        if decision_memory is not None and type(decision_memory) not in (DecisionMemory, FixedMemory, NoMemory):
-            raise ValueError('DecisionMemory, FixedMemory or NoMemory required')
+        if decision_memory is not None and type(decision_memory) not in (
+                DecisionMemory, FixedMemory, NoMemory, AdaptationMemory):
+            raise ValueError('DecisionMemory, FixedMemory, NoMemory or AdaptationMemory required')
         self._decision_memory = NoMemory() if decision_memory is None else decision_memory
 
     def __call__(self, proposal, deadline, cancellation):

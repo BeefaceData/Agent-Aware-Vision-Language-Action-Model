@@ -746,6 +746,7 @@ class ActionRecord:
     intervention_budget: dict | None = None
     fallback: dict | None = None
     interruption: dict | None = None
+    dispatch: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -828,6 +829,7 @@ class EpisodeInterruption:
     task_status: str = 'unknown'
     artifact_status: str = 'incomplete'
     pre_start_failure: PreStartFailure | None = None
+    failed_action: ActionRecord | None = None
 
 
 class PolicyAdapter(Protocol):
@@ -1026,6 +1028,7 @@ def run_episode(
     reward_sum = 0.0
     steps = 0
     interruption_diagnostics = []
+    failed_action = None
     task_status = 'unknown'
     startup_stage = 'policy_reset'
     policy_reset_completed = False
@@ -1262,24 +1265,46 @@ def run_episode(
             execution_started_at = clock()
             try:
                 result = environment.step(deepcopy(selected_action))
+                if not isinstance(result, StepResult):
+                    from execution_failure import ExecutionFailure
+                    raise ExecutionFailure('adapter returned no valid step acknowledgement')
             except BaseException as exc:
                 execution_finished_at = clock()
+                from execution_failure import ExecutionFailure
+                # Baseline adapters may omit this capability. Never invent a stop.
+                try:
+                    failure_contract = interruption_contract or require_interruption(environment)
+                except ValueError:
+                    interruption = None
+                    interruption_diagnostics.append('controller interruption unavailable')
+                else:
+                    try:
+                        interruption = interrupt(environment, failure_contract,
+                            ActionProposal(proposal_id, observation, proposed_action),
+                            'execution acknowledgement unavailable', clock)
+                    except BaseException as stop_error:
+                        interruption = None
+                        interruption_diagnostics.append(
+                            'controller interruption raised ' + type(stop_error).__name__)
                 if recovery_evidence is not None:
                     from recovery_monitor import aborted
                     recovery_evidence['check'] = aborted('controller_failure', recovery_index)
+                failed_action = ActionRecord(
+                    proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
+                    None, None, 'unconfirmed', supervisor_pass=pass_response,
+                    supervisor_abstention=abstention_response, recovery=recovery_evidence,
+                    intervention_budget=deepcopy(budget_record), fallback=deepcopy(fallback),
+                    interruption=interruption,
+                    dispatch=dict(attempted=True,
+                                  sent=exc.sent if isinstance(exc, ExecutionFailure) else None,
+                                  acknowledged=False, error_type=type(exc).__name__))
                 record_failure(
                     step, observation, deepcopy(proposed_action),
                     StepFailure('execution', type(exc).__name__, FailedStepTiming(
                         observation.captured_monotonic, request_at, response_at,
                         response_at, execution_started_at, execution_finished_at,
                         cumulative_wait),
-                        ActionRecord(proposal_id, deepcopy(proposed_action),
-                                     deepcopy(selected_action), None, None,
-                                     'unconfirmed', supervisor_pass=pass_response,
-                                     supervisor_abstention=abstention_response,
-                                     recovery=recovery_evidence,
-                                     intervention_budget=deepcopy(budget_record),
-                                     fallback=deepcopy(fallback))))
+                        deepcopy(failed_action)))
                 raise
             execution_finished_at = clock()
             timing = StepTiming(observation.captured_monotonic, request_at,
@@ -1377,7 +1402,8 @@ def run_episode(
             tuple(acknowledged_actions), tuple(interruption_diagnostics), task_status,
             pre_start_failure=(PreStartFailure(
                 startup_stage, config.seed, policy_reset_completed,
-                environment_reset_completed) if startup_stage is not None else None))
+                environment_reset_completed) if startup_stage is not None else None),
+            failed_action=deepcopy(failed_action))
         raise
 
     rollout_seconds = clock() - rollout_start

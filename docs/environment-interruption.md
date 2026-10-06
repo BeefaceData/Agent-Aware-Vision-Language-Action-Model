@@ -35,7 +35,7 @@ establish that a controller was stopped.
 its synchronous simulation advancing only through `step`. Neither issues a
 zero command, nor claims a physical stop. The client adapter must implement its
 own documented controller operation (#158); LIBERO's contract is not suitable
-for a continuously running robot. Execution transport failure handling is #81;
+for a continuously running robot. Execution transport failures use the path below;
 recovery abort and operational wall-clock stop integration have their own
 runtime contracts and are not established by this refusal path.
 
@@ -50,3 +50,39 @@ unconfirmed acknowledgements and transport errors, preflight rejection, LIBERO
 adapter dispatch disabling, and successful replay or rejection of tampered
 sealed evidence. They establish software behavior, not physical safety or task
 performance.
+
+## Failed execution acknowledgements
+
+When `environment.step` raises or returns no `StepResult`, the harness invokes
+the declared interruption once, before recording the failure. No retry, fallback,
+further dispatch or resume follows. The original exception is re-raised with
+`episode_interruption.failed_action`; this detached evidence survives recorder
+failure. A failed interruption never replaces the original execution error.
+Legacy baseline adapters without an interruption contract retain an explicit
+`controller interruption unavailable` diagnostic; no stop is claimed.
+
+Adapters may raise `execution_failure.ExecutionFailure(sent=True/False/None)`.
+True means the adapter established transmission, False means it established no
+transmission, and None means unknown. Ordinary exceptions and missing results
+leave transmission unknown. This receipt is transport evidence, not physical
+execution evidence. The failure record retains proposed and selected actions,
+dispatch attempt, transmission certainty, absent execution acknowledgement, and
+the separate interruption acknowledgement. Private exception messages are omitted.
+
+Only returned step results count toward acknowledged action totals and rewards.
+A failed second call after one acknowledged action therefore retains one action,
+the prior reward, and unknown task status, even if transmission was confirmed.
+The physical action count may be greater and is unknown; a confirmed stop does
+not retroactively confirm the command. As before, malformed/stale observation
+packets in a returned StepResult follow the observation-validation contract.
+
+Controller-fault episodes retain partial trace files without a completion seal.
+They cannot be loaded as successful sealed replay. The deterministic whole-attempt
+replay fixtures exercise startup, one acknowledged action, a controller fault,
+interruption and finalization through public interfaces:
+
+```powershell
+python -m unittest discover -s tests -p test_execution_failure.py -v
+```
+
+These fixtures establish failure accounting only, not physical stopping behavior.

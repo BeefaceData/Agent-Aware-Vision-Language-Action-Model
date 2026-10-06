@@ -274,8 +274,9 @@ pass/abstention assessments. It contains selected IDs/digests and whole summarie
 the exact context string and its digest, query and budget/ranking settings,
 permitted references, exclusions and omissions. The model cannot supply this
 metadata through response JSON. Audit settings and raw evaluator records are
-never appended to model input. Memory-informed active correction requests remain
-rejected pending the current-scene integration in #108.
+never appended to model input. The observation-only response boundary rejects
+memory-informed active correction requests; the explicit host integration is
+documented under #108 below.
 
 The optional `snapshot={"snapshot_id": ..., "sha256": ...}` records an externally
 declared pin; `None` explicitly means no snapshot was declared. This field does
@@ -562,14 +563,62 @@ passes the host's baseline fallback guard. Without that guard, even a successful
 historical recovery cannot prevent rejection and the declared environment stop.
 Historical context cannot satisfy an unavailable current observation reference.
 Both recovery and adjustment requests with enabled retrieval remain rejected by
-the response boundary until current-scene correction integration (#108); these
+the observation-only response boundary; these
 tests do not enable or claim to validate active memory-informed corrections.
+The explicit host executor below supplies that separate integration boundary;
+the observation-only provider path continues to reject correction responses.
 
 Run the conflict fixture with:
 
 ```powershell
 python -m unittest discover -s tests -p test_memory_conflicts.py -v
 ```
+
+## Current-scene correction validation (#108)
+
+`MemoryCorrectionExecutor` composes `DecisionMemory`, `FixedMemory` or
+`AdaptationMemory` with a configured `SingleActionAdjustment` or
+`ReopenRetreatExecutor`. Use its `resolve` method through the harness's trusted
+`action_selector` seam. Retrieval supplies detached advice to
+`request_for(current_proposal, memory_context)`; the callback returns a new
+request or `None`. The executor never copies an old identity onto the current
+proposal, transforms frames, or converts a historical outcome into permission.
+
+Configure `required_sources` with sensor age limits and a trusted
+`scene_check(current_proposal, proposed_resolution)` callback. Both callbacks
+receive only deployable current observation data. The scene check must return
+literal `True` for the complete composed action or recovery sequence using
+current geometry; missing, uncertain or negative checks reject. The callback is
+a host integration contract, not an implemented perception algorithm or a
+model-authored safety claim. Memory is not supplied to this geometry check.
+The current request still passes the existing identity, target, frame, unit,
+residual and final native-action bounds. Recovery also requires its existing
+current `RecoverySceneAssessment`, reviewed envelope and clearance checks.
+
+The harness retains `ActionResolution.memory_context` as
+`ActionRecord.correction_memory` on each selection, including rejection,
+subsequent budget/expiry refusal and failed dispatch. For a multi-action recovery,
+the initiating decision carries the context; the subsequent action references
+the same recovery request. Sealed replay validates context integrity and keeps
+the selected record pins, summaries, query and settings for inspection. Existing
+bundles without this optional field remain readable. Rejected geometry may
+consume the bounded executor's request identity; use a fresh proposal rather
+than retrying the same command.
+
+This is the explicit host correction path, not a change to the frozen VLM
+prompt or its observation-only decoder. `request_for` is not a provider runner:
+do not hide live inference there and bypass the supervisor call/resource gates.
+Live operation still requires reviewed scene assessment, correction readiness,
+episode expiry/budget configuration and the PRD's resource authorization.
+
+`python -m unittest discover -s tests -p test_memory_correction.py -v` runs
+synthetic successful and rejected complete episodes. A relevant historical
+record remains selected while a numerically legal residual produces an illegal
+current final action and is rejected before dispatch. Other cases cover stale
+historical identity, unsupported frame/target/units, residual bounds, unknown
+geometry, stale sensing, intervention limits, recovery clearance/envelope and
+tampered replay memory. These establish interface behavior, not physical safety
+or measured task improvement.
 
 Run the public offline contracts:
 

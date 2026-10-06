@@ -480,6 +480,11 @@ def _load(directory, manifest):
                          (pending or row['timing']['request_at'] == expiry['requested_at']),
                          'expiry check is not at correction dispatch')
         response = record.get('supervisor_pass')
+        if record.get('correction_memory') is not None:
+            try:
+                validate_memory(record['correction_memory'])
+            except ValueError as exc:
+                raise TraceError('invalid correction memory: ' + str(exc)) from exc
         for assessment in (response, record.get('supervisor_abstention')):
             if type(assessment) is dict and 'memory_context' in assessment:
                 try:

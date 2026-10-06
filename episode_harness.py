@@ -23,7 +23,7 @@ from intervention_budget import InterventionBudget
 from correction_expiry import check_expiry
 from episode_deadline import EpisodeDeadline, EpisodeDeadlineExceeded, workers_busy
 from supervisor_retry import RECOVERABLE_ERRORS
-from decision_memory import disabled_memory
+from decision_memory import disabled_memory, validate_memory
 
 if TYPE_CHECKING:
     from baseline_fallback import BaselineFallback
@@ -775,6 +775,7 @@ class ActionResolution:
     reason: str | None = None
     recovery: RecoverySequence | None = None
     source_identity: tuple[str, int, str] | None = None
+    memory_context: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -814,6 +815,7 @@ class ActionRecord:
     dispatch: dict | None = None
     correction_expiry: dict | None = None
     supervisor_call_budget: dict | None = None
+    correction_memory: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -1182,6 +1184,7 @@ def run_episode(
 
         for step in range(1, config.max_steps + 1):
             call_budget = None
+            correction_memory = None
             deadline.check('policy')
             instruction_guard.verify(observation)
             if frozen_contract is not None:
@@ -1346,6 +1349,9 @@ def run_episode(
                 try:
                     resolution = deadline.call('selection', action_selector, ActionProposal(
                         proposal_id, observation, deepcopy(proposed_action)))
+                    if isinstance(resolution, ActionResolution) and resolution.memory_context is not None:
+                        validate_memory(resolution.memory_context)
+                        correction_memory = deepcopy(resolution.memory_context)
                     if not isinstance(resolution, ActionResolution) or resolution.kind not in (
                         'pass', 'override', 'reject', 'recovery'
                     ) or (resolution.kind == 'reject' and not resolution.reason) or (
@@ -1465,6 +1471,7 @@ def run_episode(
                                      None, None, 'rejected', resolution.reason,
                                      intervention_budget=deepcopy(budget_record),
                                      supervisor_abstention=abstention_response,
+                                     correction_memory=correction_memory,
                                      fallback=deepcopy(fallback),
                                      interruption=interruption, correction_expiry=expiry,
                                      supervisor_call_budget=deepcopy(call_budget))))
@@ -1502,6 +1509,7 @@ def run_episode(
                 failed_action = ActionRecord(
                     proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
                     None, None, 'unconfirmed', supervisor_pass=pass_response,
+                    correction_memory=correction_memory,
                     supervisor_abstention=abstention_response, recovery=recovery_evidence,
                     intervention_budget=deepcopy(budget_record), fallback=deepcopy(fallback),
                     interruption=interruption, correction_expiry=expiry,
@@ -1531,6 +1539,7 @@ def run_episode(
                 proposal_id, deepcopy(proposed_action), deepcopy(selected_action),
                 deepcopy(selected_action), acknowledgement, disposition,
                 supervisor_pass=pass_response,
+                correction_memory=correction_memory,
                 supervisor_abstention=abstention_response,
                 recovery=recovery_evidence, intervention_budget=deepcopy(budget_record),
                 fallback=deepcopy(fallback), correction_expiry=expiry,

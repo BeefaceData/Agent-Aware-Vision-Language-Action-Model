@@ -1,7 +1,7 @@
 # Immutable intervention experience records
 
-`intervention_memory.InterventionMemory` implements issues #95 through #99 as an
-offline append-only store with outcome-neutral candidate lookup and ranking. It does not
+`intervention_memory.InterventionMemory` implements issues #95 through #100 as an
+offline append-only store with candidate ranking and bounded context preparation. It does not
 enable supervisor retrieval, select development data, update fixed-memory
 evaluation snapshots, or authorize an intervention.
 
@@ -198,8 +198,54 @@ remain visible. Invalid query context is rejected even for an empty input.
 context, compatibility rule, sort fields, and absence of outcome preference.
 Retain these settings along with the task/control query and permitted references
 to reproduce an ordering. Results are detached evaluator data. This API neither
-truncates nor prepares supervisor context; bounded/redacted context and decision
-logging are subsequent issues #100 and #101. No runtime execution path changes.
+truncates nor prepares supervisor context. Use the separate bounded API below;
+decision logging remains issue #101. No runtime execution path changes.
+
+## Bounded historical context
+
+```python
+retrieved = memory.retrieve_context(
+    permitted_development_references,
+    task=active_task, robot_capabilities=active_capabilities,
+    progress_context={"stage": "grasp", "object": "target"},
+    failure_category="suspected_missed_grasp",
+    max_entries=4, max_summary_bytes=1024, max_context_bytes=4096,
+)
+memory_context = retrieved["context_json"]
+```
+
+Only `context_json` is the bounded model-facing payload. It is a compact JSON
+array with sorted object keys and ASCII-escaped strings. All size limits count
+its UTF-8 bytes, not characters or model tokens. The total includes brackets
+and commas; even empty memory costs two bytes (`[]`). Entry and per-summary
+limits may be zero; total allowance must be at least two. Booleans, fractional
+limits and negative values are rejected, including for an empty query.
+
+After verifying **all** references and ranking, selection walks rank order,
+skipping any whole summary that cannot fit its individual or remaining total
+allowance. Later smaller summaries may still fit. Once the entry cap is reached,
+remaining candidates are omitted. Summaries are never cut mid-field: record ID,
+pinned record digest, historical-evidence label, failure category, intervention
+kind, local outcome/reason and evidence limitations remain together. Record pins
+resolve to full verified provenance in the store. Unknown local outcomes and
+unverified causal benefit remain explicit. Historical task outcomes are marked
+`withheld` / `evaluator_only`; ground-truth success, raw traces, camera/state
+payloads, model configuration, file paths, diagnosis prose and requests are not
+copied into supervisor context. Full outcomes remain in the evaluator record.
+
+`selected` is a detached structured copy of that same array. `context_bytes`
+measures its serialized size. `settings`, `ranking`, `excluded` and `omitted`
+are host audit metadata, outside the model-context allowance; do not send the
+whole result to a model. Omission reasons are `entry_limit`, `summary_size_limit`
+or `context_size_limit`, in that precedence. Verification is never short-circuited
+by budgets, even zero entries. Corrupt duplicates and incompatible evidence
+still fail the query. Retain settings and permitted references to reproduce it.
+
+The caller remains responsible for development-data permission, split selection,
+model compatibility and fixed-memory snapshot policy. This API does not scan
+the store, attach memory to a provider request, change the frozen prompt, or
+enable live retrieval. It establishes bounded preparation, not scientific
+evidence that memory improves performance.
 
 Writes use exclusive file creation, flush, and fsync; a repeated episode/proposal
 cannot replace an existing record. A failed write can leave an unreadable partial
@@ -221,6 +267,7 @@ Run the public offline contracts:
 python -m unittest discover -s tests -p test_intervention_memory.py -v
 python -m unittest discover -s tests -p test_memory_compatibility.py -v
 python -m unittest discover -s tests -p test_memory_ranking.py -v
+python -m unittest discover -s tests -p test_memory_context.py -v
 ```
 
 These tests cover completed recovery followed by task failure, failed local

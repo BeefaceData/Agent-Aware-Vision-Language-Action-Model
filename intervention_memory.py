@@ -1,6 +1,6 @@
 """Offline, append-only intervention memory derived from pinned episode evidence.
 
-This is evaluator storage, not a supervisor observation or retrieval policy.
+Raw records are evaluator storage; retrieve_context prepares bounded summaries.
 Exact-context candidate lookup never filters on success or supplies authority.
 Callers retain diagnosis/request context at decision time and pin its digest.
 No caller-supplied outcome is accepted. File hashes detect changes, not forgery.
@@ -320,6 +320,65 @@ class InterventionMemory:
                     'compatibility': 'exact-task-progress-control',
                     'order': ['failure_category_match_desc', 'record_id_asc'],
                     'outcome_preference': 'none'}}
+
+    def retrieve_context(self, references, *, task, robot_capabilities,
+                         progress_context, failure_category, max_entries,
+                         max_summary_bytes, max_context_bytes):
+        """Build bounded historical summaries; only context_json is model input.
+
+        Budgets count UTF-8 bytes of compact, ASCII-escaped JSON, including list
+        brackets and commas. Whole summaries are skipped, never truncated.
+        Caller must supply permitted development references, not held-out data.
+        This prepares context without enabling retrieval in a runtime policy.
+        """
+        for name, value, minimum in (
+                ('max_entries', max_entries, 0),
+                ('max_summary_bytes', max_summary_bytes, 0),
+                ('max_context_bytes', max_context_bytes, 2)):
+            _require(type(value) is int and value >= minimum,
+                     f'{name} must be an integer >= {minimum}')
+        references = list(references)
+        ranked = self.rank_candidates(references, task=task,
+            robot_capabilities=robot_capabilities, progress_context=progress_context,
+            failure_category=failure_category)
+        pins = {ref['record_id']: ref['sha256'] for ref in references}
+        selected, omitted = [], []
+        used = 2  # The empty JSON list is part of the allowance.
+        for record in ranked['candidates']:
+            summary = {
+                'record_id': record['record_id'], 'sha256': pins[record['record_id']],
+                'evidence_scope': 'historical_experience',
+                'failure_category': record['diagnosis']['category'],
+                'intervention_kind': ('recovery' if record['execution'][0][
+                    'action_record'].get('recovery') is not None else 'adjustment'),
+                'local_outcome': record.get('local_outcome', {
+                    'status': 'unknown', 'reason': 'legacy_outcome_unavailable'}),
+                'task_outcome': {'status': 'withheld', 'reason': 'evaluator_only'},
+                'evidence_limitations': record.get('evidence_limitations', [
+                    'causal_benefit_unverified', 'legacy_qualifications_unavailable'])}
+            size = len(_context_json(summary).encode('utf-8'))
+            addition = size + bool(selected)
+            reason = ('entry_limit' if len(selected) >= max_entries else
+                      'summary_size_limit' if size > max_summary_bytes else
+                      'context_size_limit' if used + addition > max_context_bytes else None)
+            if reason:
+                omitted.append({'record_id': summary['record_id'],
+                                'sha256': summary['sha256'], 'reason': reason})
+            else:
+                selected.append(summary)
+                used += addition
+        return {'context_json': _context_json(selected),
+                'context_bytes': used, 'selected': selected, 'omitted': omitted,
+                'excluded': ranked['excluded'], 'ranking': ranked['ranking'],
+                'settings': {'policy': 'whole-historical-summary-v1',
+                    'max_entries': max_entries, 'max_summary_bytes': max_summary_bytes,
+                    'max_context_bytes': max_context_bytes,
+                    'size_unit': 'utf8_bytes', 'oversize_policy': 'skip_in_rank_order'}}
+
+
+def _context_json(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=True,
+                      allow_nan=False, separators=(',', ':'))
 
 
 def _validate_progress(value):

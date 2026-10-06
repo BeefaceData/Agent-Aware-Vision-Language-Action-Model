@@ -55,7 +55,9 @@ class InterventionMemory:
                  'memory evidence digest mismatch')
         return path, _read(raw)
 
-    def _build(self, provenance):
+    def _build(self, provenance, version=2):
+        _require(type(version) is int and version in (1, 2),
+                 'unsupported memory record version')
         _require(set(provenance) == {'trace', 'attempt', 'supervisor', 'context'},
                  'complete memory provenance required')
         loaded = {name: self._read_reference(ref) for name, ref in provenance.items()}
@@ -135,13 +137,23 @@ class InterventionMemory:
         for reference in provenance.values():
             self._read_reference(reference)
         identity = sha256(_bytes([episode, context['proposal_id']])).hexdigest()
-        return {'version': 1, 'record_id': identity, 'episode_id': episode,
+        record = {'version': version, 'record_id': identity, 'episode_id': episode,
                 'proposal_id': context['proposal_id'], 'task': attempt['task'],
                 'robot_capabilities': capabilities,
                 'models': {'policy': attempt['policy_assets'], 'supervisor': supervisor},
                 'configuration': {'episode': evidence['config'], 'settings': attempt['settings']},
                 'diagnosis': diagnosis, 'request': request, 'execution': rows,
                 'episode_outcome': evidence['outcome'], 'provenance': provenance}
+        if version == 2:
+            # Execution completion is not evidence of causal task benefit.
+            local = {'status': 'unknown', 'reason': 'no_local_assessment'}
+            if recovery is not None:
+                check = rows[-1]['action_record']['recovery']['check']
+                local = {'status': check['status'], 'reason': check['reason']}
+                if check['status'] == 'continuing':
+                    local = {'status': 'unknown', 'reason': 'no_terminal_local_check'}
+            record['local_outcome'] = local
+        return record
 
     def append(self, *, trace, attempt, supervisor, context):
         """Verify evidence and exclusively append; duplicate identity is an error."""
@@ -169,7 +181,7 @@ class InterventionMemory:
             _, record = self._read_reference({'path': record_id + '.json',
                                               'sha256': expected_sha256})
             _require(record['record_id'] == record_id and
-                     _bytes(record) == _bytes(self._build(record['provenance'])),
+                     _bytes(record) == _bytes(self._build(record['provenance'], record['version'])),
                      'memory record differs from source evidence')
             return record
         except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:

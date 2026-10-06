@@ -1,6 +1,6 @@
 # Immutable intervention experience records
 
-`intervention_memory.InterventionMemory` implements issue #95 as an offline
+`intervention_memory.InterventionMemory` implements issues #95 and #96 as an offline
 append-only store. It does not enable memory retrieval, select development data,
 update fixed-memory evaluation snapshots, or authorize an intervention.
 
@@ -47,6 +47,27 @@ distinct from task success. An acknowledged adjustment with an unknown diagnosis
 is preserved as unknown; the store provides no diagnostic or execution approval.
 Rejected or unconfirmed actions are not completed intervention records.
 
+New records use schema version 2 and expose `local_outcome` separately from
+`episode_outcome`. The local status comes only from retained execution evidence:
+
+| Local status | Meaning |
+| --- | --- |
+| `completed` | The recovery monitor confirmed the local completion conditions. |
+| `aborted` | The recovery monitor stopped or cancelled the sequence; `reason` retains the exact cause. |
+| `unknown` | No conclusive local check exists. A last `continuing` check yields `no_terminal_local_check`; adjustments without a local assessor yield `no_local_assessment`. |
+
+An acknowledged adjustment is not automatically beneficial. Nor does completed
+recovery establish task success or causal benefit: it can precede task failure.
+Conversely, a task can succeed with an aborted recovery. Current execution cancels
+recovery on terminal task results (`episode_terminated`); historical traces can
+retain a failed local assessment alongside terminal success. These cases preserve
+their separate outcomes and reasons. An abort due to unknown evidence or terminal
+cancellation is not a claim that the correction caused harm.
+
+Version 1 records remain verifiable and readable in their original schema,
+without adding a field or rewriting their immutable bytes. Consumers must treat
+an absent local outcome as unknown, never derive it from terminal success.
+
 Writes use exclusive file creation, flush, and fsync; a repeated episode/proposal
 cannot replace an existing record. A failed write can leave an unreadable partial
 file, which fails verification rather than becoming a usable experience. Reads
@@ -67,6 +88,8 @@ Run the public offline contracts:
 python -m unittest discover -s tests -p test_intervention_memory.py -v
 ```
 
-These tests cover successful adjustment and unsuccessful recovery episodes,
+These tests cover completed recovery followed by task failure, failed local
+recovery with terminal success, terminal cancellation, unknown local outcomes,
+legacy records, successful adjustment and unsuccessful recovery episodes,
 complete sealed replay, append-only behavior, portability, and missing, foreign
 or changed provenance. Synthetic evidence establishes storage behavior only.

@@ -666,12 +666,17 @@ class RecoverySequence:
 
 @dataclass(frozen=True)
 class ActionResolution:
-    """A deterministic execution choice; rejection does not call the environment."""
+    """Execution choice, optionally bound to its source proposal by the executor.
+
+    Unbound choices are reserved for trusted host selectors and recorded replay;
+    supervisor-derived overrides must retain their source identity until dispatch.
+    """
 
     kind: Literal['pass', 'override', 'reject', 'recovery']
     action: Any = None
     reason: str | None = None
     recovery: RecoverySequence | None = None
+    source_identity: tuple[str, int, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -1097,6 +1102,11 @@ def run_episode(
                     if ((resolution.kind == 'recovery' and type(resolution.recovery) is not RecoverySequence) or
                             (resolution.kind != 'recovery' and resolution.recovery is not None)):
                         raise ValueError('invalid recovery resolution')
+                    if (resolution.source_identity is not None and
+                            resolution.source_identity !=
+                            (episode_id, observation.sequence, proposal_id)):
+                        resolution = ActionResolution(
+                            'reject', reason='resolution must reference the current proposal')
                     if resolution.kind in ('override', 'recovery') and not callable(
                         getattr(policy, 'resume', None)
                     ):

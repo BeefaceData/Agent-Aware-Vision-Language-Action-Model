@@ -18,12 +18,19 @@ class ResetOnResumePolicyAdapter:
                  infer: Callable[[ObservationPacket], Any]):
         self._reset = reset
         self._infer = infer
+        self._resume_identity = None
 
     def reset(self) -> None:
+        self._resume_identity = None
         self._reset()
 
     def resume(self, observation: ObservationPacket) -> None:
+        self._resume_identity = (observation.episode_id, observation.sequence)
         self._reset()
 
     def act(self, observation: ObservationPacket) -> Any:
+        if self._resume_identity is not None:
+            episode, sequence = self._resume_identity
+            if observation.episode_id != episode or observation.sequence < sequence:
+                raise ValueError('policy observation predates recovery resumption')
         return self._infer(observation)

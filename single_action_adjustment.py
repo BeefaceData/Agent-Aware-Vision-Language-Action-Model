@@ -63,4 +63,6 @@ class SingleActionAdjustment:
         except ValueError as exc:
             return ActionResolution('reject', reason=str(exc))
         self._consumed.add(identity)
-        return ActionResolution('override', action)
+        return ActionResolution('override', action, source_identity=(
+            converted.request.episode_id, converted.request.observation_sequence,
+            converted.request.proposal_id))

@@ -40,6 +40,10 @@ ID. This is conservative after a failed dispatch: an uncertain command is not
 retried. This in-memory protection assumes one synchronous execution owner; it is
 not persistent or distributed deduplication. A new proposal requires a new bound
 request. `None` returns a pass and carries no previous residual forward.
+Successful overrides retain their source episode, observation and proposal in
+`ActionResolution.source_identity`. The harness rejects a cached resolution
+returned for a later proposal, including after recovery. Hosts must preserve
+this binding when forwarding an executor result.
 
 The harness dispatches the returned override once, counts it toward the episode
 action horizon, records the original proposal separately from the selected and

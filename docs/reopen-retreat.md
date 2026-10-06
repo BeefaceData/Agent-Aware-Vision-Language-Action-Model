@@ -102,6 +102,29 @@ episode immediately and remain separate from local recovery status: a locally
 completed recovery is not task success, nor does an abort erase observed task
 success. Successful nonterminal recovery uses the existing fresh-state resume.
 
+Recovery also retires the pre-recovery proposal for execution (#75). Proposal
+identities include the episode and a monotonically advancing action index; they
+are never reused when policy inference resumes. Both correction executors retain
+the source episode, observation sequence and proposal identity in their returned
+resolution. The harness checks this binding immediately before selection, so
+even a cached, previously validated override cannot act on the recovered scene.
+Late raw requests are revalidated against the new proposal and rejected too.
+Rejections retain a reason and execute no additional action.
+
+Before asking for a new proposal, the harness passes the accepted final recovery
+observation to policy `resume`. The adapter must discard obsolete queued actions.
+`ResetOnResumePolicyAdapter` implements this for policies whose reset clears all
+cached actions, and rejects subsequent input from before that resume observation.
+An arbitrary native action has no independently verifiable capture identity, so
+custom policy adapters remain responsible for their queue invalidation contract.
+Unbound `ActionResolution` values are a trusted host/replay interface, not a wire
+format for supervisor replies; do not strip executor source bindings.
+
+Synthetic complete-episode tests deliver late recovery and adjustment requests,
+cached recovery plans and cached adjustment overrides after recovery. Each stops
+without a third command and reproduces the rejection from a sealed trace. A
+queued-policy fixture separately proves successful fresh inference and replay.
+
 Sealed replay recomputes local checks from retained assessments and sensor
 packets, rejects inconsistent check outcomes, and reproduces early aborts.
 Legacy recovery traces without checks cannot establish monitored completion and

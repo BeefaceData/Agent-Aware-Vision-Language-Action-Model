@@ -14,6 +14,8 @@ from correction_validation import CorrectionValidator
 from episode_harness import (ActionResolution, EpisodeConfig, ExecutionBusy, ObservationRejected,
                              RobotStateCapture, ViewCapture, run_episode)
 from recorded_replay import TraceError, TraceRecorder, load_recorded_replay
+from policy_adapter import ResetOnResumePolicyAdapter
+from single_action_adjustment import SingleActionAdjustment
 from recovery_eligibility import ReopenRetreatEligibility
 from recovery_registry import RecoveryRegistry
 from recovery_monitor import RecoveryAssessment
@@ -154,6 +156,78 @@ class ReopenRetreatTests(unittest.TestCase):
             self.assertIsNone(rows[2]['recovery'])
             self.assertEqual([r['recovery']['check']['status'] for r in rows[:2]],
                              ['continuing', 'completed'])
+
+    def test_late_requests_and_cached_resolutions_cannot_execute_after_recovery(self):
+        for mode in ('recovery_request', 'adjustment_request',
+                     'recovery_resolution', 'adjustment_resolution'):
+            with self.subTest(mode=mode), TemporaryDirectory() as tmp:
+                config, policy, environment, select, _ = self.episode()
+                adjustment = SingleActionAdjustment(self.converter)
+                cached = {}
+                identities = []
+
+                def choose(proposal):
+                    identities.append(proposal.proposal_id)
+                    if proposal.observation.sequence == 0:
+                        names = ('translation_x', 'translation_y', 'translation_z')
+                        cached['recovery_request'] = request_for(proposal)
+                        cached['adjustment_request'] = dict(
+                            kind='adjustment', scope='single_action',
+                            episode_id=proposal.observation.episode_id,
+                            observation_sequence=proposal.observation.sequence,
+                            proposal_id=proposal.proposal_id, decision_id='late-decision',
+                            target='panda_arm', frame='world', units=dict.fromkeys(names, 'm'),
+                            residual=dict.fromkeys(names, 0.01))
+                        cached['adjustment_resolution'] = adjustment.resolve(
+                            proposal, cached['adjustment_request'])
+                        self.assertEqual(cached['adjustment_resolution'].kind, 'override')
+                        cached['recovery_resolution'] = select(proposal)
+                        return cached['recovery_resolution']
+                    if mode == 'recovery_request':
+                        return self.resolve(self.executor(), proposal,
+                                            cached[mode], now=10.)
+                    if mode == 'adjustment_request':
+                        return adjustment.resolve(proposal, cached[mode])
+                    return cached[mode]
+
+                trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
+                outcome = run_episode(config, policy, environment, trace,
+                    recovery_observer=self.observe, action_selector=choose, clock=lambda: 10.)
+                trace.seal(outcome)
+                self.assertEqual((outcome.stop_reason, outcome.steps), ('proposal_rejected', 2))
+                self.assertEqual(environment.actions, [self.opening, self.retreat])
+                self.assertEqual(policy.resumes, [2])
+                self.assertEqual([p.sequence for p in policy.observations], [0, 2])
+                self.assertNotEqual(*identities)
+                replay = load_recorded_replay(trace.directory)
+                self.assertEqual(replay.run().stop_reason, 'proposal_rejected')
+                rejected = replay.evidence()['decisions'][-1]['action_record']
+                self.assertEqual(rejected['disposition'], 'rejected')
+                self.assertIsNone(rejected['executed_action'])
+                self.assertTrue(rejected['rejection_reason'])
+
+    def test_recovery_discards_policy_queue_before_fresh_inference(self):
+        queue, inputs = [], []
+        def infer(packet):
+            inputs.append(packet)
+            if not queue:
+                queue.extend([[0.1 if packet.sequence == 0 else 0.2] * 7,
+                              [0.9] * 7])
+            return queue.pop(0)
+        policy = ResetOnResumePolicyAdapter(queue.clear, infer)
+        config, _, environment, select, _ = self.episode(policy=policy)
+        with TemporaryDirectory() as tmp:
+            trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
+            outcome = run_episode(config, policy, environment, trace,
+                recovery_observer=self.observe, action_selector=select, clock=lambda: 10.)
+            trace.seal(outcome)
+            self.assertTrue(outcome.success)
+            self.assertEqual([p.sequence for p in inputs], [0, 2])
+            self.assertEqual(environment.actions, [self.opening, self.retreat, [0.2] * 7])
+            self.assertTrue(load_recorded_replay(trace.directory).run().success)
+            with self.assertRaisesRegex(ValueError, 'predates recovery'):
+                policy.act(inputs[0])
+            self.assertEqual(len(inputs), 2)
 
     def test_overlapping_runs_cannot_reset_or_dispatch_during_recovery_and_resume(self):
         for phase in ('selection', 'opening', 'assessment', 'retreat', 'resume', 'normal'):

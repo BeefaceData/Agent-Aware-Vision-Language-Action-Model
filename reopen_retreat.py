@@ -94,4 +94,6 @@ class ReopenRetreatExecutor:
         except ValueError as exc:
             return ActionResolution('reject', reason=str(exc))
         self._consumed.add(identity)
-        return ActionResolution('recovery', recovery=plan)
+        return ActionResolution('recovery', recovery=plan, source_identity=(
+            selection.request.episode_id, selection.request.observation_sequence,
+            selection.request.proposal_id))

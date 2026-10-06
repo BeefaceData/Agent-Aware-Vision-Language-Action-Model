@@ -15,6 +15,7 @@ from episode_harness import (ActionResolution, EpisodeConfig, ObservationRejecte
 from recorded_replay import TraceError, TraceRecorder, load_recorded_replay
 from recovery_eligibility import ReopenRetreatEligibility
 from recovery_registry import RecoveryRegistry
+from recovery_monitor import RecoveryAssessment
 from reopen_retreat import ReopenRetreatControl, ReopenRetreatExecutor
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
 from translation_conversion import LiberoTranslationConverter
@@ -89,7 +90,12 @@ class ReopenRetreatTests(unittest.TestCase):
             self.executor(control=replace(self.control, envelope_id='other'))
         self.assertEqual(self.resolve(self.executor(control=replace(self.control, target='both_arms'))).kind, 'reject')
 
-    def episode(self, *, horizon=3, terminal_first=False, invalid=False, fail=False, policy=None):
+    def observe(self, plan, index, packet):
+        return RecoveryAssessment(packet.episode_id, packet.sequence, plan.envelope_id,
+                                  True, index == 1, False)
+
+    def episode(self, *, horizon=3, terminal_first=False, invalid=False, fail=False, policy=None,
+                tool=None):
         wall = datetime(2026, 1, 1, tzinfo=timezone.utc)
         class Environment(ReplayEnvironment):
             def step(inner, action):
@@ -100,8 +106,10 @@ class ReopenRetreatTests(unittest.TestCase):
                     return replace(result, observation=replace(result.observation, sequence=0))
                 return result
         environment = Environment(17, raw(0), (
-            (self.opening, ReplayStep(raw(1), 0, terminal_first, terminal_first, False)),
-            (self.retreat, ReplayStep(raw(2), 0, False, False, False)),
+            (self.opening, ReplayStep(raw(1), 0, terminal_first, terminal_first, False,
+                {"main": ViewCapture(1, wall, 10.)}, RobotStateCapture(1, wall, 10.))),
+            (self.retreat, ReplayStep(raw(2), 0, False, False, False,
+                {"main": ViewCapture(2, wall, 10.)}, RobotStateCapture(2, wall, 10.))),
             ([0.2] * 7, ReplayStep(raw(3), 1, True, True, False))), clock=lambda: 10.,
             initial_camera_captures={'main': ViewCapture(0, wall, 10.)},
             max_camera_skew_seconds=0.1,
@@ -114,7 +122,7 @@ class ReopenRetreatTests(unittest.TestCase):
                 inner.resumes.append(packet.sequence)
                 super().resume(packet)
         policy = policy or Policy()
-        executor = self.executor()
+        executor = self.executor(tool)
         calls = []
         def select(current):
             calls.append(current.observation.sequence)
@@ -128,7 +136,7 @@ class ReopenRetreatTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
             outcome = run_episode(config, policy, environment, trace,
-                                  action_selector=select, clock=lambda: 10.)
+                                  recovery_observer=self.observe, action_selector=select, clock=lambda: 10.)
             trace.seal(outcome)
             self.assertTrue(outcome.success)
             self.assertEqual(outcome.steps, 3)
@@ -143,13 +151,103 @@ class ReopenRetreatTests(unittest.TestCase):
             self.assertEqual([r['recovery']['action_index'] for r in rows[:2]], [0, 1])
             self.assertEqual(rows[0]['recovery']['sequence'], rows[1]['recovery']['sequence'])
             self.assertIsNone(rows[2]['recovery'])
+            self.assertEqual([r['recovery']['check']['status'] for r in rows[:2]],
+                             ['continuing', 'completed'])
+
+    def test_local_failure_stops_with_sealed_partial_execution_and_no_resume(self):
+        cases = (
+            ('opening', 1, 'gripper_open_confirmed'),
+            ('retreat', 2, 'retreat_target_reached'),
+            ('limit', 2, 'action_limit_reached'),
+            ('clearance', 1, 'clearance_unverified'),
+            ('unknown', 1, 'clearance_unverified'),
+            ('missing', 1, 'missing_assessment'),
+            ('foreign', 1, 'assessment_identity_mismatch'),
+            ('error', 1, 'missing_assessment'),
+        )
+        for mode, count, reason in cases:
+            with self.subTest(mode=mode), TemporaryDirectory() as tmp:
+                tool = replace(fixture_tool(), action_limit=2 if mode == 'limit' else 3)
+                config, policy, environment, select, calls = self.episode(tool=tool)
+                seen = []
+                def observe(plan, index, packet):
+                    seen.append(packet)
+                    self.assertNotIn('private_evaluator', packet.observation)
+                    self.assertNotIn('private', packet.observation['robot_state'])
+                    assessment = self.observe(plan, index, packet)
+                    if mode == 'opening':
+                        return replace(assessment, gripper_open_confirmed=False)
+                    if mode in ('retreat', 'limit'):
+                        return replace(assessment, retreat_target_reached=False)
+                    if mode in ('clearance', 'unknown'):
+                        return replace(assessment, clearance_unverified=True if mode == 'clearance' else None)
+                    if mode == 'missing':
+                        return None
+                    if mode == 'foreign':
+                        return replace(assessment, observation_sequence=0)
+                    raise RuntimeError('local assessor failed')
+                trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
+                outcome = run_episode(config, policy, environment, trace,
+                    action_selector=select, recovery_observer=observe, clock=lambda: 10.)
+                trace.seal(outcome)
+                self.assertEqual((outcome.stop_reason, outcome.steps, outcome.success),
+                                 ('recovery_aborted', count, False))
+                self.assertEqual(len(environment.actions), count)
+                self.assertEqual(len(seen), count)
+                self.assertEqual(calls, [0])
+                self.assertEqual(policy.resumes, [])
+                self.assertEqual(len(policy.observations), 1)
+                replay = load_recorded_replay(trace.directory)
+                self.assertEqual(replay.run().stop_reason, 'recovery_aborted')
+                check = replay.evidence()['decisions'][-1]['action_record']['recovery']['check']
+                self.assertEqual((check['reason'], check['executed_actions'], check['path']),
+                                 (reason, count, 'stop_episode'))
+                self.assertEqual({item['name'] for item in check['evidence']},
+                                 {'main', 'robot_state'})
+
+    def test_missing_or_stale_post_action_sensor_aborts_before_retreat(self):
+        for mode in ('missing', 'stale'):
+            with self.subTest(mode=mode), TemporaryDirectory() as tmp:
+                config, policy, environment, select, _ = self.episode()
+                step = environment.step
+                def changed(action):
+                    result = step(action)
+                    packet = result.observation
+                    if mode == 'missing':
+                        packet = replace(packet, observation=packet.observation | {'robot_state': {}})
+                    else:
+                        packet = replace(packet, robot_state_capture=replace(
+                            packet.robot_state_capture, captured_monotonic=9.))
+                    return replace(result, observation=packet)
+                environment.step = changed
+                trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
+                outcome = run_episode(config, policy, environment, trace, action_selector=select,
+                                      recovery_observer=self.observe, clock=lambda: 10.)
+                trace.seal(outcome)
+                self.assertEqual(outcome.steps, 1)
+                self.assertEqual(policy.resumes, [])
+                replay = load_recorded_replay(trace.directory)
+                self.assertEqual(replay.run().stop_reason, 'recovery_aborted')
+                check = replay.evidence()['decisions'][0]['action_record']['recovery']['check']
+                self.assertEqual(check['reason'], 'stale_observation')
+
+    def test_missing_assessor_and_unknown_conditions_fail_before_actuation(self):
+        config, policy, environment, select, _ = self.episode()
+        with self.assertRaisesRegex(ValueError, 'local observation assessor'):
+            run_episode(config, policy, environment, ReplayRecorder(),
+                        action_selector=select, clock=lambda: 10.)
+        self.assertEqual(environment.actions, [])
+        for change in ({'completion_conditions': ('made_up',)},
+                       {'abort_conditions': ('made_up',)}):
+            self.assertEqual(self.resolve(self.executor(replace(fixture_tool(), **change))).kind,
+                             'reject')
 
     def test_horizon_preflight_rejects_without_partial_execution(self):
         config, policy, environment, select, _ = self.episode(horizon=1)
         with TemporaryDirectory() as tmp:
             trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
             outcome = run_episode(config, policy, environment, trace,
-                                  action_selector=select, clock=lambda: 10.)
+                                  recovery_observer=self.observe, action_selector=select, clock=lambda: 10.)
             trace.seal(outcome)
             self.assertEqual(outcome.stop_reason, 'proposal_rejected')
             self.assertEqual(environment.actions, [])
@@ -163,12 +261,28 @@ class ReopenRetreatTests(unittest.TestCase):
             with TemporaryDirectory() as tmp:
                 trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
                 outcome = run_episode(config, policy, environment, trace,
-                                      action_selector=select, clock=lambda: 10.)
+                                      recovery_observer=self.observe, action_selector=select, clock=lambda: 10.)
                 trace.seal(outcome)
                 self.assertEqual(outcome.steps, steps)
                 self.assertEqual(policy.resumes, [])
                 self.assertEqual(len(policy.observations), 1)
                 self.assertEqual(load_recorded_replay(trace.directory).run().steps, steps)
+                self.assertEqual(outcome.success, options.get('terminal_first', False))
+
+    def test_terminal_task_success_does_not_turn_local_abort_into_completion(self):
+        config, policy, environment, select, _ = self.episode(terminal_first=True)
+        with TemporaryDirectory() as tmp:
+            trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
+            outcome = run_episode(config, policy, environment, trace, action_selector=select,
+                                  recovery_observer=lambda *args: None, clock=lambda: 10.)
+            trace.seal(outcome)
+            self.assertEqual((outcome.success, outcome.steps, outcome.stop_reason),
+                             (True, 1, 'success'))
+            self.assertEqual(policy.resumes, [])
+            replay = load_recorded_replay(trace.directory)
+            self.assertTrue(replay.run().success)
+            check = replay.evidence()['decisions'][0]['action_record']['recovery']['check']
+            self.assertEqual(check['status'], 'aborted')
 
     def test_invalid_observation_or_controller_failure_stops_pending_sequence(self):
         for options, error in (({'invalid': True}, ObservationRejected), ({'fail': True}, RuntimeError)):
@@ -176,7 +290,7 @@ class ReopenRetreatTests(unittest.TestCase):
             recorder = ReplayRecorder()
             with self.assertRaises(error) as caught:
                 run_episode(config, policy, environment, recorder,
-                            action_selector=select, clock=lambda: 10.)
+                            recovery_observer=self.observe, action_selector=select, clock=lambda: 10.)
             self.assertEqual(len(environment.actions), 1)
             self.assertEqual(policy.resumes, [])
             self.assertEqual(len(policy.observations), 1)
@@ -187,12 +301,17 @@ class ReopenRetreatTests(unittest.TestCase):
                 self.assertEqual(record.recovery['action_index'], 1)
                 self.assertEqual(record.selected_action, self.retreat)
                 self.assertIsNone(record.executed_action)
+                self.assertEqual(record.recovery['check']['reason'], 'controller_failure')
+                self.assertEqual(record.recovery['check']['executed_actions'], 1)
+            else:
+                self.assertEqual(recorder.steps[0][3].action_record.recovery['check']['reason'],
+                                 'stale_observation')
 
     def test_temporal_history_keeps_recovery_observations_without_extra_assessment(self):
         config, policy, environment, select, _ = self.episode()
         windows = []
         outcome = run_episode(config, policy, environment, ReplayRecorder(),
-            action_selector=select, window_supervisor=lambda window, action: windows.append(window),
+            recovery_observer=self.observe, action_selector=select, window_supervisor=lambda window, action: windows.append(window),
             clock=lambda: 10.)
         self.assertTrue(outcome.success)
         self.assertEqual(len(windows), 2)
@@ -212,16 +331,16 @@ class ReopenRetreatTests(unittest.TestCase):
                 return result
             with self.assertRaises((ValueError, NotImplementedError)):
                 run_episode(config, policy, environment, ReplayRecorder(),
-                            action_selector=choose, clock=lambda: 10.)
+                            recovery_observer=self.observe, action_selector=choose, clock=lambda: 10.)
             self.assertEqual(environment.actions, [])
 
     def test_replay_rejects_corrupt_recovery_provenance_even_with_matching_checksum(self):
-        for damage in ('missing', 'order', 'source', 'command', 'limit'):
+        for damage in ('missing', 'order', 'source', 'command', 'limit', 'check', 'evidence'):
             with self.subTest(damage=damage), TemporaryDirectory() as tmp:
                 config, policy, environment, select, _ = self.episode()
                 trace = TraceRecorder(Path(tmp) / 'episode', config, ReplayRecorder())
                 outcome = run_episode(config, policy, environment, trace,
-                                      action_selector=select, clock=lambda: 10.)
+                                      recovery_observer=self.observe, action_selector=select, clock=lambda: 10.)
                 trace.seal(outcome)
                 path = trace.directory / 'decisions.jsonl'
                 rows = [json.loads(line) for line in path.read_text().splitlines()]
@@ -234,6 +353,10 @@ class ReopenRetreatTests(unittest.TestCase):
                     record['recovery']['sequence']['request']['proposal_id'] = 'foreign'
                 elif damage == 'command':
                     record['recovery']['sequence']['actions'][1][2] = 0.1
+                elif damage == 'check':
+                    record['recovery']['check']['status'] = 'continuing'
+                elif damage == 'evidence':
+                    record['recovery']['check']['assessment']['retreat_target_reached'] = False
                 else:
                     record['recovery']['sequence']['action_limit'] = 1
                 data = ''.join(json.dumps(row) + '\n' for row in rows).encode()

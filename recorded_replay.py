@@ -241,9 +241,10 @@ def _load(directory, manifest):
         recovery = record.get('recovery')
         previous = decisions[index - 1]['action_record'].get('recovery') if index else None
         pending = (previous is not None and
+                   previous['check']['status'] == 'continuing' and
                    previous['action_index'] + 1 < len(previous['sequence']['actions']))
         if recovery is not None:
-            _require(type(recovery) is dict and set(recovery) == {'sequence', 'action_index'} and
+            _require(type(recovery) is dict and set(recovery) == {'sequence', 'action_index', 'check'} and
                      type(recovery['action_index']) is int and
                      type(recovery['sequence']) is dict, 'invalid recovery evidence')
             try:
@@ -264,6 +265,18 @@ def _load(directory, manifest):
                      (pending and previous['sequence'] == recovery['sequence'] and
                       offset == previous['action_index'] + 1), 'invalid recovery ordering')
             _require(source + len(plan.actions) <= config.max_steps, 'recovery exceeds horizon')
+            from recovery_monitor import RecoveryAssessment, check_recovery
+            check = recovery['check']
+            _require(type(check) is dict and index + 1 < len(packets),
+                     'missing recovery check or result observation')
+            try:
+                assessment = (RecoveryAssessment(**check['assessment'])
+                              if check['assessment'] is not None else None)
+                expected = check_recovery(plan, offset, packets[index + 1], assessment,
+                                          check['checked_at'])
+            except (ValueError, TypeError, KeyError) as exc:
+                raise TraceError('invalid recovery check') from exc
+            _require(check == expected, 'recovery check does not match evidence')
         else:
             _require(not pending, 'missing recovery continuation')
         response = record.get('supervisor_pass')
@@ -329,6 +342,9 @@ def _load(directory, manifest):
         if success or result['terminated'] or result['truncated']:
             _require(last, 'decisions after terminal result')
             stop = 'success' if success else 'terminated' if result['terminated'] else 'truncated'
+        elif recovery is not None and recovery['check']['status'] == 'aborted':
+            _require(last, 'decisions after recovery abort')
+            stop = 'recovery_aborted'
     _require(len(packets) == executed + 1, 'missing or extra observation artifacts')
     _require(stop != 'step_limit' or executed == config.max_steps, 'unfinished trace')
     _require(manifest['outcome'] == dict(success=success, steps=executed,
@@ -378,7 +394,7 @@ class RecordedReplay:
         packets, decisions = deepcopy((self._packets, self._decisions))
         config = self.config
         # Historical timestamps are evidence, not measurements of replay latency.
-        now = max(packet.captured_monotonic for packet in packets)
+        now = packets[0].captured_monotonic
 
         class Policy:
             def reset(self):
@@ -401,10 +417,14 @@ class RecordedReplay:
                 return replace(deepcopy(packets[0]), episode_id=episode_id)
 
             def step(self, action):
+                nonlocal now
                 row = decisions[self.index]
                 _require(action == row['action_record']['executed_action'],
                          'replay action diverged')
                 self.index += 1
+                recovery = row['action_record'].get('recovery')
+                now = (recovery['check']['checked_at'] if recovery is not None
+                       else max(now, packets[self.index].captured_monotonic))
                 return StepResult(replace(deepcopy(packets[self.index]),
                                           episode_id=self.episode_id), **row['result'])
 
@@ -421,9 +441,19 @@ class RecordedReplay:
                 return ActionResolution('override', deepcopy(record['selected_action']))
             return ActionResolution('pass')
 
+        def observe(plan, offset, packet):
+            from recovery_monitor import RecoveryAssessment
+            data = deepcopy(decisions[packet.sequence - 1]['action_record']['recovery']
+                            ['check']['assessment'])
+            if data is None:
+                return None
+            if data['episode_id'] == self.source_episode_id:
+                data['episode_id'] = packet.episode_id
+            return RecoveryAssessment(**data)
+
         outcome = run_episode(config, Policy(), Environment(),
                               recorder if recorder is not None else ReplayRecorder(),
-                              clock=lambda: now, action_selector=select)
+                              clock=lambda: now, action_selector=select, recovery_observer=observe)
         _require(_summary(outcome) == self._outcome, 'replayed outcome diverged')
         return outcome
 

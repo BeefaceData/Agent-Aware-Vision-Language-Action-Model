@@ -28,7 +28,8 @@ components must be within [-1, 1]. The sequence requires at least two actions
 in the registry's tool allowance. A proposal is consumed on selection; uncertain
 execution cannot be retried with that identity.
 
-Pass the result through `run_episode(..., action_selector=select)`. The selector
+Pass the result through `run_episode(..., action_selector=select,
+recovery_observer=observe)`. The selector
 calls `executor.resolve(current, request, scene=assessment,
 now_monotonic=clock(), window=history)` only after the host's applicable
 readiness, expiry and resource gates. Return `ActionResolution('pass')` when no
@@ -40,7 +41,7 @@ rejection before opening. During recovery it pauses policy inference and
 supervision/selection callbacks, while retaining observations in temporal
 history. Every command passes through the normal step, ingestion and recording
 path. Accepted terminal results, invalid observations and execution failures
-stop pending commands. After the final accepted nonterminal observation, if
+stop pending commands. After confirmed local completion on the final accepted nonterminal observation, if
 there is remaining horizon, the harness calls policy `resume` once before fresh
 inference. No environment reset is used for recovery.
 
@@ -64,6 +65,46 @@ cover rejection, terminal interruption, exact horizon, stale/invalid evidence,
 controller failure and corrupted provenance. These are execution-contract
 checks, not measured recovery efficacy or robot safety evidence. Exhausting the
 sequence is not confirmation that the gripper opened or the retreat target was
-reached. Observation-based local completion/abort monitoring remains #73;
+reached. Local completion/abort monitoring is described below;
 active-correction readiness remains #94. This module enables no live run by
 default and establishes no simulation or physical improvement claim.
+
+## Local completion and abort checks
+
+The host supplies `observe(plan, action_index, packet)`, returning a
+`recovery_monitor.RecoveryAssessment` bound to the current episode, observation
+sequence and reviewed envelope. The packet contains only deployable fields;
+the callback never receives evaluator success, reward or privileged state.
+The host assessor must derive its booleans from the declared required sensor
+inputs using reviewed local geometry and gripper semantics. `None` means
+unknown. This interface supplies no perception algorithm or default physical
+thresholds and does not establish active readiness.
+
+The plan retains the tool's declared conditions, required observations and the
+eligibility gate's sensor-age bound. Unsupported condition contracts reject
+before execution. A missing observer also prevents execution. After every
+acknowledged command the harness checks current sensor captures, clearance and
+gripper-open confirmation. After retreat it additionally requires confirmation
+that the retreat target was reached; a native goal request is insufficient.
+It makes no additional corrective attempts. Unmet conditions at the tool's
+action limit report `action_limit_reached`; earlier failures name the unmet
+condition. Missing or failing assessors and stale, missing or uncertain evidence
+abort, even if all commands were acknowledged.
+
+Each action's `recovery.check` retains the assessment, sensor freshness evidence,
+check time, local status, reason, acknowledged action count and selected path.
+The declared abort path is `stop_episode`: no further command or policy resume
+occurs and the outcome is `recovery_aborted`. This is a discrete harness stop,
+not a physical controller hold/stop command (tracked separately in #80).
+Controller exceptions and rejected packets retain partial evidence and use the
+existing interruption path. Accepted terminal evaluator outcomes still end the
+episode immediately and remain separate from local recovery status: a locally
+completed recovery is not task success, nor does an abort erase observed task
+success. Successful nonterminal recovery uses the existing fresh-state resume.
+
+Sealed replay recomputes local checks from retained assessments and sensor
+packets, rejects inconsistent check outcomes, and reproduces early aborts.
+Legacy recovery traces without checks cannot establish monitored completion and
+are rejected. The synthetic tests cover missing/stale observations, failed
+opening/retreat, exhaustion, clearance uncertainty, assessor failures, and both
+successful and unsuccessful complete-episode replays.

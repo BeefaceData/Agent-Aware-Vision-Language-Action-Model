@@ -86,7 +86,11 @@ class ReopenRetreatExecutor:
                 if any(not isfinite(v) or not -1 <= v <= 1 for v in action):
                     raise ValueError('recovery command outside native bounds')
             plan = RecoverySequence((opening, retreat), selection.tool.action_limit,
-                asdict(selection.request), self._control.envelope_id, converted.evidence_sha256)
+                asdict(selection.request), self._control.envelope_id, converted.evidence_sha256,
+                dict(completion_conditions=selection.tool.completion_conditions,
+                     abort_conditions=selection.tool.abort_conditions,
+                     required_observations=selection.tool.required_observations,
+                     max_age_seconds=self._gate.max_age_seconds, abort_path='stop_episode'))
         except ValueError as exc:
             return ActionResolution('reject', reason=str(exc))
         self._consumed.add(identity)

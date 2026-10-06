@@ -638,11 +638,14 @@ class RecoverySequence:
     request: dict
     envelope_id: str
     controller_evidence_sha256: str
+    monitor: dict
 
     def __post_init__(self):
+        from recovery_monitor import validate_monitor
+        validate_monitor(self.monitor)
         if (type(self.actions) not in (list, tuple) or not self.actions or
                 type(self.action_limit) is not int or
-                not 0 < len(self.actions) <= self.action_limit or
+                not 2 == len(self.actions) <= self.action_limit or
                 any(action is None for action in self.actions) or
                 type(self.request) is not dict or
                 any(type(self.request.get(key)) is not str or not self.request[key]
@@ -656,6 +659,7 @@ class RecoverySequence:
             raise ValueError('invalid bounded recovery sequence')
         object.__setattr__(self, 'actions', tuple(deepcopy(self.actions)))
         object.__setattr__(self, 'request', deepcopy(self.request))
+        object.__setattr__(self, 'monitor', deepcopy(self.monitor))
 
 
 @dataclass(frozen=True)
@@ -837,6 +841,7 @@ def run_episode(
     window_settings: WindowSettings | None = None,
     supervisor_decider: Callable[[ActionProposal], SupervisorPass | SupervisorAbstention] | None = None,
     assessment_trigger: Callable[[ActionProposal], bool] | None = None,
+    recovery_observer: Callable[[RecoverySequence, int, ObservationPacket], Any] | None = None,
 ) -> EpisodeOutcome:
     """Run one attempt and return task outcome and artifact finalization status.
 
@@ -860,6 +865,9 @@ def run_episode(
     ends the attempt without an environment call. Supervisor and selector wait is
     measured. Overrides must come from a separately validated executor.
     A recovery resolution supplies a finite host-validated RecoverySequence.
+    ``recovery_observer`` assesses local conditions from deployable observations
+    after each recovery command. Failed checks end the episode without resuming
+    the policy; this declared stop path does not implement a physical stop.
     It pauses policy inference and callbacks, counts each command in max_steps,
     and resumes once from the final accepted nonterminal packet. The whole
     sequence must fit the remaining horizon before its first command executes.
@@ -1058,6 +1066,8 @@ def run_episode(
                         raise NotImplementedError('policy does not support override/resume')
                     if resolution.kind == 'recovery':
                         plan = RecoverySequence(**asdict(resolution.recovery))
+                        if not callable(recovery_observer):
+                            raise ValueError('recovery requires a local observation assessor')
                         if (plan.request['episode_id'] != episode_id or
                                 plan.request['proposal_id'] != proposal_id or
                                 plan.request['observation_sequence'] != observation.sequence):
@@ -1102,6 +1112,9 @@ def run_episode(
                 result = environment.step(deepcopy(selected_action))
             except BaseException as exc:
                 execution_finished_at = clock()
+                if recovery_evidence is not None:
+                    from recovery_monitor import aborted
+                    recovery_evidence['check'] = aborted('controller_failure', recovery_index)
                 record_failure(
                     step, observation, deepcopy(proposed_action),
                     StepFailure('execution', type(exc).__name__, FailedStepTiming(
@@ -1135,6 +1148,24 @@ def run_episode(
             steps = step
             step_timings.append(timing)
             ingestion = ingestor.ingest(result.observation, execution_finished_at)
+            recovery_aborted = False
+            if recovery_sequence is not None:
+                from recovery_monitor import aborted, check_recovery
+                if not ingestion.accepted:
+                    check = aborted('stale_observation', recovery_index + 1)
+                else:
+                    try:
+                        assessment = recovery_observer(deepcopy(recovery_sequence), recovery_index,
+                                                       supervisor_observation(result.observation))
+                    except Exception:
+                        assessment = None
+                    check = check_recovery(recovery_sequence, recovery_index,
+                                           result.observation, assessment, clock())
+                recovery_evidence['check'] = check
+                result = replace(result, action_record=replace(result.action_record,
+                                 recovery=deepcopy(recovery_evidence)))
+                acknowledged_actions[-1] = deepcopy(result.action_record)
+                recovery_aborted = check['status'] == 'aborted'
             if ingestion.accepted:
                 last_observation = deepcopy(result.observation)
                 if result.success:
@@ -1159,6 +1190,9 @@ def run_episode(
                     result.observation.episode_id, result.observation.sequence)
                 stop_reason = ('success' if success else
                                'terminated' if result.terminated else 'truncated')
+                break
+            if recovery_aborted:
+                stop_reason = 'recovery_aborted'
                 break
             observation = result.observation
             recovery_finished = False

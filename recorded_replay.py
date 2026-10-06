@@ -371,6 +371,21 @@ def _load(directory, manifest):
                 _require(row['timing']['request_at'] <= fallback['checked_at'] <=
                          row['timing']['execution_started_at'], 'invalid fallback check time')
         result = row['result']
+        interruption = record.get('interruption')
+        if interruption is not None:
+            from environment_interruption import validate_interruption
+            try:
+                validate_interruption(interruption, ActionProposal(
+                    record['proposal_id'], packets[index], record['proposed_action']),
+                    record['rejection_reason'])
+            except (ValueError, TypeError, KeyError) as exc:
+                raise TraceError('invalid interruption evidence') from exc
+            _require(record['disposition'] == 'rejected', 'interruption without refusal')
+            if fallback is not None:
+                _require(interruption['requested_at'] >= fallback['checked_at'],
+                         'interruption precedes fallback check')
+        if record['disposition'] == 'rejected' and 'interruption' in record:
+            _require(interruption is not None, 'missing interruption evidence')
         if 'timing' in row:
             timing = StepTiming(**row['timing'])
             _require(timing.capture_at == packets[index].captured_monotonic,
@@ -381,7 +396,8 @@ def _load(directory, manifest):
                      all(record[key] is None for key in ('selected_action', 'executed_action',
                                                         'execution_acknowledgement')),
                      'invalid rejected decision')
-            stop = 'proposal_rejected'
+            stop = ('interruption_failed' if interruption is not None and
+                    not interruption['confirmed'] else 'proposal_rejected')
             break
         _require(record['disposition'] in ('unmodified', 'overridden') and
                  record['selected_action'] is not None and
@@ -468,6 +484,11 @@ class RecordedReplay:
         config = self.config
         # Historical timestamps are evidence, not measurements of replay latency.
         now = packets[0].captured_monotonic
+        from environment_interruption import InterruptionContract
+        interruption = decisions[-1]['action_record'].get('interruption')
+        contract = (InterruptionContract(**interruption['contract']) if interruption else
+                    InterruptionContract('recorded-replay-stop-v1', 'stop',
+                        'Stop scripted playback without a controller.'))
 
         class Policy:
             def reset(self):
@@ -484,6 +505,20 @@ class RecordedReplay:
                 return deepcopy(decisions[packet.sequence]['action_record']['proposed_action'])
 
         class Environment:
+            interruption_contract = contract
+
+            def interrupt(self, request):
+                _require(request.episode_id == self.episode_id and
+                         request.operation == contract.operation and
+                         request.observation_sequence == self.index,
+                         'replay interruption diverged')
+                record = decisions[self.index]['action_record']
+                evidence = record.get('interruption')
+                if evidence is not None:
+                    _require(request.reason == evidence['request']['reason'],
+                             'replay interruption reason diverged')
+                return evidence['confirmed'] if evidence is not None else True
+
             def reset(self, seed, episode_id):
                 _require(seed == config.seed, 'replay seed mismatch')
                 self.episode_id, self.index = episode_id, 0

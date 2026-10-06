@@ -110,6 +110,8 @@ class SupervisorPassTests(unittest.TestCase):
 
         class BrokenEnvironment:
             reset = environment.reset
+            interruption_contract = environment.interruption_contract
+            interrupt = environment.interrupt
 
             def step(self, action):
                 raise TimeoutError('transport failed')

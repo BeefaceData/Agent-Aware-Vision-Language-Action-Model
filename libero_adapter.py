@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from operator import index
 from time import monotonic
+from environment_interruption import InterruptionContract
 
 from episode_harness import ObservationPacket, StepResult, frame_references_for_observation
 
@@ -54,6 +55,16 @@ def read_action_horizon(environment, requested_override=None) -> ActionHorizon:
 
 
 class LiberoEnvironmentAdapter:
+    interruption_contract = InterruptionContract(
+        'libero-synchronous-stop-v1', 'stop',
+        'Disable adapter stepping until reset; synchronous simulation advances only on step.')
+
+    def interrupt(self, request):
+        if request.episode_id != self.episode_id or request.operation != 'stop':
+            raise ValueError('foreign LIBERO interruption')
+        self.ended = True
+        return True
+
     def __init__(self, environment, clock=monotonic):
         if environment.num_envs != 1:
             raise ValueError('exactly one environment is required')

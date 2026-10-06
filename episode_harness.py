@@ -745,6 +745,7 @@ class ActionRecord:
     recovery: dict | None = None
     intervention_budget: dict | None = None
     fallback: dict | None = None
+    interruption: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -976,8 +977,11 @@ def run_episode(
     time and terminate the attempt without executing the pending proposal unless
     baseline_fallback is configured and admits that proposal. Explicit selector
     rejection can also use this guard; internal budget/cooldown rejections cannot.
-    Interruptions and selector exceptions never trigger fallback. Refusal ends
-    dispatch but does not implement the adapter physical hold/stop contract.
+    Interruptions and selector exceptions never trigger fallback. Active decision
+    configurations require an adapter interruption_contract and interrupt(request)
+    before reset. Rejected dispatch invokes that declared hold/stop operation;
+    an unconfirmed acknowledgement ends with interruption_failed. No zero-action
+    substitute is generated, and interruption does not count as a policy action.
     The decider is assessed before action 1 and every configured interval of
     acknowledged actions thereafter. An optional sanitized assessment_trigger
     adds assessments between these fixed boundaries; it never postpones them.
@@ -1002,6 +1006,11 @@ def run_episode(
     if supervisor_decider is not None and any(callback is not None for callback in
                                              (supervisor, window_supervisor, action_selector)):
         raise ValueError('supervisor_decider requires exclusive decision ownership')
+
+    from environment_interruption import require_interruption, interrupt
+    interruption_contract = (require_interruption(environment) if any(
+        item is not None for item in (action_selector, supervisor_decider, baseline_fallback))
+        else None)
 
     from observation_window import ObservationWindowBuilder, WindowAction, WindowSettings
     settings = window_settings if window_settings is not None else WindowSettings()
@@ -1227,6 +1236,9 @@ def run_episode(
                 if fallback['selected'] == 'refuse':
                     resolution = ActionResolution('reject', reason=fallback['reason'])
             if resolution.kind == 'reject':
+                interruption = interrupt(environment, interruption_contract,
+                    ActionProposal(proposal_id, observation, proposed_action),
+                    resolution.reason, clock)
                 recorder.record_failure(
                     step, observation, deepcopy(proposed_action),
                     StepFailure('selection', 'ProposalRejected', FailedStepTiming(
@@ -1236,8 +1248,10 @@ def run_episode(
                                      None, None, 'rejected', resolution.reason,
                                      intervention_budget=deepcopy(budget_record),
                                      supervisor_abstention=abstention_response,
-                                     fallback=deepcopy(fallback))))
-                stop_reason = 'proposal_rejected'
+                                     fallback=deepcopy(fallback),
+                                     interruption=interruption)))
+                stop_reason = ('proposal_rejected' if interruption['confirmed']
+                               else 'interruption_failed')
                 break
             recovery_evidence = (dict(sequence=asdict(recovery_sequence), action_index=recovery_index)
                                  if recovery_sequence is not None else None)

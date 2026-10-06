@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Callable, Mapping, Sequence
+from environment_interruption import InterruptionContract
 
 from episode_harness import (EpisodeConfig, IngestionOutcome, ObservationPacket,
                              RobotStateCapture, StepFailure, StepResult, ViewCapture,
@@ -59,6 +60,17 @@ class ReplayPolicy:
 
 
 class ReplayEnvironment:
+    interruption_contract = InterruptionContract(
+        'scripted-replay-stop-v1', 'stop',
+        'Disable scripted stepping until reset; no physical controller is present.')
+
+    def interrupt(self, request):
+        if request.episode_id != self._episode_id or request.operation != 'stop':
+            raise ValueError('foreign replay interruption')
+        self.interruptions.append(request)
+        self._stopped = True
+        return True
+
     def __init__(self, seed: int, initial_observation: Any,
                  turns: Sequence[tuple[Any, ReplayStep]],
                  clock: Callable[[], float] = monotonic,
@@ -70,6 +82,8 @@ class ReplayEnvironment:
         self._turns = tuple(turns)
         self.actions: list[Any] = []
         self._episode_id = ''
+        self._stopped = True
+        self.interruptions = []
         self._clock = clock
         self._initial_camera_captures = initial_camera_captures
         self._max_camera_skew_seconds = max_camera_skew_seconds
@@ -91,6 +105,8 @@ class ReplayEnvironment:
         if seed != self._seed:
             raise ValueError(f'Replay requires seed {self._seed}')
         self.actions.clear()
+        self.interruptions.clear()
+        self._stopped = False
         self._episode_id = episode_id
         return self._packet(episode_id, 0, _CAPTURE_START,
                             self._initial_observation, self._clock(),
@@ -98,6 +114,8 @@ class ReplayEnvironment:
                             self._initial_robot_state_capture)
 
     def step(self, action: Any) -> StepResult:
+        if self._stopped:
+            raise RuntimeError('reset required after replay stop')
         index = len(self.actions)
         if index >= len(self._turns):
             raise AssertionError(f'Unexpected environment step {index + 1}')

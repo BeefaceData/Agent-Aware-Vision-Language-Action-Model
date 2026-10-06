@@ -28,6 +28,7 @@ from pathlib import Path
 from time import monotonic
 
 from baseline_environment import capture_environment
+from attempt_identity import AttemptIdentityRecorder, reserve_attempt
 from camera_evidence import CameraEvidenceRecorder
 from artifact_finalization import ArtifactResources
 from libero_adapter import LiberoEnvironmentAdapter, read_action_horizon
@@ -82,7 +83,7 @@ def main():
         f'smolvla_{args.suite}_task{args.task_id}_'
         + datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     )
-    out.mkdir(parents=True, exist_ok=False)
+    reserve_attempt(out)
     environment = capture_environment(out / 'environment.json', args.device)
     import gymnasium as gym
     import imageio.v2 as imageio
@@ -112,7 +113,7 @@ def main():
         'artifact_status': 'incomplete', 'artifact_diagnostics': [],
         'task_status': 'unknown',
     }
-    env = recorder = adapter = None
+    env = recorder = adapter = identity_recorder = None
     start = monotonic()
     try:
         selection = select_initial_state(args.suite, args.task_id, args.initial_state_id)
@@ -284,8 +285,30 @@ def main():
                       flush=True)
 
         episode_config = EpisodeConfig(args.seed, limit)
-        trace_recorder = TraceRecorder(out / 'replay', episode_config, recorder)
         adapter = LiberoEnvironmentAdapter(env, initial_state=selection)
+        identity_recorder = AttemptIdentityRecorder(out, episode_config, lambda: {
+            'task': {'suite': args.suite, 'task_id': args.task_id,
+                     'instruction': instruction},
+            'initial_state': dict(adapter.initial_state_evidence),
+            'seeds': {'global': args.seed, 'environment_reset': args.seed},
+            'policy_assets': summary['policy_assets'],
+            'environment': environment,
+            'settings': {'device': args.device, 'video_fps': args.video_fps,
+                         'render_backend': os.environ['MUJOCO_GL'],
+                         'action_horizon': asdict(horizon),
+                         'environment_config': {
+                             'task': args.suite, 'n_envs': 1,
+                             'gym_kwargs': {**cfg.gym_kwargs, 'task_ids': [args.task_id]},
+                             'env_cls': 'gymnasium.vector.SyncVectorEnv',
+                             'camera_name': cfg.camera_name, 'init_states': True,
+                             'control_mode': cfg.control_mode,
+                             'episode_length': args.max_steps},
+                         'processor_overrides': {
+                             'device': args.device,
+                             'tokenizer': summary['policy_assets']['assets']['backbone']},
+                         'mode': 'baseline'},
+        }, recorder)
+        trace_recorder = TraceRecorder(out / 'replay', episode_config, identity_recorder)
         outcome = run_episode(episode_config, BaselinePolicy(),
                               adapter, trace_recorder, show_progress)
         summary.update(status=('completed' if outcome.artifact_status == 'completed'
@@ -329,6 +352,8 @@ def main():
                 summary['status'] = 'pre_start_failure'
         raise
     finally:
+        if identity_recorder is not None:
+            summary.update(identity_recorder.reference)
         if adapter is not None:
             summary['initial_state'] = dict(adapter.initial_state_evidence)
         summary['total_seconds'] = monotonic() - start

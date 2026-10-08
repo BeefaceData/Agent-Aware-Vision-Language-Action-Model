@@ -230,6 +230,35 @@ lower endpoint, and complete interval report for audit. The caller verifies
 persisted replay or bundle evidence before supplying outcomes. This decision
 does not authorize a campaign or establish physical task performance.
 
+## Separate supervision and memory contributions
+
+`report_simulation_contributions(protocol, rows, verified_attempts)` reports
+three equal-task percentage-point contrasts from the same sealed, paired
+initial-state resamples: B minus A (no-memory supervision over baseline), C
+minus B (fixed-memory contribution over no-memory supervision), and C minus A
+(the overall primary comparison). Each entry contains the observed estimate,
+declared 95% paired-cluster interval, and a claim. `positive_evidence` requires
+an estimated, nondegenerate interval with a lower endpoint above zero;
+`no_positive_evidence` does not establish benefit, and `inconclusive` means the
+required evidence is unavailable or unsupported. The report carries the
+analysis limitations through without substituting pooled trial counts.
+
+```python
+from evaluation_acceptance import report_simulation_contributions
+
+contributions = report_simulation_contributions(protocol, rows,
+                                                verified_attempts)
+print(contributions['supervision'], contributions['memory'])
+```
+
+The primary acceptance report includes the same summary under
+`contributions`. Its C-minus-A `pass` remains the preregistered simulation
+gate; it does not establish a memory contribution. The separate
+`memory_based_improvement_supported` flag requires positive evidence for both
+C-minus-B and C-minus-A. When B improves over A but C performs worse than B,
+a positive C-minus-A result can still pass the primary gate while the
+memory-based improvement flag stays false.
+
 ## Pre-start replacement
 
 Declare `outcomes.pre_start_replacement` before freezing the protocol, with an

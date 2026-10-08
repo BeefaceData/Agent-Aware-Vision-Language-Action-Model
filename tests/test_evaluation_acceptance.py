@@ -6,7 +6,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from episode_harness import EpisodeConfig, run_episode
-from evaluation_acceptance import report_simulation_acceptance
+from evaluation_acceptance import (report_simulation_acceptance,
+                                   report_simulation_contributions)
 from evaluation_protocol import EvaluationProtocol
 from evaluation_schedule import build_evaluation_schedule
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
@@ -99,6 +100,34 @@ class SimulationAcceptanceTests(unittest.TestCase):
         self.assertEqual(report['decision'], 'inconclusive')
         self.assertEqual(report['lower_endpoint_pp'], 0)
         self.assertTrue(any('degenerate' in reason for reason in report['reasons']))
+
+    def test_supervision_gain_cannot_be_called_memory_improvement(self):
+        protocol, rows = self.schedule(5)
+        attempts = {}
+        for row in rows:
+            repetition = row['repetition']
+            condition = row['condition']
+            success = ((condition == 'no_memory' and repetition in (0, 1)) or
+                       (condition == 'fixed_memory' and repetition == 0))
+            attempts[row['attempt_id']] = self.episode(row, success)
+
+        report = report_simulation_acceptance(protocol, rows, attempts)
+        contributions = report['contributions']
+        self.assertEqual(report['decision'], 'pass')
+        self.assertEqual(contributions,
+                         report_simulation_contributions(protocol, rows,
+                                                         attempts))
+        self.assertAlmostEqual(contributions['supervision']['estimate_pp'], 40)
+        self.assertAlmostEqual(contributions['memory']['estimate_pp'], -20)
+        self.assertAlmostEqual(contributions['overall']['estimate_pp'], 20)
+        self.assertEqual(contributions['supervision']['claim'],
+                         'positive_evidence')
+        self.assertEqual(contributions['memory']['claim'],
+                         'no_positive_evidence')
+        self.assertEqual(contributions['overall']['claim'],
+                         'positive_evidence')
+        self.assertFalse(contributions['memory_based_improvement_supported'])
+        self.assertLess(contributions['memory']['interval_95_pp']['upper'], 0)
 
 
 if __name__ == '__main__':

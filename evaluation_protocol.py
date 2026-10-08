@@ -29,6 +29,34 @@ def _digest(value):
     return type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value) is not None
 
 
+def _validate_splits(splits):
+    _require(set(splits) == {'development', 'held_out'},
+             'development and held_out splits required')
+    seen_ids, seen_digests = {}, {}
+    for split, members in splits.items():
+        _require(type(members) is list and bool(members),
+                 f'nonempty {split} membership required')
+        for member in members:
+            _require(type(member) is dict and set(member) == {
+                'suite', 'task_id', 'state_id', 'selected_sha256', 'digest_encoding'},
+                f'invalid {split} task/state identity')
+            suite, task, state = member['suite'], member['task_id'], member['state_id']
+            _require(suite == 'libero_10' and type(task) is int and 0 <= task < 10
+                     and type(state) is int and state >= 0
+                     and _digest(member['selected_sha256'])
+                     and member['digest_encoding'] == 'little-endian-float64-vector-v1',
+                     f'invalid {split} task/state identity')
+            by_id = (suite, task, state)
+            by_digest = (suite, task, member['selected_sha256'])
+            _require(by_id not in seen_ids and by_digest not in seen_digests,
+                     f'duplicate or overlapping task/state membership: {split}')
+            seen_ids[by_id] = split
+            seen_digests[by_digest] = split
+    covered = {member['task_id'] for member in splits['held_out']}
+    _require(covered == set(range(10)),
+             f'held_out missing LIBERO-10 tasks: {sorted(set(range(10)) - covered)}')
+
+
 def _validate(document):
     _require(type(document) is dict and set(document) == _FIELDS | {'version'},
              'complete protocol fields required')
@@ -41,6 +69,7 @@ def _validate(document):
              'named conditions required')
     _require(all(type(name) is str and name.strip() for name in document['splits']),
              'named splits required')
+    _validate_splits(document['splits'])
     _require(all(type(name) is str and name.strip() for name in document['seeds']),
              'named seeds required')
     _require(all(type(name) is str and name.strip() for name in document['allocation']),

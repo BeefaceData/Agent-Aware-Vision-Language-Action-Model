@@ -8,12 +8,19 @@ import unittest
 from evaluation_protocol import EvaluationProtocol, ProtocolError
 
 
+def member(task, state, digest=None):
+    return {'suite': 'libero_10', 'task_id': task, 'state_id': state,
+            'selected_sha256': digest or f'{task * 10 + state:064x}',
+            'digest_encoding': 'little-endian-float64-vector-v1'}
+
+
 def declaration():
     return {
         'conditions': {'baseline': {'supervisor': False},
                        'no_memory': {'supervisor': True, 'memory': 'empty'},
                        'fixed_memory': {'supervisor': True, 'memory': 'snapshot-pin'}},
-        'splits': {'development': ['state-0'], 'held_out': ['state-1']},
+        'splits': {'development': [member(0, 0)],
+                   'held_out': [member(task, 1) for task in range(10)]},
         'seeds': {'pairing': [17], 'bootstrap': 701},
         'allocation': {'task_0': {'pairs': 1, 'order': ['baseline', 'no_memory',
                                                       'fixed_memory']}},
@@ -84,6 +91,43 @@ class EvaluationProtocolTests(unittest.TestCase):
         self.path.unlink()
         with self.assertRaises(ProtocolError):
             frozen.read()
+
+    def test_rejects_overlap_by_state_id_even_with_different_digest(self):
+        fields = declaration()
+        fields['splits']['held_out'][0] = member(0, 0, 'f' * 64)
+        with self.assertRaisesRegex(ProtocolError, 'overlapping'):
+            EvaluationProtocol.freeze(self.path, **fields)
+        self.assertFalse(self.path.exists())
+
+    def test_rejects_overlap_by_state_digest_even_with_different_id(self):
+        fields = declaration()
+        fields['splits']['held_out'][0] = member(0, 7, member(0, 0)['selected_sha256'])
+        with self.assertRaisesRegex(ProtocolError, 'overlapping'):
+            EvaluationProtocol.freeze(self.path, **fields)
+
+    def test_rejects_duplicates_inside_each_split(self):
+        for split in ('development', 'held_out'):
+            fields = declaration()
+            fields['splits'][split].append(dict(fields['splits'][split][0]))
+            with self.subTest(split=split), self.assertRaisesRegex(ProtocolError, 'duplicate'):
+                EvaluationProtocol.freeze(self.path, **fields)
+
+    def test_rejects_absent_task_coverage_and_seed_only_membership(self):
+        fields = declaration()
+        fields['splits']['held_out'].pop()
+        with self.assertRaisesRegex(ProtocolError, 'missing LIBERO-10 tasks: \\[9\\]'):
+            EvaluationProtocol.freeze(self.path, **fields)
+        fields = declaration()
+        fields['splits']['development'] = [{'seed': 17}]
+        with self.assertRaisesRegex(ProtocolError, 'task/state identity'):
+            EvaluationProtocol.freeze(self.path, **fields)
+
+    def test_disjoint_tasks_may_reuse_state_numbers_and_seeds(self):
+        fields = declaration()
+        fields['splits']['development'] = [member(9, 0)]
+        fields['splits']['held_out'][0] = member(0, 0)
+        frozen = EvaluationProtocol.freeze(self.path, **fields)
+        self.assertEqual(frozen.read()['splits'], fields['splits'])
 
 
 if __name__ == '__main__':

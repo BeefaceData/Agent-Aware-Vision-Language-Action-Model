@@ -101,3 +101,28 @@ other row. Inspect its evidence and apply the protocol's pre-start exclusion
 or post-start failure rule explicitly; do not erase it or silently run the
 same attempt ID again. This interface does not implement replacement policy
 or authorize a live campaign.
+
+## Primary attempt accounting
+
+`score_evaluation_outcomes(protocol, rows, attempts)` audits the sealed schedule
+and returns one disposition per row. Pass a mapping from `attempt_id` to a
+completed `EpisodeOutcome`, its dictionary from `run_evaluation_schedule`, or
+an `EpisodeInterruption` captured from a raised harness exception. Verify
+retained replay or bundle evidence before scoring persisted dictionaries; this
+function accounts for outcomes but does not authenticate artifacts.
+
+The valid-start boundary is the accepted initial observation. A completed
+outcome has crossed it. An interruption with `pre_start_failure` and no last
+observation is listed as a pre-start exclusion. Once an initial observation
+exists, controller errors, timeouts, exhausted intervention budgets, and other
+post-start interruptions each add one failure to the primary denominator,
+even when zero actions were executed. Completed unsuccessful episodes do the
+same. Only evaluator success adds to the numerator. Every scheduled identity
+appears in `dispositions`, including missing evidence. Incomplete artifacts,
+conflicting fields, and unknown start boundaries are marked unscoreable.
+
+`success_rate` is `None` while any row is missing or unscoreable, or while
+there are no valid starts. This prevents a partial campaign from being
+presented as its final end-to-end success rate. Pre-start replacement is a
+separate declared policy; this scorer does not replace attempts or launch
+trials.

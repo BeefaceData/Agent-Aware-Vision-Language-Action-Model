@@ -44,6 +44,9 @@ A standalone CUDA rollout was completed on this machine. Runtime and memory requ
 
 ## Setup
 
+For a clean-environment import and task/state check before an authorized
+episode, follow the [baseline startup preflight](docs/baseline-startup.md).
+
 Run these commands in a terminal. Conda, Git, and a working NVIDIA driver are prerequisites for the tested CUDA setup.
 
 ### 1. Clone the repository
@@ -106,6 +109,7 @@ The destination must not already exist, preventing accidental overwrites. Relati
 |---|---|---|
 | `--suite` | `libero_10` | LIBERO task suite |
 | `--task-id` | `0` | Zero-based task index within the suite |
+| `--initial-state-id` | `0` | Explicit index in the selected task's initial-state catalog |
 | `--seed` | `0` | Random seed |
 | `--policy` | `HuggingFaceVLA/smolvla_libero` | Frozen baseline repository; other values are rejected |
 | `--device` | `cuda` | `cuda` or `cpu`; recorded run used CUDA |
@@ -829,8 +833,8 @@ The immediate test case is detecting repeated pickup attempts without progress a
 - Selection of one task uses `task_ids` inside the Python environment factory's `gym_kwargs`. The previously attempted `--env.task_ids` evaluator CLI option was unsupported in the tested release.
 - Video frames come from adapter-selected observations, including the terminal envelope when the vector environment resets in the same step.
 - The policy is frozen; the script does not train an observer or implement corrective actions.
-- The recorded initial-state index is 0. Changing the seed alone should not be interpreted as a comprehensive sweep of LIBERO initial states.
-- The checkpoint is referenced by repository name without an immutable revision. Exact replication also requires recording checkpoint revisions and a full environment lock.
+- The historical standalone run used initial-state index 0. Changing the seed alone does not select another catalog state.
+- Current runs enforce the checkpoint and backbone revisions in `policy-assets.lock.json`; the earlier recorded results do not establish those asset identities or a complete environment lock.
 - Generated runs and model weights are excluded from Git. The result summaries above are documented observations; raw run artifacts are not bundled here.
 
 ## Sources and acknowledgments

@@ -6,9 +6,11 @@ import unittest
 
 from episode_harness import EpisodeConfig, run_episode
 from evaluation_protocol import EvaluationProtocol, ProtocolError
+from evaluation_resume import run_evaluation_schedule
 from evaluation_schedule import (audit_evaluation_schedule,
                                  build_evaluation_schedule)
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
+from recorded_replay import TraceRecorder
 from tests.test_evaluation_protocol import declaration, member
 
 
@@ -109,6 +111,58 @@ class EvaluationScheduleTests(unittest.TestCase):
                                   policy, environment, ReplayRecorder())
             outcomes.append((outcome.success, outcome.steps, environment.actions))
         self.assertEqual(outcomes, [(True, 1, ['reach'])] * 3)
+
+    def test_interrupted_replay_campaign_resumes_without_duplicates(self):
+        protocol = self.protocol(pairs=1)
+        rows = build_evaluation_schedule(protocol)
+        directory = self.path.with_name('attempts')
+        called = []
+
+        def replay(row, attempt):
+            called.append(row['attempt_id'])
+            self.assertEqual(attempt.name, row['attempt_id'])
+            config = EpisodeConfig(seed=row['environment_seed'], max_steps=2)
+            recorder = TraceRecorder(attempt / 'replay', config, ReplayRecorder())
+            outcome = run_episode(
+                config,
+                ReplayPolicy((('visible', 'reach'),)),
+                ReplayEnvironment(row['environment_seed'], 'visible', (
+                    ('reach', ReplayStep('held', 1.0, True, True, False)),)),
+                recorder)
+            recorder.seal(outcome)
+            return outcome
+
+        first = run_evaluation_schedule(protocol, rows, directory, replay, max_new=7)
+        self.assertEqual(len(first), 7)
+        preserved = [row['episode_id'] for row in first]
+        final = run_evaluation_schedule(protocol, rows, directory, replay)
+        self.assertEqual(len(final), 30)
+        self.assertEqual([row['episode_id'] for row in final[:7]], preserved)
+        self.assertEqual(called, [row['attempt_id'] for row in rows])
+        self.assertEqual(len({row['episode_id'] for row in final}), 30)
+        self.assertEqual(run_evaluation_schedule(protocol, rows, directory, replay), final)
+        self.assertEqual(len(called), 30)
+        trace = directory / rows[2]['attempt_id'] / 'replay' / 'decisions.jsonl'
+        with trace.open('a', encoding='utf-8') as stream:
+            stream.write('\n')
+        with self.assertRaisesRegex(ProtocolError, 'invalid retained episode'):
+            run_evaluation_schedule(protocol, rows, directory, replay)
+        self.assertEqual(len(called), 30)
+
+    def test_incomplete_or_mismatched_attempt_blocks_before_new_execution(self):
+        protocol = self.protocol(pairs=1)
+        rows = build_evaluation_schedule(protocol)
+        directory = self.path.with_name('attempts')
+        (directory / rows[0]['attempt_id']).mkdir(parents=True)
+        with self.assertRaisesRegex(ProtocolError, 'incomplete'):
+            run_evaluation_schedule(protocol, rows, directory,
+                                    lambda *_: self.fail('must not run'))
+        record = directory / rows[0]['attempt_id'] / 'schedule-result.json'
+        record.write_text('{"version": 1, "schedule_entry": {}, '
+                          '"outcome": {"artifact_status": "completed"}}')
+        with self.assertRaisesRegex(ProtocolError, 'inconsistent'):
+            run_evaluation_schedule(protocol, rows, directory,
+                                    lambda *_: self.fail('must not run'))
 
 
 if __name__ == '__main__':

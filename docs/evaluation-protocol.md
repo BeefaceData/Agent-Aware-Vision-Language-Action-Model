@@ -75,3 +75,29 @@ allocations, contiguous A/B/C clusters, paired state/seed identity, and
 condition position balance by task and globally. Retain the protocol reference, rows, and audit
 report with run evidence. The schedule assigns attempts only; it does not run
 an evaluation, verify simulator state bytes, or grant resource approval.
+
+## Resume a scheduled campaign
+
+`run_evaluation_schedule(protocol, rows, directory, run, max_new=None)` audits
+the sealed schedule and every existing attempt before it calls `run`. The
+callback receives one row and a newly reserved directory named by its
+`attempt_id`; it returns the complete `EpisodeOutcome`. It must seal a recorded
+replay under `replay/` or a complete artifact bundle in that directory. The
+runner checks that evidence and its replayed outcome before writing
+`schedule-result.json`. Later calls verify it again and skip the row. The
+returned outcome list follows schedule order; `max_new` can stop after a
+declared number of newly completed rows and resume later.
+
+```python
+from evaluation_resume import run_evaluation_schedule
+
+outcomes = run_evaluation_schedule(protocol, rows, 'evidence/attempts', run_one)
+```
+
+Keep the directory and protocol reference together. A reserved directory
+without a verified completion record is an incomplete attempt, even when the
+callback raised before the first action. Resume blocks before starting any
+other row. Inspect its evidence and apply the protocol's pre-start exclusion
+or post-start failure rule explicitly; do not erase it or silently run the
+same attempt ID again. This interface does not implement replacement policy
+or authorize a live campaign.

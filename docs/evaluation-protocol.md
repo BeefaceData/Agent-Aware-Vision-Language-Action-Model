@@ -205,6 +205,31 @@ its computed endpoints for inspection but marks the result `inconclusive`
 and names the degenerate contrast. A positive improvement claim requires
 `status: estimated`; an inconclusive report cannot pass the gate.
 
+## Simulation improvement acceptance
+
+`report_simulation_acceptance(protocol, rows, verified_attempts)` applies the
+primary C (fixed memory) minus A (frozen baseline) rule to the same sealed
+equal-task macro estimate and paired-cluster interval. It returns `pass` only
+when the observed gain is **at least 10 percentage points** and the valid 95%
+lower endpoint is **strictly greater than zero**. The lower endpoint need not
+reach 10 points. A relative 10% increase in success rate does not meet the
+observed-gain rule unless it also equals at least 10 percentage points.
+
+```python
+from evaluation_acceptance import report_simulation_acceptance
+
+decision = report_simulation_acceptance(protocol, rows, verified_attempts)
+print(decision['decision'], decision['reasons'])
+```
+
+An estimated interval that misses either threshold yields `fail` with the
+failed condition named. Missing outcomes, insufficient independent clusters,
+or a degenerate primary interval yield `inconclusive`, with the interval
+limitations carried into `reasons`. The result includes the observed gain,
+lower endpoint, and complete interval report for audit. The caller verifies
+persisted replay or bundle evidence before supplying outcomes. This decision
+does not authorize a campaign or establish physical task performance.
+
 ## Pre-start replacement
 
 Declare `outcomes.pre_start_replacement` before freezing the protocol, with an

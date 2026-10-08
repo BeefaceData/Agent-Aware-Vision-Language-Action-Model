@@ -150,6 +150,25 @@ successes by pooled valid starts does not give the equal-task estimator when
 denominators differ. The report also retains all task rows and warnings so an
 incomplete suite cannot be presented as a measured improvement.
 
+## Paired initial-state analysis units
+
+`assemble_paired_state_clusters(protocol, rows, attempts)` groups the scored
+schedule by the sealed task and selected-state identity. Each independent
+starting state has nested repetitions, and each repetition retains the
+baseline, no-memory, and fixed-memory attempt ID, environment seed, outcome
+status, and reason. Repeating one state with different pairing seeds adds
+repetitions to that state; it does not add independent starting states.
+
+The function audits rows against the frozen protocol before grouping. Changed
+state digests, misaligned seeds, or other schedule changes raise
+`ProtocolError`. Missing, pre-start excluded, or unscoreable arm outcomes leave
+the repetition visible but mark it unpaired and add a diagnostic. Only a
+repetition with scoreable post-start outcomes for all three arms is paired.
+The returned `independent_starting_states` counts distinct scheduled states;
+inspect `paired_repetitions` and `diagnostics` before treating any of them as
+complete analysis evidence. As with outcome scoring, the caller must verify
+retained artifacts before supplying persisted outcomes.
+
 ## Pre-start replacement
 
 Declare `outcomes.pre_start_replacement` before freezing the protocol, with an

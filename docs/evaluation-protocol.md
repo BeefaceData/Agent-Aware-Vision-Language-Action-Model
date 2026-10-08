@@ -180,7 +180,8 @@ The resample calculates each condition's task success rate from those retained
 repetitions, then averages the ten task differences in percentage points.
 The interval endpoints are the 2.5th and 97.5th percentiles, using linear
 interpolation between adjacent sorted resamples. The report records the seed,
-resample count, protocol ID, observed equal-task differences, and endpoints.
+resample count, protocol ID, observed equal-task differences, endpoints,
+`status`, and specific `limitations`.
 
 ```python
 from evaluation_clusters import report_paired_cluster_intervals
@@ -189,15 +190,20 @@ intervals = report_paired_cluster_intervals(protocol, rows, verified_attempts)
 print(intervals['intervals_pp']['fixed_memory_minus_baseline'])
 ```
 
-Every scheduled repetition must have scoreable outcomes in all three arms;
-otherwise the function raises `ProtocolError` with the first missing or
-unscoreable pair. This avoids an interval based on selectively complete pairs.
+Every scheduled repetition must have scoreable outcomes in all three arms.
+Missing or unscoreable evidence produces `status: inconclusive`, names each
+incomplete pair, and leaves all interval values `None`. A task with no paired
+state cluster is named explicitly. A task with only one independent paired
+state cluster is also inconclusive: repeated seeds on that state do not
+increase the number of independent clusters. No alternate estimator is used.
 The sampling assumption is that distinct selected initial states within a
 task are the independent units; repeated seeds on one state are dependent and
 stay grouped. A numerical interval alone does not establish that independent
-state coverage is sufficient or that the bootstrap is nondegenerate. The
-separate evidence-sufficiency report must assess those limitations before a
-positive improvement claim.
+state coverage is sufficient or that the bootstrap is nondegenerate. When
+the fixed-memory versus baseline interval has zero width, the report keeps
+its computed endpoints for inspection but marks the result `inconclusive`
+and names the degenerate contrast. A positive improvement claim requires
+`status: estimated`; an inconclusive report cannot pass the gate.
 
 ## Pre-start replacement
 

@@ -23,7 +23,8 @@ class PairedClusterTests(unittest.TestCase):
                            'bootstrap': 991}
         fields['allocation'] = {f'task_{task}': {'pairs': 3}
                                 for task in range(10)}
-        fields['splits']['held_out'].append(member(0, 2))
+        fields['splits']['held_out'].extend(member(task, 2)
+                                            for task in range(10))
         self.protocol = EvaluationProtocol.freeze(
             Path(temporary.name) / 'protocol.json', **fields)
         self.rows = build_evaluation_schedule(self.protocol)
@@ -45,7 +46,7 @@ class PairedClusterTests(unittest.TestCase):
                     for row in self.rows}
         report = assemble_paired_state_clusters(self.protocol, self.rows,
                                                 attempts)
-        self.assertEqual(report['independent_starting_states'], 11)
+        self.assertEqual(report['independent_starting_states'], 20)
         self.assertEqual(report['diagnostics'], [])
         task_zero = [cluster for cluster in report['clusters']
                      if cluster['task_id'] == 0]
@@ -68,7 +69,7 @@ class PairedClusterTests(unittest.TestCase):
                     for row in self.rows if row != target}
         report = assemble_paired_state_clusters(self.protocol, self.rows,
                                                 attempts)
-        self.assertEqual(report['independent_starting_states'], 11)
+        self.assertEqual(report['independent_starting_states'], 20)
         cluster = next(cluster for cluster in report['clusters']
                        if cluster['task_id'] == 0 and cluster['state_id'] == 1)
         self.assertEqual(cluster['paired_repetitions'], 1)
@@ -107,7 +108,9 @@ class PairedClusterTests(unittest.TestCase):
                          report['intervals_pp'][contrast])
         self.assertEqual(report['analysis_seed'], 991)
         self.assertEqual(report['resamples'], 10_000)
-        self.assertEqual(report['independent_starting_states'], 11)
+        self.assertEqual(report['independent_starting_states'], 20)
+        self.assertEqual(report['status'], 'estimated')
+        self.assertEqual(report['limitations'], [])
         self.assertEqual(report_paired_cluster_intervals(self.protocol, self.rows,
                                                         attempts), report)
 
@@ -116,8 +119,13 @@ class PairedClusterTests(unittest.TestCase):
                     for row in self.rows}
         missing = dict(attempts)
         del missing[self.rows[0]['attempt_id']]
-        with self.assertRaisesRegex(ProtocolError, 'incomplete paired state'):
-            report_paired_cluster_intervals(self.protocol, self.rows, missing)
+        report = report_paired_cluster_intervals(self.protocol, self.rows, missing)
+        self.assertEqual(report['status'], 'inconclusive')
+        first = self.rows[0]
+        self.assertIn(f"task {first['task_id']} state {first['state_id']} "
+                      f"repetition {first['repetition']}: "
+                      f"{first['condition']}: missing", report['limitations'])
+        self.assertTrue(all(value is None for value in report['intervals_pp'].values()))
 
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -127,6 +135,42 @@ class PairedClusterTests(unittest.TestCase):
                                           **fields)
         with self.assertRaisesRegex(ProtocolError, 'bootstrap seed'):
             report_paired_cluster_intervals(wrong, [], {})
+
+    def test_all_success_has_degenerate_primary_interval(self):
+        attempts = {row['attempt_id']: self.episode(row, True)
+                    for row in self.rows}
+        report = report_paired_cluster_intervals(self.protocol, self.rows,
+                                                 attempts)
+        self.assertEqual(report['status'], 'inconclusive')
+        self.assertEqual(report['macro_differences_pp']
+                         ['fixed_memory_minus_baseline'], 0)
+        self.assertEqual(report['intervals_pp']
+                         ['fixed_memory_minus_baseline'],
+                         {'lower': 0.0, 'upper': 0.0})
+        self.assertIn('degenerate zero-width bootstrap interval',
+                      report['limitations'][0])
+
+    def test_sparse_and_missing_task_clusters_are_inconclusive(self):
+        attempts = {row['attempt_id']: self.episode(row, False)
+                    for row in self.rows}
+        sparse = {identity: outcome for identity, outcome in attempts.items()
+                  if not any(row['attempt_id'] == identity and
+                             row['task_id'] == 1 and row['state_id'] == 2
+                             for row in self.rows)}
+        report = report_paired_cluster_intervals(self.protocol, self.rows,
+                                                 sparse)
+        self.assertEqual(report['status'], 'inconclusive')
+        self.assertTrue(any('task 1: only 1 independent paired' in reason
+                            for reason in report['limitations']))
+        missing = {row['attempt_id']: attempts[row['attempt_id']]
+                   for row in self.rows if row['task_id'] != 2}
+        report = report_paired_cluster_intervals(self.protocol, self.rows,
+                                                 missing)
+        self.assertEqual(report['status'], 'inconclusive')
+        self.assertIn('task 2: no paired initial-state clusters',
+                      report['limitations'])
+        self.assertIsNone(report['macro_differences_pp']
+                          ['fixed_memory_minus_baseline'])
 
 
 if __name__ == '__main__':

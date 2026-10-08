@@ -78,7 +78,8 @@ def report_paired_cluster_intervals(protocol, rows, attempts):
 
     Each task independently draws as many initial states as it contains. A
     drawn state contributes every repetition and all three arms together.
-    Incomplete pairs are rejected rather than silently changing denominators.
+    Incomplete or insufficient evidence is reported as inconclusive rather
+    than silently changing denominators or selecting another estimator.
     The caller verifies persisted attempt artifacts before analysis.
     """
     declaration = protocol.read()
@@ -90,9 +91,33 @@ def report_paired_cluster_intervals(protocol, rows, attempts):
         raise ProtocolError('nonnegative integer bootstrap seed required')
 
     assembled = assemble_paired_state_clusters(protocol, rows, attempts)
-    if assembled['diagnostics']:
-        raise ProtocolError('incomplete paired state evidence: ' +
-                            assembled['diagnostics'][0])
+    comparisons = (('no_memory', 'baseline'), ('fixed_memory', 'baseline'),
+                   ('fixed_memory', 'no_memory'))
+    names = tuple(f'{left}_minus_{right}' for left, right in comparisons)
+    point = report_macro_improvement(protocol, rows, attempts)
+    base = {'protocol_id': assembled['protocol_id'],
+            'estimator': 'equal-task-macro',
+            'interval_method': 'stratified-paired-cluster-bootstrap-95',
+            'analysis_seed': seed, 'resamples': 10_000,
+            'independent_starting_states': assembled['independent_starting_states'],
+            'macro_differences_pp': point['macro_differences_pp']}
+    limitations = list(assembled['diagnostics'])
+    paired_by_task = defaultdict(list)
+    for cluster in assembled['clusters']:
+        if cluster['paired_repetitions']:
+            paired_by_task[cluster['task_id']].append(cluster)
+    for task in range(10):
+        count = len(paired_by_task[task])
+        if count == 0:
+            limitations.append(f'task {task}: no paired initial-state clusters')
+        elif count < 2:
+            limitations.append(f'task {task}: only {count} independent paired '
+                               'initial-state cluster; at least 2 required')
+    if limitations:
+        return {**base, 'status': 'inconclusive',
+                'limitations': limitations,
+                'intervals_pp': {name: None for name in names}}
+
     by_task = defaultdict(list)
     for cluster in assembled['clusters']:
         counts = {condition: [0, 0] for condition in CONDITIONS}
@@ -102,11 +127,8 @@ def report_paired_cluster_intervals(protocol, rows, attempts):
                 counts[condition][0] += (repetition['conditions'][condition]
                                          ['status'] == 'success')
         by_task[cluster['task_id']].append(counts)
-    if set(by_task) != set(range(10)) or any(not by_task[task] for task in range(10)):
+    if set(by_task) != set(range(10)):
         raise ProtocolError('all ten tasks need paired state clusters')
-
-    comparisons = (('no_memory', 'baseline'), ('fixed_memory', 'baseline'),
-                   ('fixed_memory', 'no_memory'))
     draws = {f'{left}_minus_{right}': [] for left, right in comparisons}
     random = Random(seed)
     for _ in range(10_000):
@@ -126,16 +148,14 @@ def report_paired_cluster_intervals(protocol, rows, attempts):
                 sum(100 * (rates[left] - rates[right])
                     for rates in task_rates) / 10)
 
-    point = report_macro_improvement(protocol, rows, attempts)
     intervals = {}
     for name, values in draws.items():
         values.sort()
         intervals[name] = {'lower': _percentile(values, .025),
                            'upper': _percentile(values, .975)}
-    return {'protocol_id': assembled['protocol_id'],
-            'estimator': 'equal-task-macro',
-            'interval_method': 'stratified-paired-cluster-bootstrap-95',
-            'analysis_seed': seed, 'resamples': 10_000,
-            'independent_starting_states': assembled['independent_starting_states'],
-            'macro_differences_pp': point['macro_differences_pp'],
-            'intervals_pp': intervals}
+    primary = 'fixed_memory_minus_baseline'
+    if intervals[primary]['lower'] == intervals[primary]['upper']:
+        limitations.append('fixed_memory_minus_baseline: degenerate '
+                           'zero-width bootstrap interval')
+    return {**base, 'status': 'inconclusive' if limitations else 'estimated',
+            'limitations': limitations, 'intervals_pp': intervals}

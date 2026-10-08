@@ -126,3 +126,37 @@ there are no valid starts. This prevents a partial campaign from being
 presented as its final end-to-end success rate. Pre-start replacement is a
 separate declared policy; this scorer does not replace attempts or launch
 trials.
+
+## Pre-start replacement
+
+Declare `outcomes.pre_start_replacement` before freezing the protocol, with an
+`eligible_stages` list drawn from `policy_reset`, `environment_reset`, and
+`initial_observation`, plus a nonnegative integer
+`max_replacements_per_attempt`. The separate
+`next_pre_start_replacement(protocol, rows, row, history)` interface verifies
+that rule and the complete ordered history. Its first `(attempt_id, evidence)`
+pair is the scheduled attempt; subsequent pairs use the replacement identities
+returned by earlier calls. Evidence must be an `EpisodeInterruption` with a
+matching environment seed, a declared pre-start stage, no accepted initial
+observation, and no executed or failed action. A completed outcome or a
+post-start interruption cannot be replaced. The allowance applies to each
+original scheduled attempt, including repeated initialization failures.
+
+```python
+from evaluation_replacement import next_pre_start_replacement
+
+plan = next_pre_start_replacement(
+    protocol, rows, row, [(row['attempt_id'], original_interruption)])
+# Retain plan and original evidence; start the rerun under plan['attempt_id'].
+```
+
+The plan contains the original schedule row, new attempt ID, immediate parent
+ID, replacement number, and the provenance of every failed initialization.
+Store the plan and all attempt evidence with the campaign. Never delete or
+reuse the original directory reserved by `run_evaluation_schedule`. Run the
+replacement as a new attempt with the same declared state, condition, and
+environment seed. A successful replacement supplies the outcome for the
+scheduled row in primary scoring, while the original and every replacement
+remain in the infrastructure report. This planner does not verify persisted
+artifacts or launch a live attempt; the caller must validate each replay or
+bundle before scoring it.

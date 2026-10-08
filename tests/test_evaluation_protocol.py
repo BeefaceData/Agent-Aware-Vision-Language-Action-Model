@@ -29,7 +29,11 @@ def declaration():
                      'interval': 'stratified-paired-cluster-bootstrap-95'},
         'outcomes': {'success': 'evaluator-terminal-success',
                      'post_start_system_failure': 'primary-denominator',
-                     'pre_start_exclusion': 'declared-replacement-only'},
+                     'pre_start_exclusion': 'declared-replacement-only',
+                     'pre_start_replacement': {
+                         'eligible_stages': ['policy_reset', 'environment_reset',
+                                             'initial_observation'],
+                         'max_replacements_per_attempt': 1}},
     }
 
 

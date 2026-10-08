@@ -4,7 +4,7 @@ from dataclasses import asdict, is_dataclass
 
 from episode_harness import EpisodeInterruption, EpisodeOutcome
 from evaluation_protocol import ProtocolError
-from evaluation_schedule import audit_evaluation_schedule
+from evaluation_schedule import CONDITIONS, audit_evaluation_schedule
 
 
 def score_evaluation_outcomes(protocol, rows, attempts):
@@ -95,3 +95,55 @@ def score_evaluation_outcomes(protocol, rows, attempts):
         not counts['unscoreable'] else None)
     return {'protocol_id': protocol.reference['protocol_id'],
             **counts, 'dispositions': dispositions}
+
+
+def report_task_outcomes(protocol, rows, attempts):
+    """Report every sealed task and condition before any aggregate analysis.
+
+    Differences are percentage points and require complete, scoreable evidence
+    for both conditions. A missing task stays in the report with a warning.
+    """
+    scored = score_evaluation_outcomes(protocol, rows, attempts)
+    tasks = []
+    warnings = []
+    for task_id in range(10):
+        conditions = {}
+        for condition in CONDITIONS:
+            dispositions = [item for item in scored['dispositions']
+                            if item['task_id'] == task_id and
+                            item['condition'] == condition]
+            statuses = [item['status'] for item in dispositions]
+            successes = statuses.count('success')
+            attempts_count = successes + statuses.count('post_start_failure')
+            missing = statuses.count('missing')
+            unscoreable = statuses.count('unscoreable')
+            pre_start_exclusions = statuses.count('pre_start_exclusion')
+            rate = (successes / attempts_count if attempts_count and
+                    not missing and not unscoreable else None)
+            conditions[condition] = {
+                'scheduled': len(dispositions), 'attempts': attempts_count,
+                'successes': successes, 'missing_evidence': missing,
+                'unscoreable': unscoreable,
+                'pre_start_exclusions': pre_start_exclusions,
+                'success_rate': rate,
+            }
+            if missing or unscoreable:
+                warnings.append(f'task {task_id} {condition}: '
+                                f'{missing} missing, {unscoreable} unscoreable')
+            if not attempts_count:
+                warnings.append(f'task {task_id} {condition}: no valid starts')
+        if not any(item['attempts'] for item in conditions.values()):
+            warnings.append(f'task {task_id}: no valid starts')
+        differences = {}
+        for left, right in (('no_memory', 'baseline'),
+                            ('fixed_memory', 'baseline'),
+                            ('fixed_memory', 'no_memory')):
+            first = conditions[left]['success_rate']
+            second = conditions[right]['success_rate']
+            differences[f'{left}_minus_{right}'] = (
+                100 * (first - second) if first is not None and
+                second is not None else None)
+        tasks.append({'task_id': task_id, 'conditions': conditions,
+                      'differences_pp': differences})
+    return {'protocol_id': scored['protocol_id'], 'tasks': tasks,
+            'warnings': warnings}

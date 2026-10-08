@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from episode_harness import EpisodeConfig, PreStartFailure, run_episode
-from evaluation_outcomes import score_evaluation_outcomes
+from evaluation_outcomes import report_task_outcomes, score_evaluation_outcomes
 from evaluation_protocol import EvaluationProtocol, ProtocolError
 from evaluation_schedule import build_evaluation_schedule
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
@@ -92,6 +92,73 @@ class EvaluationOutcomeTests(unittest.TestCase):
                          ['pre_start_exclusion', 'unscoreable', 'missing'])
         with self.assertRaisesRegex(ProtocolError, 'outside sealed schedule'):
             score_evaluation_outcomes(self.protocol, self.rows, {'other': incomplete})
+
+    def test_task_report_keeps_regression_and_missing_tasks_visible(self):
+        # Public complete-episode replay supplies the outcomes; unique IDs
+        # identify the retained evidence for each scheduled attempt.
+        attempts = {}
+        for row in self.rows:
+            task, condition = row['task_id'], row['condition']
+            if task == 3 or (task == 2 and condition == 'fixed_memory'):
+                continue
+            success = ((task == 0 and condition != 'fixed_memory') or
+                       (task == 1 and condition == 'fixed_memory'))
+            attempts[row['attempt_id']] = replace(
+                self.episode(success=success, terminated=True),
+                episode_id=row['attempt_id'])
+
+        report = report_task_outcomes(self.protocol, self.rows, attempts)
+        self.assertEqual(report['protocol_id'], self.protocol.reference['protocol_id'])
+        self.assertEqual(len(report['tasks']), 10)
+        self.assertEqual(
+            [[task['conditions'][condition]['successes']
+              for condition in ('baseline', 'no_memory', 'fixed_memory')]
+             for task in report['tasks']],
+            [[1, 1, 0], [0, 0, 1]] + [[0, 0, 0]] * 8)
+        self.assertEqual(
+            [[task['conditions'][condition]['missing_evidence']
+              for condition in ('baseline', 'no_memory', 'fixed_memory')]
+             for task in report['tasks']],
+            [[0, 0, 0]] * 2 + [[0, 0, 1], [1, 1, 1]] +
+            [[0, 0, 0]] * 6)
+        harmed = report['tasks'][0]
+        self.assertEqual(harmed['conditions']['baseline']['successes'], 1)
+        self.assertEqual(harmed['conditions']['fixed_memory']['attempts'], 1)
+        self.assertEqual(harmed['differences_pp']['fixed_memory_minus_baseline'], -100)
+        self.assertEqual(report['tasks'][1]['differences_pp']
+                         ['fixed_memory_minus_baseline'], 100)
+        incomplete = report['tasks'][2]
+        self.assertEqual(incomplete['conditions']['fixed_memory']
+                         ['missing_evidence'], 1)
+        self.assertIsNone(incomplete['differences_pp']
+                          ['fixed_memory_minus_baseline'])
+        self.assertEqual(report['tasks'][3]['conditions']['baseline']
+                         ['attempts'], 0)
+        self.assertIn('task 3: no valid starts', report['warnings'])
+        self.assertIn('task 2 fixed_memory: 1 missing, 0 unscoreable',
+                      report['warnings'])
+
+    def test_task_report_shows_pre_start_exclusions_and_unscoreable_evidence(self):
+        baseline = next(row for row in self.rows
+                        if row['task_id'] == 0 and row['condition'] == 'baseline')
+        fixed = next(row for row in self.rows
+                     if row['task_id'] == 0 and row['condition'] == 'fixed_memory')
+        pre_start = replace(self.interruption('infrastructure_failure'),
+                            last_observation=None,
+                            pre_start_failure=PreStartFailure(
+                                'environment_reset', 17, True, False))
+        incomplete = replace(self.episode(success=True, terminated=True),
+                             artifact_status='incomplete')
+        report = report_task_outcomes(self.protocol, self.rows, {
+            baseline['attempt_id']: pre_start,
+            fixed['attempt_id']: incomplete,
+        })
+        task = report['tasks'][0]
+        self.assertEqual(task['conditions']['baseline']['pre_start_exclusions'], 1)
+        self.assertEqual(task['conditions']['fixed_memory']['unscoreable'], 1)
+        self.assertIsNone(task['differences_pp']['fixed_memory_minus_baseline'])
+        self.assertIn('task 0 fixed_memory: 0 missing, 1 unscoreable',
+                      report['warnings'])
 
 
 if __name__ == '__main__':

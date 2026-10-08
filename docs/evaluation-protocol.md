@@ -127,6 +127,17 @@ presented as its final end-to-end success rate. Pre-start replacement is a
 separate declared policy; this scorer does not replace attempts or launch
 trials.
 
+`report_task_outcomes(protocol, rows, attempts)` uses the same sealed schedule
+and dispositions to return all ten LIBERO-10 tasks in task-ID order. Each task
+lists scheduled attempts, valid starts (`attempts`), successes, missing and
+unscoreable evidence, pre-start exclusions, and success rate for baseline,
+no-memory, and fixed-memory conditions. `differences_pp` gives no-memory minus
+baseline, fixed-memory minus baseline, and fixed-memory minus no-memory in
+percentage points. Negative values show task regressions directly. A difference
+is `None` unless both condition rates are scoreable. `warnings` names condition
+evidence gaps and tasks with no valid starts. Inspect this report before any
+equal-task aggregate so a harmed or missing task cannot disappear in the mean.
+
 ## Pre-start replacement
 
 Declare `outcomes.pre_start_replacement` before freezing the protocol, with an

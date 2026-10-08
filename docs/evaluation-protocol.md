@@ -169,6 +169,36 @@ inspect `paired_repetitions` and `diagnostics` before treating any of them as
 complete analysis evidence. As with outcome scoring, the caller must verify
 retained artifacts before supplying persisted outcomes.
 
+`report_paired_cluster_intervals(protocol, rows, attempts)` computes the
+predeclared 95% percentile interval for each of the three equal-task condition
+differences. It verifies the sealed `equal-task-macro` estimator,
+`stratified-paired-cluster-bootstrap-95` interval method, and nonnegative
+integer `seeds.bootstrap`. For each of 10,000 seeded resamples, it samples the
+same number of initial-state clusters with replacement within each task. A
+sampled state carries all its repetitions and all A/B/C outcomes together.
+The resample calculates each condition's task success rate from those retained
+repetitions, then averages the ten task differences in percentage points.
+The interval endpoints are the 2.5th and 97.5th percentiles, using linear
+interpolation between adjacent sorted resamples. The report records the seed,
+resample count, protocol ID, observed equal-task differences, and endpoints.
+
+```python
+from evaluation_clusters import report_paired_cluster_intervals
+
+intervals = report_paired_cluster_intervals(protocol, rows, verified_attempts)
+print(intervals['intervals_pp']['fixed_memory_minus_baseline'])
+```
+
+Every scheduled repetition must have scoreable outcomes in all three arms;
+otherwise the function raises `ProtocolError` with the first missing or
+unscoreable pair. This avoids an interval based on selectively complete pairs.
+The sampling assumption is that distinct selected initial states within a
+task are the independent units; repeated seeds on one state are dependent and
+stay grouped. A numerical interval alone does not establish that independent
+state coverage is sufficient or that the bootstrap is nondegenerate. The
+separate evidence-sufficiency report must assess those limitations before a
+positive improvement claim.
+
 ## Pre-start replacement
 
 Declare `outcomes.pre_start_replacement` before freezing the protocol, with an

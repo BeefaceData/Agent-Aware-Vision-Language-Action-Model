@@ -87,6 +87,33 @@ class FixedMemoryTests(unittest.TestCase):
         self.assertEqual(original['context_json'], '[]')
         self.assertEqual(original['retrieval'], 'enabled')
 
+    def test_missing_optional_progress_reduces_or_empties_provider_memory(self):
+        intact = self.retain('intact', success=True)
+        missing = self.retain('missing-progress', progress=None)
+        memory = self.fixed([intact, missing])
+        for name, selected, excluded in (
+                ('reduced', [intact], [dict(missing, reasons=['progress_context_missing'])]),
+                ('empty', [], [dict(missing, reasons=['progress_context_missing'])])):
+            if name == 'empty':
+                snapshot = MemorySnapshot.freeze(self.root / 'empty.json', self.store, [missing],
+                    metadata=METADATA, retrieval=RETRIEVAL)
+                memory = FixedMemory(self.root / 'empty.json',
+                    expected_reference=snapshot.reference, query=self.query)
+            _, rows, sent = self.episode(memory, name)
+            self.assertTrue(rows)
+            for row, payload in zip(rows, sent):
+                evidence = row['action_record']['supervisor_pass']['memory_context']
+                self.assertEqual(evidence['retrieval'], 'enabled')
+                self.assertEqual(evidence['references'], sorted(
+                    [missing, intact] if selected else [missing],
+                    key=lambda ref: ref['record_id']))
+                self.assertEqual([item['record_id'] for item in evidence['selected']],
+                                 [ref['record_id'] for ref in selected])
+                self.assertEqual(evidence['excluded'], excluded)
+                self.assertEqual(payload['messages'][0]['content'][1]['text'],
+                                 evidence['context_json'])
+                self.assertEqual(json.loads(evidence['context_json']), evidence['selected'])
+
     def test_manifest_and_source_drift_fail_even_with_zero_budget(self):
         memory = self.fixed([self.retain('source')], max_entries=0)
         for path in (self.root / 'snapshot.json', self.root / 'source/context.json'):
@@ -99,6 +126,16 @@ class FixedMemoryTests(unittest.TestCase):
                 with self.subTest(path=path, missing=missing), self.assertRaises(TraceError):
                     memory.prepare(None)
                 path.write_bytes(raw)
+
+    def test_corrupt_snapshot_is_not_treated_as_empty_memory(self):
+        memory = self.fixed([self.retain('intact')])
+        self.assertEqual(len(memory.prepare(None)['selected']), 1)
+        path = self.root / 'snapshot.json'
+        path.write_bytes(path.read_bytes() + b' ')
+        with self.assertRaisesRegex(TraceError, 'snapshot manifest digest mismatch'):
+            memory.prepare(None)
+        with self.assertRaisesRegex(TraceError, 'snapshot manifest digest mismatch'):
+            FixedMemory(path, expected_reference=memory.reference, query=self.query)
 
 
 if __name__ == '__main__':

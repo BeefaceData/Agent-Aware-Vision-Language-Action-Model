@@ -423,6 +423,27 @@ and again before returning detached decision provenance. Corruption fails closed
 even when the snapshot's entry budget is zero. The recorded snapshot pin is the
 verified pin, rather than a caller's unverified declaration.
 
+### Missing and corrupt evidence (#111)
+
+A missing manifest, changed manifest bytes, missing pinned record, or changed
+source evidence raises `TraceError` when the snapshot is loaded or queried.
+The adapter does not send a provider request or substitute an empty memory
+context for a corrupt snapshot. A zero entry budget does not waive verification.
+
+A verified individual record can lack optional historical fields. Missing
+`progress_context` excludes that record from the current query with
+`progress_context_missing` in the sealed decision's `excluded` list. Missing
+legacy local outcome has an `unknown` / `legacy_outcome_unavailable` summary
+fallback, and missing legacy qualifications have a
+`legacy_qualifications_unavailable` fallback. Legacy records without progress
+are still excluded by the current applicability gate. Neither outcome is
+inferred from task success.
+For an enabled query, the provider receives only `context_json` for the selected
+records: a reduced JSON list or `[]` when no record qualifies. The sealed
+`memory_context` retains the snapshot pin, complete reference list, exclusions
+and reasons, so a reviewer can distinguish an empty verified result from
+`NoMemory` (`retrieval: disabled`) and from a corrupt snapshot (no decision).
+
 `append(trace=..., attempt=..., supervisor=..., context=...)` always raises
 `TraceError` with `fixed-memory evaluation is read-only`, even for valid sealed
 episode evidence. A separate recorder/store may retain evaluation outcomes;
@@ -436,7 +457,9 @@ for fixed evaluation. No live campaign authorization is implied.
 `python -m unittest discover -s tests -p test_fixed_memory.py -v` covers rejected
 writes, separately recorded additions, restart, detached results, prohibited query
 overrides, empty snapshots and tampering, plus complete pass/abstention episode
-replays with captured provider context and unchanged snapshot provenance.
+replays with captured provider context and unchanged snapshot provenance. It
+also checks reduced and empty provider context from missing optional progress,
+their sealed exclusion reasons, and corruption that fails instead of degrading.
 
 ## No-memory supervisor condition
 

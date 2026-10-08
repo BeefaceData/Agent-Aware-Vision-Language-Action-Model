@@ -1,5 +1,49 @@
 # Frozen evaluation protocol
 
+## Development-only trial allocation planning
+
+`plan_trial_allocation(pilot, ..., limits=...)` estimates a candidate integer
+allocation before the final protocol is frozen. Supply one row for each LIBERO-10
+task, keyed by integer task ID 0 through 9. Every row must have
+`split: "development"`, the number of matched A/C pilot `pairs`, counts where
+only C succeeded (`c_only`) and only A succeeded (`a_only`), plus measured
+`seconds_per_triplet`, `calls_per_triplet`, and `cost_per_triplet` for the full
+A/B/C effort. Record the pilot's artifact identities and measurement method
+alongside the planner output. Do not feed held-out outcomes into planning.
+
+```python
+from evaluation_allocation import plan_trial_allocation
+
+plan = plan_trial_allocation(
+    development_pilot, max_states_per_task=100,
+    max_repetitions_per_state=2,
+    limits={'seconds': approved_seconds, 'model_calls': approved_calls,
+            'cost': approved_cost})
+print(plan['status'], plan['allocation'], plan['estimate'])
+```
+
+The default planning scenario assumes a 10 percentage-point C-minus-A gain,
+95% two-sided interval with a desired half-width of at most 10 points, and
+80% approximate power for a lower endpoint above zero. Supply different
+`target_gain_pp`, `precision_half_width_pp`, and `power` if the declared plan
+requires them. The caller must also declare `cluster_correlation` (default
+0.5), since discordant pair totals cannot measure dependence among repetitions
+on one initial state. The planner uses task-specific discordance to estimate
+binary paired-difference variance, a design effect of
+`1 + (repetitions - 1) * cluster_correlation`, and equal task weighting.
+It searches integer independent states and repetitions with the same effort in
+all ten tasks, then estimates total attempts (three arms per pair), seconds,
+model calls, and cost in the units supplied. An infeasible result identifies
+whether no candidate met the statistical approximation or the least-demand
+statistical candidate exceeded the supplied caps. Cost must use one declared
+unit; do not combine currencies or treat unknown prices as zero.
+
+These normal approximations are for feasibility planning. A selected sample
+size does not guarantee a significant held-out result, and the final decision
+still uses the sealed paired-state bootstrap and actual outcomes. The planner
+does not select states, supply protocol pairing seeds, authorize spending, or
+run a campaign.
+
 `EvaluationProtocol.freeze` records a versioned declaration before an evaluation.
 The caller must supply nonempty maps for conditions, splits, seeds, allocation,
 horizons, analysis, and outcomes. The maps state the concrete scientific choices:

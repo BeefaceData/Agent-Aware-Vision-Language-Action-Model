@@ -10,7 +10,11 @@ Continue unfinished work when the previous commits or failure breadcrumb identif
 Implement the chosen issue, run its relevant checks, and commit the completed
 work on the current branch. Follow `.agents/skills/commit-convention/SKILL.md`.
 Keep commits meaningful. Once all acceptance criteria are satisfied and checks
-pass, close the chosen issue with `gh issue close <number>` and end with:
+pass, check each acceptance-criteria box in the GitHub issue body (`[x]`) using
+`gh issue edit <number> --body-file <path>`. Preserve the rest of the issue body.
+Re-read the issue and verify that every acceptance-criteria box is checked before
+closing it with `gh issue close <number>`. If any criterion lacks evidence, leave
+it unchecked and report `[BLOCKED]`. After closing, end with:
 `<promise>ISSUE COMPLETED #123</promise>`
 Replace `123` with the chosen issue number. Emit this only after completing and
 closing that issue; partial progress does not count. Complete only one issue

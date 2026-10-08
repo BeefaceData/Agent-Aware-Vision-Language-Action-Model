@@ -46,6 +46,8 @@ A standalone CUDA rollout was completed on this machine. Runtime and memory requ
 
 For a clean-environment import and task/state check before an authorized
 episode, follow the [baseline startup preflight](docs/baseline-startup.md).
+For an end-to-end replay and artifact inspection walkthrough, follow the
+[baseline-to-report guide](docs/baseline-workflow.md).
 
 Run these commands in a terminal. Conda, Git, and a working NVIDIA driver are prerequisites for the tested CUDA setup.
 

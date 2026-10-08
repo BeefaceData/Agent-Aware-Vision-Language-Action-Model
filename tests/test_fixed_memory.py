@@ -6,7 +6,7 @@ import unittest
 
 from fixed_memory import FixedMemory
 from memory_snapshot import MemorySnapshot
-from recorded_replay import TraceError
+from recorded_replay import TraceError, load_recorded_replay
 import test_memory_compatibility as fixtures
 import test_decision_memory as decision_fixtures
 from test_intervention_memory import pinned
@@ -34,12 +34,18 @@ class FixedMemoryTests(unittest.TestCase):
         memory = self.fixed([ref])
         original = memory.prepare(None)
         pin = memory.reference
+        eligible_ids = [ref['record_id']]
+        evaluation_ids = []
         self.assertEqual([row['record_id'] for row in original['selected']], [ref['record_id']])
         self.assertEqual(original['references'], [ref])
         for index, abstain in enumerate((False, True)):
-            # A separate recorder may retain new outcomes, even in the same store.
-            self.retain('evaluation' + str(index), success=not abstain)
+            # Evaluation owns trace/record writes; the fixed view owns retrieval.
+            evaluation_ref = self.retain('evaluation' + str(index), success=not abstain)
             source = self.root / ('evaluation' + str(index))
+            self.assertEqual(load_recorded_replay(source / 'trace').run().success,
+                             not abstain)
+            self.assertNotIn(evaluation_ref['record_id'], eligible_ids)
+            evaluation_ids.append(evaluation_ref['record_id'])
             with self.assertRaisesRegex(TraceError, 'read-only'):
                 memory.append(trace=pinned(source / 'trace/manifest.json'),
                     attempt=pinned(source / 'attempt.json'),
@@ -52,8 +58,17 @@ class FixedMemoryTests(unittest.TestCase):
                 key = 'supervisor_abstention' if abstain else 'supervisor_pass'
                 evidence = row['action_record'][key]['memory_context']
                 self.assertEqual(evidence, json.loads(json.dumps(original)))
+                self.assertEqual(evidence['snapshot'], pin)
+                self.assertEqual([item['record_id'] for item in evidence['references']],
+                                 eligible_ids)
+                self.assertEqual([item['record_id'] for item in evidence['selected']],
+                                 eligible_ids)
+                self.assertTrue(set(evaluation_ids).isdisjoint(
+                    item['record_id'] for item in evidence['selected']))
                 self.assertEqual(payload['messages'][0]['content'][1]['text'],
                                  original['context_json'])
+            self.assertEqual(load_recorded_replay(self.root / ('run' + str(index))).evidence()[
+                             'decisions'], rows)
             self.assertEqual(memory.reference, pin)
             memory = FixedMemory(self.root / 'snapshot.json',
                                  expected_reference=pin, query=self.query)

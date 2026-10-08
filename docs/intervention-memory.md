@@ -449,13 +449,22 @@ and reasons, so a reviewer can distinguish an empty verified result from
 episode evidence. A separate recorder/store may retain evaluation outcomes;
 those new entries never join this view's explicit membership. Reopening with
 the same external pin preserves membership, identity and settings across episodes.
+For each evaluation attempt, give `TraceRecorder` a new trace directory and seal
+the outcome for later replay. Keep the evaluation trace writer separate from the
+`FixedMemory` instance passed as `decision_memory`. If evaluation records are
+also retained in `InterventionMemory`, do not pass their pins to
+`MemorySnapshot.freeze` or switch to `AdaptationMemory` during this fixed run.
+The snapshot manifest alone grants retrieval membership; a saved trace or a
+new record in the same store does not. Preserve the original external pin and
+check that every sealed decision names it and the same eligible record IDs.
 This API does not restrict filesystem owners, certify development-only selection
 (#109), or enable memory-informed active corrections (#108). Retain the trusted
 pin separately; use this interface instead of a freely configured `DecisionMemory`
 for fixed evaluation. No live campaign authorization is implied.
 
 `python -m unittest discover -s tests -p test_fixed_memory.py -v` covers rejected
-writes, separately recorded additions, restart, detached results, prohibited query
+writes, two recorded evaluation outcomes that remain excluded from the second
+episode's retrieval, restart, detached results, prohibited query
 overrides, empty snapshots and tampering, plus complete pass/abstention episode
 replays with captured provider context and unchanged snapshot provenance. It
 also checks reduced and empty provider context from missing optional progress,

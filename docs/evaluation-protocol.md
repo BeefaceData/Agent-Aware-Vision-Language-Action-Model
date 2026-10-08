@@ -88,6 +88,49 @@ This seal verifies declared bytes and the split structure, but it cannot prove
 the declared state digests match the installed simulator. Trial results,
 resource approval, and execution compliance remain separate gates.
 
+## Campaign startup preflight
+
+Use `preflight_evaluation_campaign` before constructing a model or resetting an
+environment. Its inputs are independently resolved records, not permission
+granted by the protocol. Each sealed condition must declare nonempty `model_id`
+and `configuration_id`; `fixed_memory.memory` must contain the snapshot's
+`snapshot_id` and `sha256`. The sealed `horizons` must declare positive
+`primary_actions`, `supervisor_calls`, and `wall_clock_seconds`. Pass the
+resolved condition identities, installed dataset state identities in the same
+shape as `splits.development` and `splits.held_out`, the snapshot file path,
+and configured runtime caps. The preflight verifies the snapshot manifest and
+all retained records against its sealed pin. Supply `compute`, `api`, and
+`data_use` resource records, each with `approved: true`, the matching
+`protocol_id`, and a nonempty independently retained `reference`. The compute
+record needs `max_seconds`; the API record needs `max_model_calls`. Their
+allowances must cover every scheduled attempt at the declared per-episode
+caps. The caller must authenticate the resolution and approval records and
+verify that observed state identities came from the installed dataset.
+
+```python
+from evaluation_preflight import preflight_evaluation_campaign, start_evaluation_campaign
+
+report = preflight_evaluation_campaign(
+    protocol, rows, resolved_conditions=resolved_conditions,
+    observed_states=observed_states, snapshot_path=snapshot_path,
+    runtime_caps=runtime_caps, resource_records=resource_records)
+if report['status'] == 'blocked':
+    print(report['reasons'])
+
+# Only after independently obtaining the applicable resource and data-use gates:
+outcomes = start_evaluation_campaign(
+    protocol, rows, 'evidence/attempts', run_one,
+    resolved_conditions=resolved_conditions, observed_states=observed_states,
+    snapshot_path=snapshot_path, runtime_caps=runtime_caps,
+    resource_records=resource_records)
+```
+
+The start entry point raises `ProtocolError` with each missing or mismatched
+gate before creating an attempt directory or invoking `run_one`. Replay-only
+work can use the lower-level schedule runner without claiming campaign
+readiness. Recheck the supplied records before every new campaign startup;
+this preflight does not itself authorize spending, data use, or robot action.
+
 ## Paired trial schedule
 
 `build_evaluation_schedule(protocol)` derives ordered attempt rows from a

@@ -16,6 +16,7 @@ class MemoryContextTests(unittest.TestCase):
 
     def query(self, refs, **changes):
         settings = dict(task=fixtures.TASK, robot_capabilities=asdict(self.single),
+            compatibility=fixtures.COMPATIBILITY,
             progress_context=fixtures.PROGRESS, failure_category='stall',
             max_entries=10, max_summary_bytes=10000, max_context_bytes=100000)
         return self.store.retrieve_context(refs, **(settings | changes))
@@ -107,7 +108,8 @@ class MemoryContextTests(unittest.TestCase):
         ref = self.store.append(**(fixture.arguments | {
             'context': recovery_fixtures.pinned(path)}))
         record = self.store.read(ref['record_id'], expected_sha256=ref['sha256'])
-        result = self.query([ref], robot_capabilities=record['robot_capabilities'])
+        result = self.query([ref], robot_capabilities=record['robot_capabilities'],
+            compatibility=record['models'] | {'settings': record['configuration']['settings']})
         summary = result['selected'][0]
         self.assertEqual(summary['intervention_kind'], 'recovery')
         self.assertEqual(summary['local_outcome'], record['local_outcome'])

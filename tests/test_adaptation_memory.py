@@ -26,7 +26,8 @@ class AdaptationMemoryTests(unittest.TestCase):
 
     def query(self, proposal):
         return dict(task=fixtures.TASK, robot_capabilities=asdict(self.single),
-                    progress_context=fixtures.PROGRESS, failure_category='unknown')
+                    progress_context=fixtures.PROGRESS, failure_category='unknown',
+                    compatibility=fixtures.COMPATIBILITY)
 
     def adaptive(self, refs=()):
         snapshot = MemorySnapshot.freeze(self.root / 'start.json', self.store, refs,

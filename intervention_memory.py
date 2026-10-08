@@ -249,12 +249,14 @@ class InterventionMemory:
                 records.append(record)
         return records
 
-    def filter_candidates(self, references, *, task, robot_capabilities, progress_context):
+    def filter_candidates(self, references, *, task, robot_capabilities, progress_context,
+                          compatibility):
         """Return verified candidates and pinned exclusions with ordered reasons.
 
         Conservative exact compatibility: no implicit frame conversion, arm
-        remapping, range widening or task synonym inference. Progress must be
-        explicitly declared at decision time; missing evidence is excluded.
+        remapping, model version aliasing, range widening or task synonym
+        inference. Progress must be explicitly declared at decision time;
+        missing evidence is excluded.
         This outcome-neutral result is evaluator data, not supervisor input.
         """
         _require(type(task) is dict and bool(task) and
@@ -262,6 +264,7 @@ class InterventionMemory:
                  bool(task['instruction'].strip()), 'explicit task instruction required')
         _validate_progress(progress_context)
         active = _capabilities(robot_capabilities)
+        _validate_compatibility(compatibility)
         candidates, excluded = [], []
         for reference in references:
             try:
@@ -272,6 +275,11 @@ class InterventionMemory:
             reasons = []
             if record['task'] != task:
                 reasons.append('task_mismatch')
+            for key in ('policy', 'supervisor'):
+                if _bytes(record['models'][key]) != _bytes(compatibility[key]):
+                    reasons.append(key + '_mismatch')
+            if _bytes(record['configuration']['settings']) != _bytes(compatibility['settings']):
+                reasons.append('settings_mismatch')
             progress = record.get('progress_context')
             if progress is None:
                 reasons.append('progress_context_missing')
@@ -299,10 +307,10 @@ class InterventionMemory:
         return {'candidates': candidates, 'excluded': excluded}
 
     def rank_candidates(self, references, *, task, robot_capabilities,
-                        progress_context, failure_category):
+                        progress_context, failure_category, compatibility):
         """Rank compatible pinned evidence without preferring positive outcomes.
 
-        Task/progress/control compatibility is a hard gate. Within that context,
+        Task/progress/control/model compatibility is a hard gate. Within that context,
         exact diagnosis-category matches precede other categories; record ID is
         the ascending tie-breaker. Unknown is a category, never a wildcard.
         Return evaluator records, exclusions and the reproducible ranking rule.
@@ -310,7 +318,8 @@ class InterventionMemory:
         _require(type(failure_category) is str and failure_category in CATEGORIES,
                  'declared diagnosis category required for ranking')
         filtered = self.filter_candidates(references, task=task,
-            robot_capabilities=robot_capabilities, progress_context=progress_context)
+            robot_capabilities=robot_capabilities, progress_context=progress_context,
+            compatibility=compatibility)
         # Verification above includes duplicates and excluded records. A repeated
         # reference must not occupy multiple places in the relevance ordering.
         unique = {record['record_id']: record for record in filtered['candidates']}
@@ -322,12 +331,12 @@ class InterventionMemory:
                     'policy': 'exact-context-failure-v1',
                     'failure_category': failure_category,
                     'progress_context': dict(progress_context),
-                    'compatibility': 'exact-task-progress-control',
+                    'compatibility': 'exact-task-progress-control-model-settings-v1',
                     'order': ['failure_category_match_desc', 'record_id_asc'],
                     'outcome_preference': 'none'}}
 
     def retrieve_context(self, references, *, task, robot_capabilities,
-                         progress_context, failure_category, max_entries,
+                         progress_context, failure_category, compatibility, max_entries,
                          max_summary_bytes, max_context_bytes):
         """Build bounded historical summaries; only context_json is model input.
 
@@ -345,7 +354,7 @@ class InterventionMemory:
         references = list(references)
         ranked = self.rank_candidates(references, task=task,
             robot_capabilities=robot_capabilities, progress_context=progress_context,
-            failure_category=failure_category)
+            failure_category=failure_category, compatibility=compatibility)
         pins = {ref['record_id']: ref['sha256'] for ref in references}
         selected, omitted = [], []
         used = 2  # The empty JSON list is part of the allowance.
@@ -391,6 +400,17 @@ def _validate_progress(value):
              all(type(key) is str and key.strip() and
                  type(item) is str and item.strip() for key, item in value.items()),
              'explicit progress context requires nonempty string identifiers')
+
+
+def _validate_compatibility(value):
+    _require(type(value) is dict and set(value) == {'policy', 'supervisor', 'settings'}
+             and all(type(value[key]) is dict and bool(value[key])
+                     for key in ('policy', 'supervisor', 'settings')),
+             'explicit policy, supervisor and settings compatibility required')
+    try:
+        _bytes(value)
+    except (TypeError, ValueError) as exc:
+        raise TraceError(f'invalid model compatibility: {exc}') from exc
 
 
 def _capabilities(value):

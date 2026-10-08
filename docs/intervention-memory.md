@@ -104,7 +104,7 @@ candidates = memory.candidates(
 )
 ```
 
-For inspectable task/progress and control compatibility filtering, use:
+For inspectable task, progress, control and model compatibility filtering, use:
 
 ```python
 result = memory.filter_candidates(
@@ -112,6 +112,9 @@ result = memory.filter_candidates(
     task=active_task,  # complete declared task mapping, including instruction
     robot_capabilities=active_capabilities,  # serialized ActionCapabilities
     progress_context={"stage": "grasp", "object": "target"},
+    compatibility={"policy": active_policy_assets,
+                   "supervisor": active_supervisor_identity,
+                   "settings": active_attempt_settings},
 )
 candidates = result["candidates"]
 exclusions = result["excluded"]  # record_id, sha256, ordered reasons
@@ -123,6 +126,15 @@ it is never silently reported as an ordinary exclusion. Invalid active context
 also raises `TraceError`, including on an empty reference list. Both result
 lists preserve input order and contain detached data.
 
+The host must declare complete policy assets, frozen supervisor identity and
+effective attempt settings for every query, including an empty reference list.
+Each mapping is compared as canonical JSON to its verified record provenance;
+there is no implicit version alias or compatibility conversion. A different
+declared version is usable only when the host explicitly queries that exact
+identity. Episode seed and action horizon are excluded from this comparison;
+they are episode configuration, not runtime settings. Mismatches yield
+`policy_mismatch`, `supervisor_mismatch` and `settings_mismatch` in that order.
+
 Task mappings and progress labels must match exactly. Missing legacy progress
 produces `progress_context_missing`; unequal labels produce
 `progress_context_mismatch`; a foreign task produces `task_mismatch`.
@@ -133,16 +145,16 @@ match. Supported operations must match as a set (their order has no meaning).
 Each differing field yields `<field>_mismatch`, with `component_count_mismatch`
 for dimension differences. When counts differ, individual coordinates are not
 compared because no mapping is established. All applicable reasons are retained
-in the documented comparison order: task, progress, layout, frequency,
+in the documented comparison order: task, model/settings, progress, layout, frequency,
 operations, then component count or the ordered component fields above (frame
 before representation). No automatic frame conversion, arm remapping, range
 widening or task synonym matching is performed.
 
 Compatibility does not authorize execution or establish positive benefit.
-Failed/unknown outcomes remain eligible. Model compatibility, permitted data
-splits and supervisor-safe redaction still belong to subsequent
-retrieval policy. The original `candidates` API retains its exact task/control
-lookup behavior and does not require progress evidence.
+Failed/unknown outcomes remain eligible. Permitted data splits and supervisor-safe
+redaction still belong to subsequent retrieval policy. The original `candidates`
+API retains its exact task/control lookup behavior and does not require progress
+evidence.
 
 This returns detached, fully verified records in the supplied order. Failed
 tasks, aborted recoveries, uncertain outcomes and unknown diagnoses receive the
@@ -155,8 +167,8 @@ partial candidate set. Reopening the store does not change these rules.
 This is a storage-level candidate interface, not a compatibility or retrieval
 policy. The caller must supply permitted references. General compatibility
 filters and ranking are available through the APIs described here;
-model/configuration exclusions (#110), development/holdout splits,
-budgets and supervisor-safe context preparation remain separate work.
+development/holdout splits, budgets and supervisor-safe context preparation
+remain separate work.
 Do not send these evaluator records directly to the supervisor.
 
 ## Deterministic relevance ordering
@@ -167,6 +179,9 @@ ranked = memory.rank_candidates(
     task=active_task,
     robot_capabilities=active_capabilities,
     progress_context={"stage": "grasp", "object": "target"},
+    compatibility={"policy": active_policy_assets,
+                   "supervisor": active_supervisor_identity,
+                   "settings": active_attempt_settings},
     failure_category="suspected_missed_grasp",
 )
 ordered_records = ranked["candidates"]
@@ -175,7 +190,7 @@ exclusions = ranked["excluded"]
 ```
 
 The `exact-context-failure-v1` policy first applies the same verified exact
-task, progress and control compatibility gates as `filter_candidates`. Progress
+task, progress, control and model compatibility gates as `filter_candidates`. Progress
 is a hard applicability constraint, not a guessed distance between stages:
 an experience from a different stage cannot outrank an applicable experience.
 Among eligible records, exact matches to the declared diagnosis category rank
@@ -208,6 +223,9 @@ retrieved = memory.retrieve_context(
     permitted_development_references,
     task=active_task, robot_capabilities=active_capabilities,
     progress_context={"stage": "grasp", "object": "target"},
+    compatibility={"policy": active_policy_assets,
+                   "supervisor": active_supervisor_identity,
+                   "settings": active_attempt_settings},
     failure_category="suspected_missed_grasp",
     max_entries=4, max_summary_bytes=1024, max_context_bytes=4096,
 )
@@ -242,8 +260,8 @@ by budgets, even zero entries. Corrupt duplicates and incompatible evidence
 still fail the query. Retain settings and permitted references to reproduce it.
 
 The caller remains responsible for development-data permission, split selection,
-model compatibility and fixed-memory snapshot policy. This API does not scan
-the store, attach memory to a provider request, change the frozen prompt, or
+declaring the active model/settings identity and fixed-memory snapshot policy.
+This API does not scan the store, attach memory to a provider request, change the frozen prompt, or
 enable live retrieval. It establishes bounded preparation, not scientific
 evidence that memory improves performance.
 
@@ -372,7 +390,7 @@ pins. An interrupted write may leave an invalid file, which loading rejects.
 
 To reproduce a query, use `manifest["records"]` with the store relative to the
 snapshot directory and its three `max_*` settings. Supply the current task,
-control, progress and failure-category query separately. This API records and
+control, progress, failure-category and model/settings query separately. This API records and
 validates configuration; it does not automatically wire a runtime retriever,
 prevent writes to the underlying store, or certify development-only
 selection (#109). `DecisionMemory` still treats a supplied snapshot pin as a
@@ -391,11 +409,14 @@ selection = FixedMemory(snapshot_path, expected_reference=pin,
         "task": active_task, "robot_capabilities": active_capabilities,
         "progress_context": current_progress(proposal),
         "failure_category": current_failure_category(proposal),
+        "compatibility": {"policy": active_policy_assets,
+                          "supervisor": active_supervisor_identity,
+                          "settings": active_attempt_settings},
     })
 # Pass decision_memory=selection to ChronologicalVlmAdapter.
 ```
 
-The query must contain exactly those four current-context fields. References,
+The query must contain exactly those five current-context fields. References,
 snapshot identity, ranking policy and budgets cannot be overridden by the query.
 Each `prepare` verifies the manifest and all source evidence before retrieval
 and again before returning detached decision provenance. Corruption fails closed

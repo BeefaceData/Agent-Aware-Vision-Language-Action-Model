@@ -20,7 +20,8 @@ class FixedMemoryTests(unittest.TestCase):
 
     def query(self, proposal):
         return dict(task=fixtures.TASK, robot_capabilities=asdict(self.single),
-                    progress_context=fixtures.PROGRESS, failure_category='stall')
+                    progress_context=fixtures.PROGRESS, failure_category='stall',
+                    compatibility=fixtures.COMPATIBILITY)
 
     def fixed(self, refs, **settings):
         snapshot = MemorySnapshot.freeze(self.root / 'snapshot.json', self.store, refs,

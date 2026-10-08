@@ -12,7 +12,8 @@ from recorded_replay import TraceError
 class FixedMemory:
     """Pass as ChronologicalVlmAdapter's decision_memory for fixed evaluation.
 
-    The callback supplies only current task, control, progress and diagnosis.
+    The callback supplies current task, control, progress, diagnosis and the
+    host's resolved policy, supervisor and runtime-settings identity.
     Membership and budgets always come from the verified snapshot. Append is
     explicitly rejected; other stores may record episodes without admitting them
     to this view. This is an API boundary, not filesystem access control.
@@ -37,8 +38,9 @@ class FixedMemory:
         """Verify sealed evidence on each decision and return detached provenance."""
         query = deepcopy(self._query(deepcopy(proposal)))
         if type(query) is not dict or set(query) != {
-                'task', 'robot_capabilities', 'progress_context', 'failure_category'}:
-            raise ValueError('fixed-memory query requires only current applicability fields')
+                'task', 'robot_capabilities', 'progress_context', 'failure_category',
+                'compatibility'}:
+            raise ValueError('fixed-memory query requires current applicability and model identity')
         document = self._snapshot.read()
         query.update({key: document['retrieval'][key] for key in (
             'max_entries', 'max_summary_bytes', 'max_context_bytes')})

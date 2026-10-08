@@ -39,6 +39,7 @@ class MemorySnapshotTests(unittest.TestCase):
         self.assertEqual(loaded.reference, snapshot.reference)
         query = dict(task=fixtures.TASK, robot_capabilities=asdict(self.single),
             progress_context=fixtures.PROGRESS, failure_category='stall',
+            compatibility=fixtures.COMPATIBILITY,
             **{key: value for key, value in document['retrieval'].items() if key.startswith('max_')})
         reopened = InterventionMemory(self.root / document['store'])
         self.assertEqual(reopened.retrieve_context(document['records'], **query),

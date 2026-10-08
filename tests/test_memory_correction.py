@@ -30,6 +30,7 @@ class MemoryCorrectionTests(unittest.TestCase):
         self.selection = DecisionMemory(self.store, [self.ref], lambda proposal: dict(
             task=memories.TASK, robot_capabilities=asdict(fixture.single),
             progress_context=memories.PROGRESS, failure_category='unknown',
+            compatibility=memories.COMPATIBILITY,
             max_entries=1, max_summary_bytes=10000, max_context_bytes=100000))
         self.adjustment = adjustments.SingleActionAdjustmentTests()
         self.adjustment.setUp()

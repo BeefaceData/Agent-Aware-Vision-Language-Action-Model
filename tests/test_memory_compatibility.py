@@ -20,6 +20,10 @@ from test_native_capabilities import two_arm
 
 TASK = {'suite': 'synthetic', 'task_id': 0, 'instruction': 'place object'}
 PROGRESS = {'stage': 'grasp', 'object': 'declared-object'}
+COMPATIBILITY = {'policy': {'revision': 'synthetic'},
+                 'supervisor': {'model': 'synthetic'},
+                 'settings': {'action_capabilities': asdict(
+                     replace(libero_native_capabilities(), layout='flat'))}}
 
 
 class MemoryCompatibilityTests(unittest.TestCase):
@@ -31,16 +35,17 @@ class MemoryCompatibilityTests(unittest.TestCase):
         self.single = replace(libero_native_capabilities(), layout='flat')
 
     def retain(self, name, capabilities=None, *, task=TASK, progress=PROGRESS, success=False,
-               category='unknown', truncated=False):
+               category='unknown', truncated=False, policy_revision=None, supervisor_model=None,
+               settings_extra=None):
         capabilities = capabilities or self.single
         source = self.root / name
         source.mkdir()
         config = EpisodeConfig(17, 2)
         supervisor = FrozenSupervisorManifest.freeze(source / 'supervisor.json',
-                                                     {'model': 'synthetic'})
+                                                     {'model': supervisor_model or 'synthetic'})
         identity = AttemptIdentityRecorder(source, config, lambda: {
-            'task': task, 'policy_assets': {'revision': 'synthetic'},
-            'settings': {'action_capabilities': asdict(capabilities)},
+            'task': task, 'policy_assets': {'revision': policy_revision or 'synthetic'},
+            'settings': {'action_capabilities': asdict(capabilities), **(settings_extra or {})},
             **supervisor.reference}, ReplayRecorder())
         action = [0.0] * len(capabilities.components)
         correction = [0.1] * len(action)
@@ -86,7 +91,8 @@ class MemoryCompatibilityTests(unittest.TestCase):
             context=pinned(context_path))
 
     def query(self, references, **changes):
-        query = dict(task=TASK, robot_capabilities=asdict(self.single), progress_context=PROGRESS)
+        query = dict(task=TASK, robot_capabilities=asdict(self.single),
+                     progress_context=PROGRESS, compatibility=COMPATIBILITY)
         return self.store.filter_candidates(references, **(query | changes))
 
     def test_mixed_single_and_two_arm_records_have_stable_inspectable_exclusions(self):
@@ -109,7 +115,9 @@ class MemoryCompatibilityTests(unittest.TestCase):
         self.assertEqual(reasons[wrong_progress['record_id']], ['progress_context_mismatch'])
         self.assertEqual(reasons[missing['record_id']], ['progress_context_missing'])
         self.assertEqual(result, self.query(refs))
-        paired_result = self.query(refs, robot_capabilities=asdict(two_arm()))
+        paired_result = self.query(refs, robot_capabilities=asdict(two_arm()),
+            compatibility=COMPATIBILITY | {'settings': {
+                'action_capabilities': asdict(two_arm())}})
         self.assertEqual([r['record_id'] for r in paired_result['candidates']], [paired['record_id']])
         result['candidates'][0]['progress_context']['stage'] = 'invented'
         self.assertEqual(self.query(refs)['candidates'][0]['progress_context'], PROGRESS)
@@ -124,11 +132,12 @@ class MemoryCompatibilityTests(unittest.TestCase):
             with self.subTest(field=field):
                 result = self.query([ref])
                 self.assertEqual(result, {'candidates': [], 'excluded': [
-                    dict(ref, reasons=[field + '_mismatch'])]})
+                    dict(ref, reasons=['settings_mismatch', field + '_mismatch'])]})
         for field, value in (('control_frequency_hz', 10.), ('layout', 'single-vector-batch'),
                              ('operations', ('policy_action', 'stop'))):
             ref = self.retain(field, replace(self.single, **{field: value}))
-            self.assertEqual(self.query([ref])['excluded'], [dict(ref, reasons=[field + '_mismatch'])])
+            self.assertEqual(self.query([ref])['excluded'],
+                             [dict(ref, reasons=['settings_mismatch', field + '_mismatch'])])
 
     def test_two_arm_order_and_coordination_are_not_interchangeable(self):
         base = two_arm()
@@ -138,11 +147,13 @@ class MemoryCompatibilityTests(unittest.TestCase):
         result = self.query([reordered, unpaired], robot_capabilities=asdict(base))
         self.assertEqual(result['candidates'], [])
         self.assertIn('arm_mismatch', result['excluded'][0]['reasons'])
-        self.assertEqual(result['excluded'][1]['reasons'], ['group_mismatch'])
+        self.assertEqual(result['excluded'][1]['reasons'], ['settings_mismatch', 'group_mismatch'])
         # Supported operation order carries no control semantics.
         accepted = self.retain('paired', base)
         active = asdict(replace(base, operations=base.operations[::-1]))
-        self.assertEqual(len(self.query([accepted], robot_capabilities=active)['candidates']), 1)
+        self.assertEqual(len(self.query([accepted], robot_capabilities=active,
+            compatibility=COMPATIBILITY | {'settings': {'action_capabilities': asdict(base)}}
+            )['candidates']), 1)
 
     def test_malformed_query_and_corrupt_incompatible_record_fail_closed(self):
         for changes in ({'task': {}}, {'progress_context': None}, {'progress_context': {}},
@@ -157,6 +168,32 @@ class MemoryCompatibilityTests(unittest.TestCase):
         (self.root / 'incompatible/context.json').unlink()
         with self.assertRaises(TraceError):
             self.query([ref])
+
+    def test_model_and_settings_versions_require_explicit_exact_identity(self):
+        same = self.retain('same')
+        policy = self.retain('policy-v2', policy_revision='v2')
+        supervisor = self.retain('supervisor-v2', supervisor_model='v2')
+        settings = self.retain('settings-v2', settings_extra={'revision': 'v2'})
+        refs = [same, policy, supervisor, settings]
+        result = self.query(refs)
+        self.assertEqual([row['record_id'] for row in result['candidates']], [same['record_id']])
+        self.assertEqual({row['record_id']: row['reasons'] for row in result['excluded']}, {
+            policy['record_id']: ['policy_mismatch'],
+            supervisor['record_id']: ['supervisor_mismatch'],
+            settings['record_id']: ['settings_mismatch']})
+        for ref, declared in (
+                (policy, COMPATIBILITY | {'policy': {'revision': 'v2'}}),
+                (supervisor, COMPATIBILITY | {'supervisor': {'model': 'v2'}}),
+                (settings, COMPATIBILITY | {'settings': COMPATIBILITY['settings'] |
+                                            {'revision': 'v2'}})):
+            with self.subTest(ref=ref['record_id']):
+                selected = self.query([ref], compatibility=declared)
+                self.assertEqual([row['record_id'] for row in selected['candidates']],
+                                 [ref['record_id']])
+        for malformed in (None, {}, COMPATIBILITY | {'policy': {}},
+                          COMPATIBILITY | {'extra': 1}):
+            with self.subTest(malformed=malformed), self.assertRaises(TraceError):
+                self.query([], compatibility=malformed)
 
     def test_progress_cannot_be_relabelled_and_legacy_bytes_are_preserved(self):
         ref = self.retain('retained')

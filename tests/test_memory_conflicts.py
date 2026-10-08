@@ -45,6 +45,7 @@ class MemoryConflictTests(unittest.TestCase):
             self.records[ref['record_id']] = record
         self.store = InterventionMemory(self.root / 'memory')
         self.query = dict(task=record['task'], robot_capabilities=record['robot_capabilities'],
+            compatibility=record['models'] | {'settings': record['configuration']['settings']},
             progress_context={'stage': 'grasp'}, failure_category='suspected_missed_grasp',
             max_entries=3, max_summary_bytes=10000, max_context_bytes=100000)
 

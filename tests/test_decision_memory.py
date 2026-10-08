@@ -26,6 +26,7 @@ class DecisionMemoryTests(unittest.TestCase):
     def selection(self, refs, **changes):
         query = dict(task=fixtures.TASK, robot_capabilities=asdict(self.single),
             progress_context=fixtures.PROGRESS, failure_category='stall',
+            compatibility=fixtures.COMPATIBILITY,
             max_entries=4, max_summary_bytes=10000, max_context_bytes=100000)
         query.update(changes)
         return DecisionMemory(self.store, refs, lambda proposal: query,
@@ -78,6 +79,20 @@ class DecisionMemoryTests(unittest.TestCase):
                 self.assertEqual(payload['system'], SUPERVISOR_PROMPT)
                 self.assertNotIn('references', wire)
                 self.assertNotIn('episode_outcome', wire)
+
+    def test_incompatible_versions_are_excluded_from_complete_episode_replay(self):
+        compatible = self.retain('compatible')
+        outdated = self.retain('outdated', supervisor_model='older')
+        _, rows, sent = self.episode(self.selection([compatible, outdated]), 'versions')
+        self.assertTrue(rows)
+        for row, payload in zip(rows, sent):
+            memory = row['action_record']['supervisor_pass']['memory_context']
+            self.assertEqual([item['record_id'] for item in memory['selected']],
+                             [compatible['record_id']])
+            self.assertEqual(memory['excluded'],
+                             [dict(outdated, reasons=['supervisor_mismatch'])])
+            self.assertEqual(json.loads(payload['messages'][0]['content'][1]['text']),
+                             memory['selected'])
 
     def test_disabled_is_distinct_from_enabled_empty(self):
         _, rows, sent = self.episode(None, 'disabled')

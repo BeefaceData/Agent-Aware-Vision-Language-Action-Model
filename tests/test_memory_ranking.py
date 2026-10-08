@@ -15,7 +15,8 @@ class MemoryRankingTests(unittest.TestCase):
 
     def query(self, references, **changes):
         query = dict(task=fixtures.TASK, robot_capabilities=asdict(self.single),
-                     progress_context=fixtures.PROGRESS, failure_category='stall')
+                     progress_context=fixtures.PROGRESS, failure_category='stall',
+                     compatibility=fixtures.COMPATIBILITY)
         return self.store.rank_candidates(references, **(query | changes))
 
     def test_failure_match_precedes_success_with_other_diagnosis(self):
@@ -33,7 +34,7 @@ class MemoryRankingTests(unittest.TestCase):
         self.assertEqual(result['ranking'], {
             'policy': 'exact-context-failure-v1', 'failure_category': 'stall',
             'progress_context': fixtures.PROGRESS,
-            'compatibility': 'exact-task-progress-control',
+            'compatibility': 'exact-task-progress-control-model-settings-v1',
             'order': ['failure_category_match_desc', 'record_id_asc'],
             'outcome_preference': 'none'})
 

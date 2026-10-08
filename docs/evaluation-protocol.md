@@ -43,3 +43,35 @@ choice requires a new file and identity; it cannot revise prior results.
 This seal verifies declared bytes and the split structure, but it cannot prove
 the declared state digests match the installed simulator. Trial results,
 resource approval, and execution compliance remain separate gates.
+
+## Paired trial schedule
+
+`build_evaluation_schedule(protocol)` derives ordered attempt rows from a
+verified seal. For this schedule, declare exactly `baseline`, `no_memory`, and
+`fixed_memory`; give `seeds.pairing` a nonempty list of distinct nonnegative
+integer environment seeds and `seeds.scheduling` a nonnegative integer. Declare
+`allocation.task_0` through `allocation.task_9`, each with `pairs` equal to the
+length of `seeds.pairing`. Each task receives the same number of paired
+clusters. Its held-out states are selected by state ID in round-robin order;
+the same selected-state identity and environment seed are used for A, B, and C
+within a cluster. SHA-256 keys from the scheduling seed order task clusters
+and choose the starting condition order. Cyclic rotations balance each
+condition's position within a task and across the full schedule to a
+difference of at most one when pair counts are not divisible by three.
+
+```python
+from evaluation_schedule import build_evaluation_schedule, audit_evaluation_schedule
+
+rows = build_evaluation_schedule(protocol)
+report = audit_evaluation_schedule(protocol, rows)
+for row in rows:
+    # Verify the selected-state digest against the installed simulator before
+    # executing row['condition'] with row['environment_seed'].
+    print(row['sequence'], row['attempt_id'], row['task_id'], row['condition'])
+```
+
+The audit checks the seal, exact seeded order, unique attempt IDs, all ten task
+allocations, contiguous A/B/C clusters, paired state/seed identity, and
+condition position balance by task and globally. Retain the protocol reference, rows, and audit
+report with run evidence. The schedule assigns attempts only; it does not run
+an evaluation, verify simulator state bytes, or grant resource approval.

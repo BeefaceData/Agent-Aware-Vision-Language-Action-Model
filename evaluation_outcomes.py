@@ -147,3 +147,37 @@ def report_task_outcomes(protocol, rows, attempts):
                       'differences_pp': differences})
     return {'protocol_id': scored['protocol_id'], 'tasks': tasks,
             'warnings': warnings}
+
+
+def report_macro_improvement(protocol, rows, attempts):
+    """Average each condition contrast across all ten LIBERO-10 tasks.
+
+    A contrast is unavailable until every task has a scoreable rate for both
+    conditions. Pooled counts are descriptive and never replace this estimator.
+    """
+    if protocol.read()['analysis'].get('estimator') != 'equal-task-macro':
+        raise ProtocolError('equal-task-macro estimator required')
+    task_report = report_task_outcomes(protocol, rows, attempts)
+    tasks = task_report['tasks']
+    contrasts = ('no_memory_minus_baseline', 'fixed_memory_minus_baseline',
+                 'fixed_memory_minus_no_memory')
+    differences = {}
+    for contrast in contrasts:
+        values = [task['differences_pp'][contrast] for task in tasks]
+        differences[contrast] = (sum(values) / 10 if len(values) == 10 and
+                                 all(value is not None for value in values)
+                                 else None)
+    pooled = {}
+    for condition in CONDITIONS:
+        entries = [task['conditions'][condition] for task in tasks]
+        pooled[condition] = {
+            'scheduled': sum(entry['scheduled'] for entry in entries),
+            'attempts': sum(entry['attempts'] for entry in entries),
+            'successes': sum(entry['successes'] for entry in entries),
+            'pre_start_exclusions': sum(entry['pre_start_exclusions']
+                                        for entry in entries),
+            'missing_evidence': sum(entry['missing_evidence'] for entry in entries),
+            'unscoreable': sum(entry['unscoreable'] for entry in entries),
+        }
+    return {**task_report, 'estimator': 'equal-task-macro',
+            'macro_differences_pp': differences, 'pooled_counts': pooled}

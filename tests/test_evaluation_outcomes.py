@@ -6,7 +6,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from episode_harness import EpisodeConfig, PreStartFailure, run_episode
-from evaluation_outcomes import report_task_outcomes, score_evaluation_outcomes
+from evaluation_outcomes import (report_macro_improvement, report_task_outcomes,
+                                 score_evaluation_outcomes)
 from evaluation_protocol import EvaluationProtocol, ProtocolError
 from evaluation_schedule import build_evaluation_schedule
 from replay_adapters import ReplayEnvironment, ReplayPolicy, ReplayRecorder, ReplayStep
@@ -159,6 +160,69 @@ class EvaluationOutcomeTests(unittest.TestCase):
         self.assertIsNone(task['differences_pp']['fixed_memory_minus_baseline'])
         self.assertIn('task 0 fixed_memory: 0 missing, 1 unscoreable',
                       report['warnings'])
+
+    def test_macro_average_weights_tasks_not_pooled_attempts(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        fields = declaration()
+        fields['seeds'] = {'pairing': [17, 18], 'scheduling': 701,
+                           'bootstrap': 991}
+        fields['allocation'] = {f'task_{task}': {'pairs': 2}
+                                for task in range(10)}
+        protocol = EvaluationProtocol.freeze(Path(temporary.name) / 'protocol.json',
+                                             **fields)
+        rows = build_evaluation_schedule(protocol)
+        attempts = {}
+        for row in rows:
+            task, condition = row['task_id'], row['condition']
+            if task == 0 and condition == 'fixed_memory' and row['repetition'] == 1:
+                # A declared pre-start exclusion makes valid-start counts unequal.
+                interruption = replace(
+                    self.interruption('infrastructure_failure'),
+                    last_observation=None,
+                    pre_start_failure=PreStartFailure('environment_reset',
+                                                      row['environment_seed'],
+                                                      True, False))
+                evidence = interruption
+            else:
+                success = (condition == 'fixed_memory' and task in (0, 1)
+                           and row['repetition'] == 0)
+                evidence = self.episode(success=success, terminated=True)
+            attempts[row['attempt_id']] = replace(evidence,
+                                                  episode_id=row['attempt_id'])
+
+        report = report_macro_improvement(protocol, rows, attempts)
+        self.assertEqual(report['macro_differences_pp']
+                         ['fixed_memory_minus_baseline'], 15.0)
+        self.assertEqual(report['macro_differences_pp']
+                         ['no_memory_minus_baseline'], 0.0)
+        self.assertEqual(report['macro_differences_pp']
+                         ['fixed_memory_minus_no_memory'], 15.0)
+        self.assertEqual(report['pooled_counts']['fixed_memory']['successes'], 2)
+        self.assertEqual(report['pooled_counts']['fixed_memory']['attempts'], 19)
+        self.assertEqual(report['pooled_counts']['baseline']['attempts'], 20)
+        self.assertNotEqual(15.0, 100 * 2 / 19)
+
+        del attempts[next(row['attempt_id'] for row in rows
+                          if row['task_id'] == 9 and
+                          row['condition'] == 'fixed_memory')]
+        incomplete = report_macro_improvement(protocol, rows, attempts)
+        self.assertIsNone(incomplete['macro_differences_pp']
+                          ['fixed_memory_minus_baseline'])
+        self.assertIsNone(incomplete['macro_differences_pp']
+                          ['fixed_memory_minus_no_memory'])
+        self.assertEqual(incomplete['macro_differences_pp']
+                         ['no_memory_minus_baseline'], 0.0)
+        self.assertEqual(incomplete['pooled_counts']['fixed_memory']
+                         ['missing_evidence'], 1)
+
+        attempts = {identity: evidence for identity, evidence in attempts.items()
+                    if identity not in {row['attempt_id'] for row in rows
+                                        if row['task_id'] == 9}}
+        missing_task = report_macro_improvement(protocol, rows, attempts)
+        self.assertTrue(all(value is None for value in
+                            missing_task['macro_differences_pp'].values()))
+        self.assertIn('task 9: no valid starts', missing_task['warnings'])
 
 
 if __name__ == '__main__':

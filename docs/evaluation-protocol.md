@@ -138,6 +138,18 @@ is `None` unless both condition rates are scoreable. `warnings` names condition
 evidence gaps and tasks with no valid starts. Inspect this report before any
 equal-task aggregate so a harmed or missing task cannot disappear in the mean.
 
+`report_macro_improvement(protocol, rows, attempts)` averages the ten task
+differences for each supervisor comparison (no-memory versus baseline,
+fixed-memory versus baseline, and fixed-memory versus no-memory). The result is
+in percentage points under `macro_differences_pp`. A comparison is `None` if
+either condition lacks a scoreable rate for even one task; the other complete
+comparisons can still be inspected. `pooled_counts` separately reports raw
+scheduled attempts, valid starts, successes, pre-start exclusions, missing
+evidence, and unscoreable outcomes for each condition. Dividing pooled
+successes by pooled valid starts does not give the equal-task estimator when
+denominators differ. The report also retains all task rows and warnings so an
+incomplete suite cannot be presented as a measured improvement.
+
 ## Pre-start replacement
 
 Declare `outcomes.pre_start_replacement` before freezing the protocol, with an

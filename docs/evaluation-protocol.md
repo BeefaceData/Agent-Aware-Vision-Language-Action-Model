@@ -292,3 +292,40 @@ scheduled row in primary scoring, while the original and every replacement
 remain in the infrastructure report. This planner does not verify persisted
 artifacts or launch a live attempt; the caller must validate each replay or
 bundle before scoring it.
+
+## Operational comparison
+
+`report_operational_metrics(protocol, rows, verified_attempts, operational)`
+uses the sealed schedule and outcome scorer. It returns one row per scheduled
+attempt and condition totals over the same scoreable valid starts as success
+counts, including unsuccessful and post-start system-failure attempts. Missing
+and pre-start excluded attempts remain visible but enter neither denominator.
+The caller verifies retained episode and usage evidence before reporting.
+
+The episode outcome supplies elapsed `rollout_seconds`, waiting
+`cumulative_wait_seconds`, and acknowledged `steps` as executed actions. An
+interrupted episode can supply acknowledged actions while absent timing stays
+unknown. The separate `operational` map is keyed by scheduled attempt ID. Each
+record contains the matching `episode_id` and may contain nonnegative integer
+`interventions`, `human_assistance`, and `model_calls`, plus
+`reported_cost_subtotals` by currency and `unknown_cost_calls`. A model-call
+journal summary supplies `call_count`, cost subtotals, and unknown-cost calls;
+copy `call_count` to `model_calls` after checking its episode identity. Source
+assistance and intervention counts from retained attempt evidence. Missing
+records are never inferred as zero.
+
+```python
+from evaluation_operations import report_operational_metrics
+
+report = report_operational_metrics(protocol, rows, verified_attempts,
+                                    verified_operational_by_attempt)
+print(report['conditions']['fixed_memory'])
+```
+
+Each condition has `attempts` and `successes` alongside metric `totals`,
+`unknown_attempts`, and `complete_totals`. A complete total is `None` if any
+included attempt lacks that metric. Cost has reported subtotals by currency,
+an unknown-call count, an unknown-attempt count, and a complete total that is
+`None` when any included attempt lacks full cost evidence. Thus a recorded zero
+is distinct from unknown time, assistance, model usage, or cost. Keep currency
+amounts separate and do not infer unreported pricing.

@@ -56,6 +56,8 @@ def score_evaluation_outcomes(protocol, rows, attempts):
                     type(outcome.get('stop_reason')) is not str or
                     not outcome['stop_reason']):
                 status, reason = 'unscoreable', 'invalid outcome fields'
+            elif outcome.get('evaluation_scope', 'standard') != 'standard':
+                status, reason = 'unscoreable', 'optional ablation outside primary comparison'
             elif outcome.get('artifact_status') != 'completed':
                 status, reason = 'unscoreable', 'incomplete outcome artifacts'
             elif outcome['success'] and outcome['stop_reason'] != 'success':

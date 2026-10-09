@@ -161,6 +161,8 @@ class TraceRecorder:
         manifest = {
             'version': 1, 'source_episode_id': self._episode_id,
             'config': asdict(self.config), 'outcome': _summary(outcome),
+            'evaluation_scope': ('optional_uncapped_action_horizon'
+                                 if self.config.max_steps is None else 'standard'),
             'supervisor_call_budget': outcome.supervisor_call_budget,
             'wall_clock_limit': outcome.wall_clock_limit,
             'episode_clock': outcome.episode_clock,
@@ -276,8 +278,13 @@ def _load(directory, manifest):
              'unsupported trace version')
     episode_id = manifest['source_episode_id']
     config = EpisodeConfig(**manifest['config'])
-    _require(type(config.seed) is int and type(config.max_steps) is int and
-             config.max_steps > 0, 'invalid episode configuration')
+    _require(type(config.seed) is int and
+             (config.max_steps is None or
+              (type(config.max_steps) is int and config.max_steps > 0)),
+             'invalid episode configuration')
+    _require(manifest.get('evaluation_scope', 'standard') == (
+        'optional_uncapped_action_horizon' if config.max_steps is None else 'standard'),
+        'evaluation scope does not match configuration')
     _require(set(manifest['files']) == {'observations.jsonl', 'decisions.jsonl'},
              'required replay artifacts missing')
     data = {}
@@ -304,7 +311,9 @@ def _load(directory, manifest):
                  'invalid episode wall-clock declaration')
     else:
         _require(episode_clock is None, 'episode clock without configured cap')
-    _require(0 <= len(decisions) <= config.max_steps and (decisions or wall_limit is not None),
+    _require(0 <= len(decisions) and
+             (config.max_steps is None or len(decisions) <= config.max_steps) and
+             (decisions or wall_limit is not None),
              'invalid decision count')
     executed = 0
     reward = 0.0
@@ -384,7 +393,9 @@ def _load(directory, manifest):
             _require((offset == 0 and not pending) or
                      (pending and previous['sequence'] == recovery['sequence'] and
                       offset == previous['action_index'] + 1), 'invalid recovery ordering')
-            _require(source + len(plan.actions) <= config.max_steps, 'recovery exceeds horizon')
+            _require(config.max_steps is None or
+                     source + len(plan.actions) <= config.max_steps,
+                     'recovery exceeds horizon')
             from recovery_monitor import RecoveryAssessment, aborted, check_recovery
             check = recovery['check']
             _require(type(check) is dict and index + 1 < len(packets),
@@ -652,7 +663,8 @@ def _load(directory, manifest):
             supervisor_exhausted = supervisor_exhausted or refused
         stop = 'wall_clock_limit' if evidence['confirmed'] else 'interruption_failed'
     _require(len(packets) == executed + 1, 'missing or extra observation artifacts')
-    _require(stop != 'step_limit' or executed == config.max_steps, 'unfinished trace')
+    _require(stop != 'step_limit' or (config.max_steps is not None and
+                                     executed == config.max_steps), 'unfinished trace')
     _require(manifest['outcome'] == dict(success=success, steps=executed,
                                        stop_reason=stop, sum_rewards=reward),
              'outcome does not match recorded sequence')
@@ -699,7 +711,8 @@ class RecordedReplay:
                          'correction_timeout_seconds', 'correction_max_age_seconds',
                          'max_supervisor_calls', 'supervisor_exhaustion_policy', 'max_episode_seconds',
                          'supervisor_max_retries', 'supervisor_retry_delay_seconds',
-                         'supervisor_retry_errors', 'correction_mode'):
+                         'supervisor_retry_errors', 'correction_mode',
+                         'standard_action_horizon'):
                 if name not in recorded_config:
                     self._recorded_config.pop(name)
 
@@ -734,7 +747,11 @@ class RecordedReplay:
         """Execute validated replay and label diagnostic scope explicitly."""
         return dict(source_episode_id=self.source_episode_id,
                     correction_mode=self.config.correction_mode,
-                    optional_ablation=self.config.correction_mode != 'combined',
+                    evaluation_scope=('optional_uncapped_action_horizon'
+                                      if self.config.max_steps is None else 'standard'),
+                    standard_action_horizon=self.config.standard_action_horizon,
+                    optional_ablation=(self.config.max_steps is None or
+                                       self.config.correction_mode != 'combined'),
                     primary_acceptance_evidence=False,
                     replay_outcome=_summary(self.run()))
 

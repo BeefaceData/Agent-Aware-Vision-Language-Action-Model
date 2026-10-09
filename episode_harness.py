@@ -12,6 +12,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from functools import wraps
+from itertools import count
 from math import isfinite
 from threading import Lock
 from time import monotonic, sleep
@@ -43,6 +44,10 @@ class EpisodeConfig:
     costs one action, and each recovery command costs one action. Recovery
     admission requires room for the entire sequence; unused commands after
     terminal outcomes or aborts are not counted as executed actions.
+    max_steps=None selects the optional uncapped-action-horizon ablation. It
+    requires the matched standard_action_horizon as a reference and explicit
+    wall-clock, supervisor-call, and intervention caps. It never belongs to
+    the primary matched-horizon comparison.
 
     max_supervisor_calls defaults to max_steps and reserves one request before
     each due single-attempt supervisor callback. Failed requests are not refunded.
@@ -66,7 +71,7 @@ class EpisodeConfig:
     single-action adjustment validation and the same runtime limits.
     """
     seed: int
-    max_steps: int
+    max_steps: int | None
     supervisor_interval_actions: int = 1
     max_interventions: int | None = None
     recovery_attempt_limits: tuple[tuple[str, int], ...] = (('reopen_and_retreat', 1),)
@@ -80,8 +85,19 @@ class EpisodeConfig:
     supervisor_retry_delay_seconds: float = 0.0
     supervisor_retry_errors: tuple[str, ...] = RECOVERABLE_ERRORS
     correction_mode: str = 'combined'
+    standard_action_horizon: int | None = None
 
     def __post_init__(self):
+        if self.max_steps is None:
+            if (type(self.standard_action_horizon) is not int or
+                    self.standard_action_horizon <= 0):
+                raise ValueError('max_steps=None requires a standard action horizon')
+            if (type(self.max_interventions) is not int or self.max_interventions < 0 or
+                    type(self.max_supervisor_calls) is not int or self.max_supervisor_calls < 0 or
+                    self.max_episode_seconds is None):
+                raise ValueError('uncapped ablation requires explicit intervention, model-call and wall-clock caps')
+        elif self.standard_action_horizon is not None:
+            raise ValueError('standard_action_horizon is only for uncapped ablation')
         if self.correction_mode not in ('combined', 'recovery_only', 'adjustment_only'):
             raise ValueError('invalid correction mode')
         if type(self.supervisor_max_retries) is not int or self.supervisor_max_retries < 0:
@@ -899,6 +915,7 @@ class EpisodeOutcome:
     supervisor_call_budget: dict | None = None
     wall_clock_limit: dict | None = None
     episode_clock: dict | None = None
+    evaluation_scope: str = 'standard'
     task_status: str = field(init=False)
 
     def __post_init__(self):
@@ -1136,7 +1153,7 @@ def run_episode(
     from baseline_fallback import BaselineFallback, fallback_evidence
     if baseline_fallback is not None and type(baseline_fallback) is not BaselineFallback:
         raise ValueError('BaselineFallback required')
-    if type(config.max_steps) is not int or config.max_steps <= 0:
+    if config.max_steps is not None and (type(config.max_steps) is not int or config.max_steps <= 0):
         raise ValueError('max_steps must be a positive integer')
     if config.supervisor_max_retries and supervisor_decider is None:
         raise ValueError('supervisor retries require a supervisor decider')
@@ -1158,7 +1175,7 @@ def run_episode(
     interruption_contract = (require_interruption(environment) if any(
         item is not None for item in (action_selector, supervisor_decider, baseline_fallback))
         or config.max_episode_seconds is not None
-        or (config.max_supervisor_calls < config.max_steps and
+        or ((config.max_steps is None or config.max_supervisor_calls < config.max_steps) and
             (supervisor is not None or window_supervisor is not None))
         else None)
 
@@ -1229,7 +1246,7 @@ def run_episode(
         supervisor_calls = 0
         supervisor_exhausted = False
 
-        for step in range(1, config.max_steps + 1):
+        for step in (count(1) if config.max_steps is None else range(1, config.max_steps + 1)):
             call_budget = None
             correction_memory = None
             deadline.check('policy')
@@ -1437,7 +1454,8 @@ def run_episode(
                                 plan.request['proposal_id'] != proposal_id or
                                 plan.request['observation_sequence'] != observation.sequence):
                             raise ValueError('recovery must reference the current proposal')
-                        if len(plan.actions) > config.max_steps - step + 1:
+                        if (config.max_steps is not None and
+                                len(plan.actions) > config.max_steps - step + 1):
                             resolution = ActionResolution('reject', reason='insufficient recovery action horizon')
                         else:
                             recovery_sequence, recovery_index = plan, 0
@@ -1672,7 +1690,8 @@ def run_episode(
                     cooldown_remaining = config.recovery_cooldown_actions
             elif resolution.kind == 'pass':
                 cooldown_remaining = max(0, cooldown_remaining - 1)
-            if (resolution.kind == 'override' or recovery_finished) and step < config.max_steps:
+            if (resolution.kind == 'override' or recovery_finished) and (
+                    config.max_steps is None or step < config.max_steps):
                 # Only accepted, nonterminal evidence can seed the next proposal.
                 # Keep adapter mutation separate from recorded environment evidence.
                 deadline.call('resume', policy.resume, deepcopy(observation))
@@ -1757,4 +1776,6 @@ def run_episode(
                                exhausted=supervisor_exhausted,
                                policy=config.supervisor_exhaustion_policy), wall_clock_limit,
                           (dict(started_at=deadline.started_at, deadline=deadline.deadline)
-                           if config.max_episode_seconds is not None else None))
+                           if config.max_episode_seconds is not None else None),
+                          ('optional_uncapped_action_horizon' if config.max_steps is None
+                           else 'standard'))

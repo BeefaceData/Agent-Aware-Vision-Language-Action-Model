@@ -94,6 +94,16 @@ class EvaluationOutcomeTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtocolError, 'outside sealed schedule'):
             score_evaluation_outcomes(self.protocol, self.rows, {'other': incomplete})
 
+    def test_optional_horizon_outcome_cannot_enter_primary_rate(self):
+        row = self.rows[0]
+        optional = replace(self.episode(success=True, terminated=True),
+                           evaluation_scope='optional_uncapped_action_horizon')
+        report = score_evaluation_outcomes(self.protocol, self.rows,
+                                           {row['attempt_id']: optional})
+        self.assertEqual(report['dispositions'][0]['status'], 'unscoreable')
+        self.assertIn('optional ablation', report['dispositions'][0]['reason'])
+        self.assertIsNone(report['success_rate'])
+
     def test_task_report_keeps_regression_and_missing_tasks_visible(self):
         # Public complete-episode replay supplies the outcomes; unique IDs
         # identify the retained evidence for each scheduled attempt.

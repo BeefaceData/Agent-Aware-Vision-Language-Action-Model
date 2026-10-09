@@ -2,6 +2,8 @@
 
 Complete one open GitHub issue labeled `ready-for-agent` per iteration in
 `BeefaceData/Agent-Aware-Vision-Language-Action-Model`.
+Choose the lowest-numbered eligible `[V1-...]` issue with every listed blocker
+closed. Do not skip an eligible issue because another looks easier.
 
 Read `AGENTS.md`, `CONTEXT.md`, the chosen issue and its comments, and relevant
 ADRs. Respect issue dependencies. Use GitHub Issues as the source of scope.

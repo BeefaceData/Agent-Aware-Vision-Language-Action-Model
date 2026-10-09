@@ -118,6 +118,8 @@ while :; do
 
   # 2. Run Codex locally — no sandbox, no permission prompts.
   # The prompt is passed as an arg; stdin is closed for the non-interactive run.
+  # --model gpt-6.1-sol
+  # -c model_reasoning_effort='"medium"'
   codex exec --json \
     --dangerously-bypass-approvals-and-sandbox \
     "Read .agent/ralph-context.md for previous commits, open GitHub issues, and your full instructions. Then follow those instructions." \

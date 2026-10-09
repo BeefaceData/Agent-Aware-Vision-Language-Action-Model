@@ -1,7 +1,7 @@
 {
     "name":  "simulation-supervisor-v1",
     "repository":  "BeefaceData/Agent-Aware-Vision-Language-Action-Model",
-    "objective":  "Implement the observation-only simulation supervisor, pin its VLM identity, demonstrate both bounded correction paths in replay, and enforce frozen assets. This 50-issue batch does not authorize active corrective evaluation or prove a 10-point improvement. Use deterministic public module and episode tests. Configure claude-sonnet-5-5 with ANTHROPIC_API_KEY for supervision only. AFK workers and CI use injected transports and make zero paid calls. A future live application adapter must enforce the shared USD 50 allowance before enabling requests. Keep heavy simulator/model imports lazy so replay tests run without GPU or network.",
+    "objective":  "Implement the observation-only simulation supervisor, pin its VLM identity, demonstrate both bounded correction paths in replay, and enforce frozen assets. This 50-issue batch does not authorize active corrective evaluation or prove a 10-point improvement. Use deterministic public module and episode tests. Configure claude-sonnet-5-5 with ANTHROPIC_API_KEY for supervision only. AFK workers and CI use injected transports and make zero paid calls. A future live application adapter must record usage durably and report it against the soft USD 50 target before enabling requests; there is no hard spending cap. Keep heavy simulator/model imports lazy so replay tests run without GPU or network.",
     "issues":  [
                    2,
                    6,

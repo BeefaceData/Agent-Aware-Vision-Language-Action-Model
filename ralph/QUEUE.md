@@ -13,17 +13,18 @@ simulator/model imports lazy and inject provider transports. Run relevant projec
 
 ## Supervisor allowance
 
-The client authorized at most **USD 50 total** for simulation supervision, with
-`ANTHROPIC_API_KEY` and `claude-sonnet-5-5`. This allowance is for the VLA
+The user authorized Anthropic simulation supervision with `ANTHROPIC_API_KEY`
+and `claude-sonnet-5-5`. There is no hard spending cap; aim to stay under
+**USD 50 total** and record actual usage. This allowance is for the VLA
 supervisor, never coding or review. AFK workers and CI make **zero paid API calls**.
 
 The former Python gateway was removed with the Python loop controller.
-`supervisor-api-policy.json` preserves the authorization and model; it is not a
-spend-enforcement implementation or a current pricing guarantee. The existing
+`supervisor-api-policy.json` preserves the model and soft spending target; it is
+not a spending monitor or a current pricing guarantee. The existing
 ignored `.ralph/supervisor-budget.sqlite3` is preserved as historical accounting.
-Before enabling live supervisor calls, the application adapter must enforce the
-shared remaining allowance with durable reservation/accounting and current verified
+Before enabling live supervisor calls, the application adapter must record
+usage durably, report progress against the target, and use current verified
 pricing. Implement and test its contract through injected transports first;
-a shell queue must never claim the removed gateway still enforces spend.
+a shell queue must never claim the removed gateway tracks spending.
 
 Historical queue state is retained as evidence; `afk.sh` does not import it.

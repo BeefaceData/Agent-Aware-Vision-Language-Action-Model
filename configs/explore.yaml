@@ -1,0 +1,23 @@
+# Development hypotheses only. No established grasp or motion success claims.
+seeds: [3]
+repeats: 1
+max_attempts: 2
+attempt_timeout_seconds: 900
+campaign_timeout_seconds: 1800
+stop_on_acquisition: false
+variants:
+  - name: standard_acquisition
+    settings:
+      max_turns: 20
+      recipe:
+        max_retries: 2
+        vla: {max_chunks: 3, chunk_size: 8, max_policy_actions: 24}
+      budget: {max_skill_calls: 20, max_analytic_ticks: 12000, max_policy_actions: 72, max_vla_chunks: 9}
+  - name: higher_stage_shorter_vla
+    settings:
+      max_turns: 20
+      recipe:
+        max_retries: 2
+        stage: {target: mug_pregrasp, offset_xyz: [0.0, 0.0, 0.02]}
+        vla: {max_chunks: 2, chunk_size: 8, max_policy_actions: 16}
+      budget: {max_skill_calls: 20, max_analytic_ticks: 12000, max_policy_actions: 48, max_vla_chunks: 6}

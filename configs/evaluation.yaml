@@ -1,0 +1,14 @@
+# Proposed seeds only. Declare ALL development seeds and supply exploration
+# summaries at freeze time. This is not proof of exclusion from Neotix training.
+seeds: [1001, 1002]
+development_seeds: [0, 1, 2, 3]
+planner: scripted
+condition: oracle_assisted_acquisition
+episode_timeout_seconds: 900
+campaign_timeout_seconds: 1800
+episode:
+  max_turns: 20
+  recipe:
+    max_retries: 2
+    vla: {max_chunks: 3, chunk_size: 8, max_policy_actions: 24}
+  budget: {max_skill_calls: 20, max_analytic_ticks: 12000, max_policy_actions: 72, max_vla_chunks: 9}

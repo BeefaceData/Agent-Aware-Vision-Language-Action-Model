@@ -1,0 +1,28 @@
+# RoboTwin 2.0 simulator. numpy must stay below 2: mplib segfaults above it.
+numpy==1.26.4
+scipy==1.10.1
+# CuRobo v0.7.8 does not build against newer torch; 2.8 also covers 50-series GPUs.
+torch>=2.8,<2.9
+sapien==3.0.3
+mplib==0.2.1
+toppra>=0.6
+transforms3d==0.4.2
+trimesh==4.4.3
+open3d>=0.19
+gymnasium==0.29.1
+opencv-python
+imageio
+pyyaml>=6
+h5py>=3.8
+zarr
+rich>=13.7
+termcolor
+msgpack>=1.0.8
+msgpack-numpy>=0.4.8
+matplotlib
+moviepy
+av
+pyglet<2
+huggingface-hub
+hf-transfer
+setuptools<81

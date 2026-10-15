@@ -1,0 +1,45 @@
+# Credentials and local tooling
+.env
+.env.*
+*.secret
+*.pem
+*.key
+.aws/
+.codex/
+.agents/
+.venv/
+venv/
+.idea/
+.vscode/
+
+# External simulator, checkpoints, recordings and run artifacts
+/RoboTwin/
+weights/
+videos/
+/data/
+/timings*/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.mp4
+*.avi
+*.mov
+*.gif
+*.log
+
+# Development notes stay local; runtime prompts are executable inputs.
+*.md
+!/README.md
+!/harness/prompts/*.md
+
+# Python and OS caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+.DS_Store

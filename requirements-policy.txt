@@ -1,0 +1,8 @@
+# Loads the checkpoint and talks to the simulator over HTTP.
+# The commit matters: the weights were trained with this one, and the release on
+# PyPI (0.6.1) cannot read the checkpoint's tokenizer path.
+lerobot[multi-task-dit] @ git+https://github.com/huggingface/lerobot.git@89236ea0f4f81a81ca566081e20dd1ff5f823cbe
+torch
+numpy>=2.0,<2.3
+requests
+imageio[pyav]

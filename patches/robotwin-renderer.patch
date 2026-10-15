@@ -1,0 +1,16 @@
+diff --git a/envs/_base_task.py b/envs/_base_task.py
+index ace13e6..37510e4 100644
+--- a/envs/_base_task.py
++++ b/envs/_base_task.py
+@@ -213,9 +213,10 @@ class Base_Task(gym.Env):
+         self.engine.set_renderer(self.renderer)
+ 
+         sapien.render.set_camera_shader_dir("rt")
++        # sapien.render.set_camera_shader_dir("default")
+         sapien.render.set_ray_tracing_samples_per_pixel(32)
+         sapien.render.set_ray_tracing_path_depth(8)
+-        sapien.render.set_ray_tracing_denoiser("oidn")
++        sapien.render.set_ray_tracing_denoiser("none")
+ 
+         # declare sapien scene
+         scene_config = sapien.SceneConfig()

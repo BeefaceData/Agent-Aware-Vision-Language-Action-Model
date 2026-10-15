@@ -1,0 +1,19 @@
+# Development acquisition recipe; these limits are not validated operating ranges.
+max_turns: 20
+recipe:
+  arm: left
+  max_retries: 2
+  stage:
+    target: mug_pregrasp
+  retreat:
+    target: current_ee
+    offset_xyz: [0.0, 0.0, 0.05]
+  vla:
+    max_chunks: 3
+    chunk_size: 8
+    max_policy_actions: 24
+budget:
+  max_skill_calls: 20
+  max_analytic_ticks: 12000
+  max_policy_actions: 72
+  max_vla_chunks: 9

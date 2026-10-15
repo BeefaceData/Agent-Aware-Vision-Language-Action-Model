@@ -1,0 +1,4 @@
+# Optional local planner dependencies. Never install in the frozen policy worker.
+-r requirements-harness.txt
+anthropic>=0.40,<1
+Pillow>=10,<13

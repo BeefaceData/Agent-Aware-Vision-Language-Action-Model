@@ -1,0 +1,27 @@
+# Default remains PASS-only; no physical skills or LLM calls are enabled.
+task: hanging_mug
+harness:
+  enabled: true
+supervisor:
+  mode: pass_through
+  minimum_confidence: 0.70
+skills:
+  registry: skills.yaml
+  minimum_validation_cases: 10
+  minimum_recovery_rate: 0.70
+  maximum_catastrophic_rate: 0.0
+safety:
+  max_interventions_per_episode: 5
+  max_consecutive_skill_failures: 2
+  max_skill_steps: 150
+  abort_on_invalid_skill_request: false
+trace:
+  state_history: 40
+  action_history: 40
+  keyframes: 6
+  keyframe_interval: 24
+# Paths are relative to this file.
+logging:
+  assessment_dir: ../data/assessments
+  trace_dir: ../data/traces
+  evaluation_dir: ../data/evaluation

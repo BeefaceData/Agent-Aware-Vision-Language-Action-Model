@@ -1,0 +1,5 @@
+# Install in the local runner environment only. Does not change policy dependencies.
+pydantic>=2.13,<3
+PyYAML>=6,<7
+# Compatible with both existing simulator and policy environments.
+numpy>=1.26,<3

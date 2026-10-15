@@ -1,0 +1,10 @@
+# Development candidates only. No physical recovery is verified or runtime eligible.
+# A true flag alone is insufficient: code/version-matched evidence is required,
+# and candidate_only implementations are always excluded from runtime catalog.
+skills:
+  retry_grasp:
+    version: 2
+    verified: false
+  backoff_reapproach_rack:
+    version: 4
+    verified: false

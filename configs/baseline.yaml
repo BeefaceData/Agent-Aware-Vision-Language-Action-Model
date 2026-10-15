@@ -1,0 +1,5 @@
+task: hanging_mug
+harness:
+  enabled: false
+supervisor:
+  mode: pass_through

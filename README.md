@@ -1,26 +1,22 @@
 # Agent-Aware Vision-Language-Action Model
 
-A runtime harness for a **frozen Neotix policy** on RoboTwin's `hanging_mug` task.
-RoboTwin and CuRobo run locally; policy inference runs on Modal. An Anthropic
-planner selects one bounded skill per turn: `MOVE_TO`, `ROTATE_WRIST`,
-`SET_GRIPPER`, `RELEASE`, `VLA_ACT`, or `ABORT`. It never supplies joint actions.
-There is no policy retraining.
+A runtime supervision harness for the frozen Neotix policy on RoboTwin's
+`hanging_mug` task. RoboTwin and CuRobo run locally; policy inference runs on
+Modal. The optional Anthropic planner selects one bounded skill per turn and
+never generates joint actions. This project does not retrain the policy.
 
-Implemented: baseline-compatible supervision, checkpoint/replay tooling,
-measured-start analytic skills, stop predicates, structured logs, task/global
-memory, bounded exploration, frozen evaluation, and saved-turn planner diagnostics.
-Legacy recovery prototypes remain separate from the active skill registry.
+The baseline inference path remains available independently. The supervised
+runtime adds typed skills, public RGB-D perception, task predicates, structured
+logs, and offline replay tools. Live exploration is still in progress; success
+of individual phases is not evidence of reliable full-task hanging.
 
-**Status:** live staging, retreat and Modal calls work. The current planner runner
-targets grasp/lift only; acquisition and full hanging are not validated. Two live
-attempts aborted on invalid planner responses. Development grounding still uses
-explicit simulator oracles, withheld from planner input.
+For the component map, data flow, perception boundary, and contributor
+workflow, see [CONTRIBUTE_README.md](CONTRIBUTE_README.md).
 
 ## Setup
 
-Use Linux, Python 3.10, an NVIDIA GPU with Vulkan support, and a CUDA toolkit/C++
-compiler compatible with PyTorch 2.8. Allow space for RoboTwin's roughly 16 GB of
-assets. Run commands from this repository after cloning it.
+Use Linux, Python 3.10, and an NVIDIA GPU with Vulkan support. Allow space for
+RoboTwin's simulator assets. Run these commands from the repository:
 
 ```bash
 conda create -n robotwin python=3.10 -y
@@ -37,40 +33,53 @@ python -m pip install warp-lang==1.12.0
 ```
 
 Follow [RoboTwin's installation guidance](https://github.com/RoboTwin-Platform/RoboTwin)
-for platform dependencies and its SAPIEN/mplib compatibility patches. The included
-renderer patch reproduces our disabled OIDN denoiser. Keep local NumPy at 1.26.4;
-the policy's separate Python 3.12/NumPy 2 environment is built on Modal.
+for platform dependencies and SAPIEN/mplib compatibility patches. Keep local
+NumPy at 1.26.4; the Modal policy worker uses its own Python 3.12 environment.
+
+Deploy the frozen policy worker:
 
 ```bash
 modal setup
 modal deploy modal_policy_chunked.py
 ```
 
-The worker downloads `Neotix-Robotics/robotwin-hanging-mug-dit` into its Modal
-volume. Set `ANTHROPIC_API_KEY` securely in your environment; never commit it.
-Select an exact model ID available to your account (`claude-opus-5` was used locally).
+For Anthropic planning, export `ANTHROPIC_API_KEY` in your environment. Never
+commit it. For optional SAM 3 perception, request gated Hugging Face model
+access, configure a Modal secret named `huggingface` with `HF_TOKEN`, then run
+`modal deploy modal_sam3.py`. SAM 3 dependencies and weights stay on the Modal
+T4 worker, separate from the local simulator.
 
-## Run
+## Run and test
+
+Run CPU-only unit and scenario checks before starting the simulator:
 
 ```bash
-# One development episode; use a new output directory each time.
-python run_skills.py --seed 3 --planner anthropic --anthropic-model claude-opus-5 \
-  --development-oracle --output data/runs/acquisition_01
-
-# Bounded scripted exploration; add planner/model flags to use Anthropic.
-python run_exploration.py --development-oracle --output data/exploration/run_01
-
-# CPU tests; no API calls or simulator startup.
 python -m unittest discover -s tests -q
 ```
 
-For the frozen-policy baseline, start `python run_inference_chunked.py sim` in
-one terminal and `python run_inference_chunked.py policy --episodes 1` in another.
-Use `python -m development.planner_replay --help` for diagnostics without motion.
-For evaluation, declare development seeds in `configs/evaluation.yaml`, freeze
-with `run_evaluation.py freeze`, then run the exact returned digest; `--help`
-lists required arguments. Local frozen manifests must be regenerated after changes.
+One bounded scripted exploration episode:
 
-Code is organized under `harness/` (runtime), `development/` (offline tools),
-`configs/` and `tests/`. Weights, videos, simulator assets, run data and development
-notes stay local. `harness/prompts/*.md` remain tracked runtime inputs.
+```bash
+python run_exploration.py --config configs/explore_natural_acquisition.yaml \
+  --output data/runs/acquisition_01
+```
+
+One Anthropic development episode with public RGB-D perception:
+
+```bash
+python run_skills.py \
+  --config configs/skill_runtime_opus_full_task_rgbd_table_lift.yaml \
+  --planner anthropic \
+  --perception-factory harness.perception.modal_sam3:create_detector \
+  --output data/runs/full_task_01
+```
+
+Development-oracle mode is an alternative for internal debugging. Do not pass
+it together with a public perception factory. Use a unique output directory for
+each run. Run RoboTwin jobs serially on machines with limited GPU VRAM.
+
+For the frozen-policy baseline, start `python run_inference_chunked.py sim` in
+one terminal and `python run_inference_chunked.py policy --episodes 1` in
+another. Run outputs, checkpoints, videos, observations, and validation reports
+are local under ignored `data/`; implementation and validation notes under
+ignored `docs/` are not part of the remote repository.

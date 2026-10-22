@@ -17,6 +17,7 @@ venv/
 weights/
 videos/
 /data/
+/docs/
 /timings*/
 *.safetensors
 *.pt
@@ -31,6 +32,7 @@ videos/
 # Development notes stay local; runtime prompts are executable inputs.
 *.md
 !/README.md
+!/CONTRIBUTE_README.md
 !/harness/prompts/*.md
 
 # Python and OS caches

@@ -17,7 +17,8 @@ from harness.planner.anthropic import AnthropicPlanner, AnthropicSettings
 from harness.planner.base import PlannerContext
 from harness.predicates.base import PredicateResult
 from harness.skill_config import RunSettings
-from harness.skills.schemas import SkillCommand, SkillResult
+from harness.skills.schemas import (SkillCommand, SkillResult,
+                                    is_retryable_pre_motion_planning_failure)
 from harness.trace import CAMERAS
 
 
@@ -48,21 +49,35 @@ def load_turn(episode, turn):
             raise ValueError("replay_requires_unique_contiguous_turns")
         return matches[0]
 
-    selection = row("planner_selection", turn)
+    turns = sorted({r["planner_turn"] for r in rows if r.get("event_type") == "planner_selection"})
+    if not turns or turns != list(range(1, turns[-1] + 1)):
+        raise ValueError("replay_requires_unique_contiguous_turns")
+    selection = row("planner_selection", turn) if turn <= turns[-1] else None
+    if selection is None:
+        if turn != turns[-1] + 1:
+            raise ValueError("replay_turn_out_of_range")
+        last_result = SkillResult.model_validate(row("planner_turn_result", turns[-1])["result"])
+        if not is_retryable_pre_motion_planning_failure(last_result):
+            raise ValueError("next_turn_requires_safe_pre_motion_plan_failure")
     history, results = [], []
     for number in range(1, turn):
         history.append(SkillCommand.model_validate(row("planner_selection", number)["command"]).model_dump(mode="json"))
         result = SkillResult.model_validate(row("planner_turn_result", number)["result"])
-        if not result.completed or result.episode_terminal or result.execution_uncertain:
+        if (result.episode_terminal or result.execution_uncertain
+                or (not result.completed and not is_retryable_pre_motion_planning_failure(result))):
             raise ValueError("cannot_replay_after_terminal_or_uncertain_result")
         results.append(result)
-    reference = selection["observation_before"]
+    previous_turn = row("planner_turn_result", turn-1) if turn > 1 else None
+    reference = (selection["observation_before"] if selection is not None
+                 else previous_turn["observation_after"])
     # Validate containment and bind the bytes used for loading to the report.
     from io import BytesIO
     with np.load(BytesIO(read(reference["path"])), allow_pickle=False) as stored:
-        observation = Observation(int(stored["sequence"]),
-            {camera: stored[camera].copy() for camera in CAMERAS},
-            tuple(stored["command_state"])).copy()
+        from harness.perception.rgbd import camera_frames_from_archive
+        images = {camera: stored[camera].copy() for camera in CAMERAS}
+        frames = camera_frames_from_archive(stored, images)
+        observation = Observation(int(stored["sequence"]), images,
+            tuple(stored["command_state"]), frames or None).copy()
     if observation.sequence != reference["sequence"]:
         raise ValueError("replay_observation_sequence_mismatch")
     budget = settings.budget
@@ -80,8 +95,10 @@ def load_turn(episode, turn):
                                        expected_sha256=manifest["memory_snapshot_sha256"])
         phase = row("planner_turn_result", turn-1)["phase"] if turn > 1 else "APPROACH_MUG"
         memory = snapshot.retrieve(task="hanging_mug", phase=phase)
+    predicates = (selection["predicates_before"] if selection is not None
+                  else previous_turn.get("post_condition", []))
     context = PlannerContext(turn, observation,
-        tuple(PredicateResult.model_validate(p) for p in selection["predicates_before"]),
+        tuple(PredicateResult.model_validate(p) for p in predicates),
         results[-1] if results else None, remaining_budget=remaining, memory=memory)
     return context, planner_settings, history, sources, manifest["prompt_sha256"]
 

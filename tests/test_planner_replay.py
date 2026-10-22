@@ -7,7 +7,7 @@ from development.planner_replay import load_turn, replay_turn, main
 from harness.perception.observations import ObservationStore
 from harness.planner.anthropic import AnthropicSettings
 from harness.skill_config import RunSettings
-from harness.skills.schemas import SkillCommand
+from harness.skills.schemas import SkillCommand, SkillType
 from tests.test_anthropic_planner import Provider, response
 from tests.test_skills import setup_runtime, COMMAND
 
@@ -47,8 +47,60 @@ class PlannerReplayTests(unittest.TestCase):
             self.assertEqual(len(data["recent_commands"]), 1)
             self.assertEqual(data["remaining_budget"]["policy_actions"],
                              RunSettings().budget.max_policy_actions-previous.executed_policy_actions)
-            self.assertEqual(data["runtime_limits"]["vla_attempts_remaining"], 2)
+            self.assertNotIn("vla_attempts_remaining", data["runtime_limits"])
             self.assertEqual(len(report["source_hashes"]), 3)
+
+    def test_replays_next_turn_after_recorded_safe_pre_motion_plan_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, original = self.fixture(tmp)
+            ref = rows[-1]["observation_before"]
+            state = original.state_before
+            failure = original.model_copy(update={
+                "skill": SkillType.MOVE_TO, "completed": False, "stop_reason": "planning_failure",
+                "executed_policy_actions": 0, "vla_chunks_requested": 0,
+                "executed_physics_ticks": 0, "state_before": state, "state_after": state,
+                "observation_before": ref["sequence"], "observation_after": ref["sequence"],
+                "episode_terminal": False, "task_success": False, "objective_satisfied": None,
+                "controlled_arms": "left", "information_source": "public", "predicate": None,
+                "execution_uncertain": False,
+            })
+            rows[1] = dict(event_type="planner_turn_result", planner_turn=1,
+                result=failure.model_dump(mode="json"), phase="RETRY_RETREAT",
+                observation_after=ref, post_condition=[{
+                    "name": "mug_lifted", "value": False, "source": "runtime",
+                    "observation_sequence": ref["sequence"], "reason": "replay_fixture"}])
+            (Path(tmp)/"assessments.jsonl").write_text("\n".join(json.dumps(r) for r in rows[:2]))
+            provider = Provider([response()])
+            report = replay_turn(tmp, 2, client=provider)
+            data = json.loads(provider.requests[0]["messages"][0]["content"][-1]["text"])
+            self.assertEqual(report["command"]["action"], "vla_act")
+            self.assertFalse(report["robot_motion"])
+            self.assertEqual(data["previous_result"]["stop_reason"], "planning_failure")
+            self.assertEqual(data["previous_result"]["skill"], "move_to")
+            self.assertNotIn("vla_attempts_remaining", data["runtime_limits"])
+
+    def test_next_turn_replay_rejects_partial_or_uncertain_plan_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, original = self.fixture(tmp)
+            ref = rows[-1]["observation_before"]
+            base = original.model_copy(update={
+                "skill": SkillType.MOVE_TO, "completed": False, "stop_reason": "planning_failure",
+                "executed_policy_actions": 0, "vla_chunks_requested": 0,
+                "executed_physics_ticks": 0, "state_after": original.state_before,
+                "observation_after": ref["sequence"], "episode_terminal": False,
+                "task_success": False, "controlled_arms": "left", "information_source": "public",
+            })
+            for unsafe in (base.model_copy(update={"execution_uncertain": True}),
+                           base.model_copy(update={"executed_physics_ticks": 1})):
+                with self.subTest(unsafe=unsafe.execution_uncertain, ticks=unsafe.executed_physics_ticks):
+                    rows[1] = dict(event_type="planner_turn_result", planner_turn=1,
+                        result=unsafe.model_dump(mode="json"), phase="RETRY_RETREAT",
+                        observation_after=ref, post_condition=[])
+                    (Path(tmp)/"assessments.jsonl").write_text(
+                        "\n".join(json.dumps(r) for r in rows[:2]))
+                    provider = Provider([response()])
+                    with self.assertRaises(ValueError): replay_turn(tmp, 2, client=provider)
+                    self.assertEqual(provider.requests, [])
 
     def test_invalid_source_fails_before_provider_call(self):
         for issue in ("traversal", "sequence", "terminal", "duplicate"):

@@ -1,0 +1,17 @@
+# Natural-reset acquisition timing, not a full-task baseline evaluation.
+seeds: [3]
+repeats: 1
+max_attempts: 1
+attempt_timeout_seconds: 900
+campaign_timeout_seconds: 960
+stop_on_acquisition: true
+variants:
+  - name: natural_reset_256
+    settings:
+      record_video: true
+      max_turns: 3
+      recipe:
+        stage_before_first_vla: false
+        max_retries: 0
+        vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 256}
+      budget: {max_skill_calls: 4, max_analytic_ticks: 1000, max_policy_actions: 264, max_vla_chunks: 33}

@@ -13,6 +13,8 @@ from harness.exploration.config import ExploreSettings
 from harness.exploration.controller import ExplorationController, write_json
 from harness.exploration.process import AttemptExit, ProcessAttemptRunner
 from harness.exploration.candidates import candidates_from_attempt
+from harness.exploration.candidates import _memory_safe_step, _append_compact_step
+from harness.memory.task_memory import RecipeStep
 from harness.memory import MemoryCatalog, MemorySnapshot
 from harness.planner.scripted import GraspRetryPlanner, GraspRetrySettings
 from harness.predicates.hanging_mug import HangingMugPredicates
@@ -61,6 +63,23 @@ def settings(**overrides):
 
 
 class ExplorationTests(unittest.TestCase):
+    def test_memory_recipe_discards_old_pixel_and_keeps_symbolic_target(self):
+        step = RecipeStep.model_validate({"phase": "APPROACH_RACK", "command": {
+            "action": "move_to", "arm": "right", "parameters": {
+                "target": "rack_approach", "offset_xyz": [0.01, 0.0, 0.02],
+                "grounding": {"camera": "head_camera", "uv": [0.42, 0.61]}}}})
+
+        saved = _memory_safe_step(step)
+
+        self.assertEqual(saved.command.parameters.target, "rack_approach")
+        self.assertEqual(saved.command.parameters.offset_xyz, (0.01, 0.0, 0.02))
+        self.assertIsNone(saved.command.parameters.grounding)
+        self.assertIsNone(saved.command.reason)
+        trace = []
+        _append_compact_step(trace, saved)
+        _append_compact_step(trace, saved)
+        self.assertEqual(len(trace), 1)
+
     def test_two_attempts_fresh_state_and_unreviewed_private_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "campaign"
@@ -89,6 +108,18 @@ class ExplorationTests(unittest.TestCase):
                 summary = ExplorationController(config, runner=FakeAttemptRunner(), output=Path(tmp)/"run").run()
                 self.assertEqual(summary["stop_reason"], expected)
                 self.assertEqual(summary["attempt_count"], 1)
+
+    def test_schedule_offset_skips_completed_campaign_slots_without_extra_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_settings = settings(seeds=[3, 4], repeats=2, max_attempts=4,
+                                    schedule_offset=1)
+            runner = FakeAttemptRunner()
+            summary = ExplorationController(run_settings, runner=runner,
+                output=Path(tmp)/"run").run()
+        self.assertEqual(summary["attempt_count"], 3)
+        self.assertEqual([record["seed"] for record in summary["attempts"]], [3, 4, 4])
+        self.assertEqual([record["repeat"] for record in summary["attempts"]], [1, 0, 1])
+        self.assertEqual(summary["schedule_offset"], 1)
 
     def test_failed_attempts_retained_but_not_success_recipes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,6 +170,28 @@ class ExplorationTests(unittest.TestCase):
             catalog = candidates_from_attempt(output, attempt_id="attempt_0001", seed=3, execution_kind="live")
             self.assertEqual(catalog.task_memory[0].evidence_level, "single_case")
             self.assertFalse(catalog.task_memory[0].planner_reviewed)
+
+    def test_failure_candidate_retains_visual_context_for_review_without_auto_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "attempt_0001"
+            FakeAttemptRunner(success=False)(seed=3, config=None, output=output, timeout=10)
+            path = output / "assessments.jsonl"
+            events = [json.loads(line) for line in path.read_text().splitlines()]
+            selection = next(event for event in events if event.get("event_type") == "planner_selection")
+            selection["visual_context"] = {"source": "public_rgbd", "objects": {"mug": {
+                "camera": "head_camera", "normalized_bbox": [0.1, 0.2, 0.4, 0.8],
+                "median_rgb_0_255": [122, 65, 48],
+                "visible_surface_extent_m": [0.04, 0.05, 0.09]}}}
+            path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+            catalog = candidates_from_attempt(output, attempt_id="attempt_0001", seed=3,
+                                               execution_kind="synthetic")
+            candidate = catalog.global_memory[0]
+            condition = next(value for value in candidate.operating_conditions
+                             if value.startswith("Public mug visual descriptor"))
+            self.assertIn('"median_rgb_0_255":[122.0,65.0,48.0]', condition)
+            self.assertIn("not a diagnosis", condition)
+            self.assertFalse(candidate.planner_reviewed)
+            self.assertEqual(candidate.evidence_level, "hypothesis")
 
     def test_input_memory_is_archived_without_automatic_candidate_promotion(self):
         from tests.test_memory import rule

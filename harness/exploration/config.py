@@ -17,6 +17,7 @@ class ExploreSettings(Model):
     repeats: Annotated[StrictInt, Field(ge=1, le=5)] = 1
     variants: Annotated[tuple[Variant, ...], Field(min_length=1, max_length=8)]
     max_attempts: Annotated[StrictInt, Field(ge=1, le=40)] = 8
+    schedule_offset: Annotated[StrictInt, Field(ge=0, le=800)] = 0
     attempt_timeout_seconds: Annotated[StrictInt, Field(ge=1, le=3600)] = 900
     campaign_timeout_seconds: Annotated[StrictInt, Field(ge=1, le=14400)] = 3600
     stop_on_acquisition: StrictBool = False

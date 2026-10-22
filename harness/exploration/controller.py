@@ -45,7 +45,9 @@ class ExplorationController:
         attempts, task_memory, global_memory = [], [], []
         reason = "schedule_complete"
         try:
-            for seed, repeat, variant in self.settings.schedule():
+            for schedule_index, (seed, repeat, variant) in enumerate(self.settings.schedule()):
+                if schedule_index < self.settings.schedule_offset:
+                    continue
                 if len(attempts) >= self.settings.max_attempts:
                     reason = "attempt_budget_exhausted"
                     break
@@ -78,8 +80,13 @@ class ExplorationController:
                     summary = json.loads(raw_summary)
                     # Never copy raw failure strings/provider text to campaign logs.
                     record["outcome"] = summary.get("outcome")
-                    record["acquisition_confirmed"] = (summary.get("outcome") == "acquisition_confirmed"
-                                                       and summary.get("milestone_reached") is True)
+                    record["acquisition_confirmed"] = (summary.get("acquisition_confirmed") is True or
+                        (summary.get("outcome") == "acquisition_confirmed" and summary.get("milestone_reached") is True)
+                        or summary.get("outcome") == "task_success")
+                    record["handoff_confirmed"] = (summary.get("outcome") == "handoff_confirmed"
+                                                   and summary.get("milestone_reached") is True)
+                    record["full_task_success"] = (summary.get("outcome") == "task_success"
+                                                   and summary.get("task_success") is True)
                     record["native_task_success"] = summary.get("task_success") is True
                     if (exit_status.returncode not in (0, 1) or summary.get("error_type")
                         or any(key.endswith("cleanup_error_type") for key in summary)
@@ -106,7 +113,10 @@ class ExplorationController:
         write_json(self.output / "candidate_catalog.json", catalog.model_dump(mode="json"))
         summary = dict(schema_version=1, mode="explore", stop_reason=reason, attempts=attempts,
             attempt_count=len(attempts), acquisition_count=sum(a.get("acquisition_confirmed", False) for a in attempts),
+            handoff_count=sum(a.get("handoff_confirmed", False) for a in attempts),
+            full_task_success_count=sum(a.get("full_task_success", False) for a in attempts),
             explored_seeds=sorted({a["seed"] for a in attempts}), elapsed_seconds=self.clock()-started,
+            schedule_offset=self.settings.schedule_offset,
             task_candidates=len(task_memory), global_candidates=len(global_memory), evaluation_admitted=False)
         write_json(self.output / "summary.json", summary)
         return summary

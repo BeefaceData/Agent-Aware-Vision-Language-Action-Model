@@ -1,0 +1,27 @@
+# Recorded development check: Opus selects each skill; one VLA attempt maximum.
+# Limits permit the longer acquisition window; the planner may choose less.
+# Run with --planner anthropic. Recipe is a scripted reference, not an Opus script.
+seeds: [3]
+repeats: 1
+max_attempts: 1
+attempt_timeout_seconds: 900
+campaign_timeout_seconds: 960
+stop_on_acquisition: true
+variants:
+  - name: opus_acquisition_256
+    settings:
+      record_video: true
+      max_turns: 6
+      recipe:
+        stage_before_first_vla: true
+        arm: left
+        max_retries: 0
+        stage: {target: mug_pregrasp, offset_xyz: [0.0, 0.0, 0.05]}
+        vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 256}
+      budget: {max_skill_calls: 8, max_analytic_ticks: 1000, max_policy_actions: 264, max_vla_chunks: 33}
+      anthropic:
+        model: claude-opus-5
+        max_tokens: 2048
+        timeout_seconds: 45.0
+        max_calls: 6
+        vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 256}

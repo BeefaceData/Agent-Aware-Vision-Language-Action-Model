@@ -1,0 +1,29 @@
+# Development comparison: same seed/staging, one VLA invocation per attempt.
+# No established operating range or acquisition success is implied.
+seeds: [3]
+repeats: 1
+max_attempts: 2
+attempt_timeout_seconds: 600
+campaign_timeout_seconds: 1200
+stop_on_acquisition: false
+variants:
+  - name: window_24
+    settings:
+      record_video: true
+      max_turns: 3
+      recipe:
+        arm: left
+        max_retries: 0
+        stage: {target: mug_pregrasp, offset_xyz: [0.0, 0.0, 0.05]}
+        vla: {max_chunks: 3, chunk_size: 8, max_policy_actions: 24}
+      budget: {max_skill_calls: 3, max_analytic_ticks: 1000, max_policy_actions: 120, max_vla_chunks: 15}
+  - name: window_96
+    settings:
+      record_video: true
+      max_turns: 3
+      recipe:
+        arm: left
+        max_retries: 0
+        stage: {target: mug_pregrasp, offset_xyz: [0.0, 0.0, 0.05]}
+        vla: {max_chunks: 12, chunk_size: 8, max_policy_actions: 96}
+      budget: {max_skill_calls: 3, max_analytic_ticks: 1000, max_policy_actions: 120, max_vla_chunks: 15}

@@ -1,0 +1,19 @@
+# One fresh-reset, recorded full-task choreography check.
+seeds: [3]
+repeats: 1
+max_attempts: 1
+attempt_timeout_seconds: 3600
+campaign_timeout_seconds: 3660
+stop_on_acquisition: false
+variants:
+  - name: staged_acquisition_then_handoff
+    settings:
+      record_video: true
+      max_turns: 12
+      recipe:
+        max_retries: 1
+        stage: {target: mug_pregrasp, offset_xyz: [0.0, 0.0, 0.05]}
+        vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 256,
+              failure_stop: grasp_attempt_failed, failure_arm: left}
+      handoff: {max_chunks: 32, chunk_size: 8, max_policy_actions: 256}
+      budget: {max_skill_calls: 12, max_analytic_ticks: 5000, max_policy_actions: 1100, max_vla_chunks: 140}

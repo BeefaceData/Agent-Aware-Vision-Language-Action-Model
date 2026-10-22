@@ -1,0 +1,31 @@
+# Continue slots 6–25 after earlier slots were recorded. Transient planning
+# requests now have bounded SDK retries; prior videos/logs remain preserved.
+seeds: [0, 1, 2, 3, 4]
+repeats: 5
+max_attempts: 19
+schedule_offset: 6
+attempt_timeout_seconds: 540
+campaign_timeout_seconds: 14400
+stop_on_acquisition: false
+variants:
+  - name: opus_early_failure_retry
+    settings:
+      record_video: true
+      max_turns: 8
+      recipe:
+        stage_before_first_vla: true
+        arm: left
+        max_retries: 1
+        stage: {target: mug_pregrasp, offset_xyz: [0.0, 0.0, 0.05]}
+        retreat: {target: current_ee, offset_xyz: [0.0, 0.0, 0.05]}
+        vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 256}
+      budget: {max_skill_calls: 8, max_analytic_ticks: 3000,
+               max_policy_actions: 512, max_vla_chunks: 64}
+      anthropic:
+        model: claude-opus-5
+        max_tokens: 2048
+        timeout_seconds: 45.0
+        transport_retries: 3
+        max_calls: 8
+        early_failure_arm: left
+        vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 256}

@@ -24,6 +24,8 @@ class EvaluationSettings(Model):
 
     @model_validator(mode="after")
     def fixed_condition(self):
+        if self.episode.handoff is not None:
+            raise ValueError("handoff_not_part_of_acquisition_evaluation")
         if len(set(self.seeds)) != len(self.seeds):
             raise ValueError("duplicate_evaluation_seed")
         if set(self.seeds) & set(self.development_seeds):

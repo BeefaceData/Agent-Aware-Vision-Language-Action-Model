@@ -1,0 +1,22 @@
+# Fresh-reset episode through the frozen-policy right-arm rack phase.
+# The validated left-transfer sequence runs first; the right arm stays locked
+# until left placement and scene clearance are verified.
+record_video: true
+max_turns: 12
+recipe:
+  stage_before_first_vla: false
+  arm: left
+  max_retries: 1
+  vla:
+    max_chunks: 32
+    chunk_size: 8
+    max_policy_actions: 256
+handoff:
+  max_chunks: 32
+  chunk_size: 8
+  max_policy_actions: 256
+budget:
+  max_skill_calls: 12
+  max_analytic_ticks: 3000
+  max_policy_actions: 1200
+  max_vla_chunks: 160

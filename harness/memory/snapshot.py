@@ -122,7 +122,8 @@ class MemorySnapshot:
         with Path(path).open("xb") as stream:
             stream.write(envelope + b"\n")
 
-    def retrieve(self, *, task, phase, available_targets=("current_ee", "mug_pregrasp")):
+    def retrieve(self, *, task, phase, available_targets=(
+            "current_ee", "mug_pregrasp", "rack_approach", "table_approach")):
         catalog = MemoryCatalog.model_validate_json(self._data)
         selected = {"task_memory": [], "global_memory": []}
         size = 2

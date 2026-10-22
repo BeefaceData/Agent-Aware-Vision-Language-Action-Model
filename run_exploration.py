@@ -29,6 +29,8 @@ def main(argv=None):
     with args.config.open() as stream:
         settings = ExploreSettings.model_validate(yaml.safe_load(stream))
     if args.planner == "anthropic":
+        if any(v.settings.handoff is not None for v in settings.variants):
+            parser.error("Handoff is currently restricted to scripted development exploration")
         if args.anthropic_model:
             AnthropicSettings(model=args.anthropic_model)  # Validate before any simulator startup.
         elif any(v.settings.anthropic is None for v in settings.variants):

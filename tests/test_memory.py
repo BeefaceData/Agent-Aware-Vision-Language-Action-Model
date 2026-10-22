@@ -111,3 +111,13 @@ class MemoryTests(unittest.TestCase):
                         "parameters": {"pose": [0.0]*7}}):
             with self.assertRaises(ValueError):
                 recipe(trace=[{"phase": "APPROACH_MUG", "command": command}])
+
+    def test_symbolic_rack_recipe_can_be_retrieved_for_fresh_grounding(self):
+        rack_recipe = recipe(id="rack", phases=["HANG_MUG"], trace=[{
+            "phase": "HANG_MUG", "command": {"action": "move_to", "arm": "right",
+                "parameters": {"target": "rack_approach", "offset_xyz": [0.0, 0.0, 0.02]}}}])
+        snapshot = MemorySnapshot(MemoryCatalog(task_memory=(rack_recipe,)))
+
+        selected = snapshot.retrieve(task="hanging_mug", phase="HANG_MUG")
+
+        self.assertEqual([record.id for record in selected.task_memory], ["rack"])

@@ -12,7 +12,8 @@ from harness.predicates.registry import PredicateRegistry
 from harness.perception.anchors import AnchorRegistry
 from .base import ExecutionContext
 from .registry import SkillRegistry
-from .schemas import EpisodeBudget, SkillCommand, SkillResult, SkillType
+from .schemas import (EpisodeBudget, SkillCommand, SkillResult, SkillType,
+                      is_recoverable_release_support_gap)
 
 
 class SkillExecutor:
@@ -70,6 +71,8 @@ class SkillExecutor:
                     if command.action == SkillType.VLA_ACT else False,
                 allow_oracle=self.allow_oracle,
             )
+            context.predicate_attempt_start = lambda name, observation, arm: self.predicates.begin_attempt(
+                name, observation, arm=arm, allow_oracle=self.allow_oracle)
             error_type = None
             try:
                 emit({"event_type": "skill_requested", "command": command.model_dump(mode="json"),
@@ -89,14 +92,20 @@ class SkillExecutor:
             if context.motion_started:
                 self._refresh_history = True  # Never reuse pre-staging history.
             self.terminal = (reason in {"aborted", "cancelled", "execution_error", "task_success",
-                                        "episode_budget_exhausted", "tracking_error", "safety_violation",
-                                        "release_support_lost"}
+                                        "episode_budget_exhausted", "tracking_error", "safety_violation"}
                              or self.calls >= self.budget.max_skill_calls)
             success = None if context.ambiguous else self.environment.native_success
             self.terminal |= success is True
+            overlap_check = getattr(self.environment, "arm_overlap_detected", None)
+            try:
+                overlap_state = bool(overlap_check()) if callable(overlap_check) else None
+            except Exception:
+                overlap_state = None
             result = SkillResult(
                 call_id=call_id, skill=command.action,
-                completed=reason in {"completed", "predicate_satisfied", "chunk_budget_exhausted", "policy_action_budget_exhausted", "task_success", "aborted"},
+                completed=reason in {"completed", "predicate_satisfied", "failure_predicate_satisfied",
+                                     "chunk_budget_exhausted", "policy_action_budget_exhausted",
+                                     "task_success", "aborted"},
                 stop_reason=reason, executed_policy_actions=context.executed,
                 vla_chunks_requested=context.chunks, discarded_actions=context.discarded,
                 executed_physics_ticks=context.physics_ticks,
@@ -104,18 +113,27 @@ class SkillExecutor:
                 state_after=None if context.ambiguous else StateSummary(command_state=context.observation.command_state),
                 observation_before=before.sequence,
                 observation_after=None if context.ambiguous else context.observation.sequence,
-                episode_terminal=self.terminal, task_success=success,
+                episode_terminal=self.terminal, arm_overlap_detected=overlap_state,
+                task_success=success,
+                native_success_seen=context.native_success_seen,
+                post_success_actions=context.post_success_actions,
                 objective_satisfied=(context.last_predicate.value if command.stop and context.last_predicate
+                                     and context.last_predicate.name == command.stop
                                      else success if command.stop == "task_success" else None),
                 controlled_arms=("both" if command.action == SkillType.VLA_ACT
                                  else "none" if command.action == SkillType.ABORT else command.arm),
                 information_source="development_oracle" if context.oracle_used else "public",
                 predicate=context.last_predicate,
+                tracking_error=context.tracking_error,
                 position_error_m=context.position_error, orientation_error_rad=context.orientation_error,
                 policy_history_reset=context.history_reset,
                 execution_uncertain=context.ambiguous,
                 elapsed_seconds=time.perf_counter() - started, error_type=error_type,
             )
+            if (reason == "release_support_lost"
+                    and not is_recoverable_release_support_gap(result)):
+                self.terminal = True
+                result = result.model_copy(update={"episode_terminal": True})
             try:
                 emit({"event_type": "skill_result", "result": result.model_dump(mode="json")})
             except BaseException:

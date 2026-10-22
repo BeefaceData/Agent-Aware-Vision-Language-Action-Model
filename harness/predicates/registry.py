@@ -1,19 +1,33 @@
 from .base import PredicateResult
 
 
-PREDICATE_NAMES = frozenset({"mug_grasp_confirmed", "mug_lifted", "handoff_confirmed",
+PREDICATE_NAMES = frozenset({"mug_grasp_confirmed", "mug_lifted", "right_mug_lifted", "handoff_confirmed",
     "mug_near_rack", "rack_contact_detected", "mug_released", "release_ready",
+    "rack_seat_aligned",
+    "mug_placed_on_table", "mug_staged_on_table",
+    "left_transfer_complete", "grasp_attempt_failed",
     "task_success", "chunk_budget_exhausted"})
 
 
 class PredicateRegistry:
-    def __init__(self, hanging_mug=None):
+    def __init__(self, hanging_mug=None, *, perception=None, rack_seat_gate=None):
         self.hanging_mug = hanging_mug
+        self.perception = perception
+        self.rack_seat_gate = rack_seat_gate
 
     def prime(self, observation, *, allow_oracle=False):
         """Capture the episode's lift reference before any skill moves."""
-        if self.hanging_mug is not None:
+        if self.perception is not None or self.hanging_mug is not None:
             self.evaluate("mug_lifted", observation, allow_oracle=allow_oracle)
+
+    def begin_attempt(self, name, observation, *, arm="left", allow_oracle=False):
+        # Explicit public perception takes precedence over development evidence;
+        # a configured sensor path must never silently fall back to the oracle.
+        provider = self.perception if self.perception is not None else self.hanging_mug
+        if provider is None or (provider.source == "development_oracle" and not allow_oracle):
+            return False
+        begin = getattr(provider, "begin_attempt", None)
+        return bool(begin and begin(name, observation, arm=arm))
 
     def evaluate(self, name, observation, *, arm="auto", native_success=False,
                  budget_exhausted=False, allow_oracle=False):
@@ -23,7 +37,11 @@ class PredicateRegistry:
             value = native_success if name == "task_success" else budget_exhausted
             return PredicateResult(name=name, value=bool(value), source="runtime",
                 observation_sequence=observation.sequence, reason="runtime_status")
-        provider = self.hanging_mug
+        if name == "rack_seat_aligned" and self.rack_seat_gate is not None:
+            result = self.rack_seat_gate.evaluate(name, observation, arm=arm)
+            if result is not None:
+                return result
+        provider = self.perception if self.perception is not None else self.hanging_mug
         if provider is None or (provider.source == "development_oracle" and not allow_oracle):
             return PredicateResult(name=name, value=None, source="unavailable",
                 observation_sequence=observation.sequence, reason="no_approved_evidence_provider")

@@ -1,7 +1,7 @@
 """One validated skill per turn; no environment handles in planner input."""
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 from harness.environment.base import Observation
 from harness.predicates.base import PredicateResult
@@ -17,6 +17,11 @@ class PlannerContext:
     previous: SkillResult | None
     remaining_budget: dict[str, int] = field(default_factory=dict)
     memory: MemorySelection | None = None
+    # Public, view-dependent visual descriptors; never simulator coordinates.
+    visual_context: dict | None = None
+    # Allow-listed, non-geometric feedback from trusted anchor preparation.
+    grounding_feedback: str | None = None
+    grounding_camera_to_avoid: Literal["head_camera", "left_camera", "right_camera"] | None = None
 
     def value(self, name):
         return next((p.value for p in self.predicates if p.name == name), None)

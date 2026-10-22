@@ -6,7 +6,7 @@ from harness.schemas import Model
 
 Name = Annotated[StrictStr, Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")]
 Text = Annotated[StrictStr, Field(min_length=1, max_length=1000)]
-Metric = Literal["mug_lifted", "handoff_confirmed", "native_task_success", "strict_rack_success"]
+Metric = Literal["mug_lifted", "handoff_confirmed", "task_success", "native_task_success", "strict_rack_success"]
 
 
 class Evidence(Model):

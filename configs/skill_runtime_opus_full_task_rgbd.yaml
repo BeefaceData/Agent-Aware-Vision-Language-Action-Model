@@ -1,0 +1,35 @@
+# Full-task Opus orchestration with public RGB-D sensor capture enabled.
+# SAM 3 runs in its separate Modal app, never on the local simulator host.
+# Deploy modal_sam3.py and configure the Modal `huggingface` secret first.
+record_video: true
+max_turns: 100
+perception:
+  rgbd_enabled: true
+  opus_rack_grounding: true
+  rack_grounding_camera: right_camera
+  rack_prompt_profile: explore_mug_rack
+recipe:
+  arm: left
+  max_retries: 2
+  vla:
+    max_chunks: 32
+    chunk_size: 8
+    max_policy_actions: 768
+budget:
+  max_skill_calls: 100
+  max_analytic_ticks: 2500
+  max_policy_actions: 800
+  max_vla_chunks: 100
+anthropic:
+  model: claude-opus-5
+  task_scope: full_task
+  max_tokens: 4096
+  timeout_seconds: 45.0
+  max_calls: 100
+  # VLA-first right pickup and rack approach, with one-chunk feedback so Opus
+  # can intervene before the weak policy reaches the failure-prone final contact.
+  planner_feedback_chunks: 1
+  vla:
+    max_chunks: 32
+    chunk_size: 8
+    max_policy_actions: 768

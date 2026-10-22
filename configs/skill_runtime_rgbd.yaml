@@ -1,0 +1,23 @@
+# Opt-in public RGB-D capture for detector-backed grounding experiments.
+# Supply --perception-factory package.module:factory to run_skills.py.
+record_video: false
+perception:
+  rgbd_enabled: true
+max_turns: 20
+recipe:
+  arm: left
+  max_retries: 2
+  stage:
+    target: mug_pregrasp
+  retreat:
+    target: current_ee
+    offset_xyz: [0.0, 0.0, 0.05]
+  vla:
+    max_chunks: 3
+    chunk_size: 8
+    max_policy_actions: 24
+budget:
+  max_skill_calls: 20
+  max_analytic_ticks: 12000
+  max_policy_actions: 72
+  max_vla_chunks: 9

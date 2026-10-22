@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "description": "CPU replay contracts for controller behavior. These contain no simulator geometry, contact labels, camera frames, or planner inputs.",
+  "provenance": "The missed-grasp stop and successful-retry bounds summarize the recorded seed-3 run reviewed on 2026-10-19. Other cases are deterministic control-flow scenarios.",
+  "scenarios": {
+    "seed4_retreat_endpoint_tracking_miss": {
+      "source": "opus_plan_fallback_retry_20261020/attempts/attempt_0001",
+      "initial_settle_ticks": 25,
+      "position_error_m": 0.014997389977248213,
+      "orientation_error_rad": 0.156300278621045,
+      "position_tolerance_m": 0.015,
+      "orientation_tolerance_rad": 0.10,
+      "expected_outcome": "target_not_reached"
+    },
+    "empty_grasp_then_successful_retry": {
+      "failure_window_closed_actions": 40,
+      "retry_lift_after_policy_action": 27,
+      "expected_vla_actions": [40, 27],
+      "expected_vla_stops": ["failure_predicate_satisfied", "predicate_satisfied"],
+      "expected_skills": ["vla_act", "set_gripper", "move_to", "move_to", "vla_act"],
+      "expected_outcome": "acquisition_confirmed"
+    },
+    "right_grasp_unconfirmed_retry": {
+      "initial_attempt_stop": "policy_action_budget_exhausted",
+      "expected_recovery_skills": ["set_gripper", "move_to", "move_to", "vla_act"],
+      "retry_count": 1,
+      "requires_release_ready": true,
+      "retreat_offset_xyz": [0.0, 0.0, 0.05],
+      "restage_target": "mug_pregrasp"
+    },
+    "left_transfer_then_hang": {
+      "transfers": true,
+      "acquires": true,
+      "uncertain": false,
+      "expected_outcome": "task_success",
+      "expected_stops": ["mug_lifted", "left_transfer_complete", "task_success"],
+      "expected_locks": [null, "right", "left"]
+    },
+    "left_transfer_unconfirmed": {
+      "transfers": false,
+      "acquires": true,
+      "uncertain": false,
+      "expected_outcome": "rack_hang_unconfirmed",
+      "expected_terminal_skill": "abort"
+    },
+    "ambiguous_action_response": {
+      "transfers": true,
+      "acquires": true,
+      "uncertain": true,
+      "expected_outcome": "execution_error",
+      "expected_terminal_uncertain": true
+    },
+    "failed_acquisition": {
+      "transfers": true,
+      "acquires": false,
+      "uncertain": false,
+      "expected_outcome": "grasp_retry_budget_exhausted",
+      "expected_policy_chunks": 1
+    }
+  }
+}

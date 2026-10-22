@@ -17,7 +17,8 @@ class AnchorRegistry:
         self._anchors = {}
 
     def bind(self, name, arm, anchor):
-        if arm not in ("left", "right") or anchor.source not in ("perception", "development_oracle"):
+        if arm not in ("left", "right") or anchor.source not in (
+                "perception", "runtime", "development_oracle"):
             raise ValueError("invalid_anchor")
         self._anchors[name, arm] = Anchor(tuple(pose7(anchor.pose)), anchor.observation_sequence, anchor.source)
 

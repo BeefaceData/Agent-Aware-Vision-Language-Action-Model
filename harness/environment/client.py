@@ -8,6 +8,7 @@ observation endpoint. External mutation is unsupported by this R1 adapter.
 import numpy as np
 
 from harness.trace import CAMERAS, copy_images, vector14
+from harness.perception.rgbd import camera_frames_from_payload
 from .base import Observation
 
 
@@ -25,8 +26,9 @@ class EnvironmentClient:
         success = np.asarray(raw["success"])
         if success.shape != () or success.dtype.kind != "b":
             raise ValueError("invalid evaluator terminal signal")
-        observation = Observation(sequence, copy_images({k: raw[k] for k in CAMERAS}),
-                                  vector14(raw["state"]))
+        images = copy_images({k: raw[k] for k in CAMERAS})
+        camera_frames = camera_frames_from_payload(raw, images)
+        observation = Observation(sequence, images, vector14(raw["state"]), camera_frames or None)
         self._observation = observation
         self._native_success = bool(success)
         return observation.copy()
@@ -51,8 +53,15 @@ class EnvironmentClient:
         return self._native_success
 
     def step(self, action):
+        return self._step(action, allow_after_success=False)
+
+    def step_after_success(self, action):
+        """Explicitly permit one caller-bounded follow-through target."""
+        return self._step(action, allow_after_success=True)
+
+    def _step(self, action, *, allow_after_success):
         previous = self.observe()
-        if self._native_success:
+        if self._native_success and not allow_after_success:
             raise RuntimeError("environment is terminal")
         action = vector14(action)
         self._uncertain = True  # A failed response may still have moved the robot.

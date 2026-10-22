@@ -35,7 +35,8 @@ class LocalEnvironmentClient(EnvironmentClient):
         if self._observation is None or self._uncertain:
             raise RuntimeError("environment has no confirmed current observation")
         task = self.simulator.task
-        return bool(task.eval_success or task.check_success())
+        return bool(task.eval_success or getattr(task, "harness_native_success_latched", False)
+                    or task.check_success())
 
     def arm_state(self, arm):
         if arm not in ("left", "right"):
@@ -47,6 +48,28 @@ class LocalEnvironmentClient(EnvironmentClient):
             raise ValueError("invalid_robot_state")
         return {"joints": joints, "pose": pose7(getattr(robot, f"get_{arm}_ee_pose")()),
                 "gripper": gripper}  # Gripper remains a command, not aperture sensing.
+
+    def arm_overlap_detected(self):
+        """Return whether measured simulator contacts directly join both arms."""
+        contacts = self.simulator.task.scene.get_contacts()
+
+        def side(name):
+            name = str(name).lower()
+            if name.startswith(("fl_", "left_")):
+                return "left"
+            if name.startswith(("fr_", "right_")):
+                return "right"
+            return None
+
+        for contact in contacts:
+            bodies = getattr(contact, "bodies", ())
+            if len(bodies) != 2:
+                continue
+            names = [getattr(getattr(body, "entity", None), "name", "")
+                     for body in bodies]
+            if {side(name) for name in names} == {"left", "right"}:
+                return True
+        return False
 
     def joint_bounds(self, arm):
         task = self.simulator.task

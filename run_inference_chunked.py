@@ -109,9 +109,8 @@ def observation_of(task, blank, success):
     out = {}
 
     for camera in CAMERAS:
-        image = (
-            cameras.get(camera) or {}
-        ).get("rgb")
+        camera_data = cameras.get(camera) or {}
+        image = camera_data.get("rgb")
 
         if image is None:
             out[camera] = blank
@@ -131,6 +130,21 @@ def observation_of(task, blank, success):
         out[camera] = np.ascontiguousarray(
             image[..., :3]
         )
+
+        # Optional perception-only RGB-D channel. The Modal Neotix client still
+        # packs only the three RGB keys and the unchanged 14-DoF state.
+        depth = camera_data.get("depth")
+        intrinsic = camera_data.get("intrinsic_cv")
+        extrinsic = camera_data.get("extrinsic_cv")
+        if depth is not None:
+            if intrinsic is None or extrinsic is None:
+                raise ValueError("rgbd_camera_calibration_missing")
+            depth = np.asarray(depth)
+            if depth.shape != image.shape[:2]:
+                raise ValueError("rgbd_depth_rgb_shape_mismatch")
+            out[f"{camera}__depth_mm"] = np.ascontiguousarray(depth, dtype=np.float32)
+            out[f"{camera}__intrinsic_cv"] = np.asarray(intrinsic, dtype=np.float64)
+            out[f"{camera}__extrinsic_cv"] = np.asarray(extrinsic, dtype=np.float64)
 
     vector = (
         raw.get("joint_action") or {}

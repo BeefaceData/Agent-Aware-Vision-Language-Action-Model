@@ -1,0 +1,4 @@
+# Installed in the isolated Modal SAM 3 perception image, not on the local
+# RoboTwin simulator or in the frozen Neotix worker image. Model weights remain
+# gated separately by Hugging Face.
+transformers>=5.8,<6

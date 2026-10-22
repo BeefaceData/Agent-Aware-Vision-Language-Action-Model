@@ -176,4 +176,3 @@ class RGBDPerceptionTests(unittest.TestCase):
             self.assertTrue(perception.setup["data_type"]["depth"])
         with self.assertRaises(ValueError):
             LocalSimulator("RoboTwin", rgbd_enabled=1)
-

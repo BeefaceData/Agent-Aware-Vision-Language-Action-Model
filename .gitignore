@@ -6,7 +6,9 @@
 *.key
 .aws/
 .codex/
-.agents/
+# Shared agent skills are versioned; other local agent state stays ignored.
+/.agents/*
+!/.agents/skills/
 .venv/
 venv/
 .idea/
@@ -34,6 +36,7 @@ videos/
 !/README.md
 !/CONTRIBUTE_README.md
 !/harness/prompts/*.md
+!/.agents/skills/**/*.md
 
 # Python and OS caches
 __pycache__/

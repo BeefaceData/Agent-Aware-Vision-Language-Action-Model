@@ -19,7 +19,7 @@ venv/
 weights/
 videos/
 /data/
-/docs/
+# /docs/
 /timings*/
 *.safetensors
 *.pt

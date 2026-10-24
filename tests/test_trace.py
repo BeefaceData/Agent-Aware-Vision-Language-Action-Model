@@ -2,8 +2,9 @@ import unittest
 
 import numpy as np
 
-from harness.config import TraceOptions
-from harness.trace import TraceManager, vector14
+from harness.legacy.config import TraceOptions
+from harness.legacy.trace import TraceManager
+from harness.environment.base import vector14
 from tests.helpers import decision, images
 
 

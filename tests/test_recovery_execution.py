@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -8,10 +7,9 @@ from unittest.mock import patch
 import numpy as np
 from pydantic import ValidationError
 
-from development.checkpoint_bank import CheckpointBank
-from development.manual_skill import run_manual
-from development.retry_grasp_context import RetryGraspContext
-from harness.skill_executor import SkillStopped, TickExecutor, validate_trajectory
+from development.recovery.manual_skill import run_manual
+from development.recovery.retry_grasp_context import RetryGraspContext
+from harness.skills.motion import SkillStopped, TickExecutor, validate_trajectory
 from harness.legacy.recovery_skills.retry_grasp import RetryGrasp
 from tests import test_checkpoints as checkpoint_fixtures
 
@@ -216,7 +214,7 @@ class RecoveryExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError): RetryGrasp().execute(ctx, {})
         skill = RetryGrasp()
         self.assertTrue(all(p.exists() for p in skill.dependency_files))
-        self.assertIn(Path('development/retry_grasp_context.py').resolve(), skill.dependency_files)
+        self.assertIn(Path('development/recovery/retry_grasp_context.py').resolve(), skill.dependency_files)
         self.assertEqual(len(skill.code_hash()), 64)
 
     def test_manual_rejects_unlabeled_checkpoint_without_reset(self):
@@ -235,10 +233,10 @@ class RecoveryExecutionTests(unittest.TestCase):
         try:
             cp, _, _ = fixture.capture()
             cp = fixture.bank.relabel(cp.checkpoint_id, phase="grasp_mug", failure_type="missed_grasp")
-            from development.schemas import ReplayReport
+            from development.checkpoints.schemas import ReplayReport
             drift = ReplayReport(checkpoint_id=cp.checkpoint_id, status="drifted", expected_steps=cp.step,
                                  executed_steps=0, reason="test reset drift")
-            with patch("development.manual_skill.ReplayEnvironment.restore_checkpoint", return_value=drift):
+            with patch("development.recovery.manual_skill.ReplayEnvironment.restore_checkpoint", return_value=drift):
                 result = run_manual(fixture.bank, cp, None, fixture.root / "attempt")
             self.assertEqual(result["status"], "restore_rejected")
             self.assertFalse((fixture.root / "attempt/execution.jsonl").exists())
@@ -251,14 +249,14 @@ class RecoveryExecutionTests(unittest.TestCase):
         try:
             cp, _, _ = fixture.capture()
             cp = fixture.bank.relabel(cp.checkpoint_id, phase="grasp_mug", failure_type="missed_grasp")
-            from development.schemas import ReplayReport
+            from development.checkpoints.schemas import ReplayReport
             from tests.helpers import images
             matched = ReplayReport(checkpoint_id=cp.checkpoint_id, status="matched", expected_steps=cp.step,
                                    executed_steps=cp.step, reason="fixture")
             simulator = SimpleNamespace(task=FakeTask(), blank=np.zeros((2, 3, 3), dtype=np.uint8))
-            with patch("development.manual_skill.ReplayEnvironment.restore_checkpoint", return_value=matched), \
-                    patch("run_inference_chunked.observation_of", return_value=images()), \
-                    patch("run_inference_chunked.ModalPolicyClient", side_effect=AssertionError("no cloud call")):
+            with patch("development.recovery.manual_skill.ReplayEnvironment.restore_checkpoint", return_value=matched), \
+                    patch("harness.environment.robotwin.observation_of", return_value=images()), \
+                    patch("harness.vla.modal_client.ModalPolicyClient", side_effect=AssertionError("no cloud call")):
                 report = run_manual(fixture.bank, cp, simulator, fixture.root / "attempt")
             self.assertEqual(report["status"], "invoked")
             self.assertEqual(report["recovery_outcome"], "unknown")
@@ -270,15 +268,15 @@ class RecoveryExecutionTests(unittest.TestCase):
         finally: fixture.doCleanups()
 
     def test_local_simulator_uses_baseline_reset_and_target_calls(self):
-        from development.local_simulator import LocalSimulator
+        from development.simulator.local_simulator import LocalSimulator
         from unittest.mock import Mock
         import contextlib
         task = Mock(eval_success=False)
         task.check_success.return_value = False
         torch_stub = SimpleNamespace(enable_grad=contextlib.nullcontext)
         with patch.dict("sys.modules", {"torch": torch_stub}), \
-                patch("run_inference_chunked.build_task", return_value=(task, {"task_name": "hanging_mug"})), \
-                patch("run_inference_chunked.observation_of", return_value={"sentinel": True}):
+                patch("harness.environment.robotwin.build_task", return_value=(task, {"task_name": "hanging_mug"})), \
+                patch("harness.environment.robotwin.observation_of", return_value={"sentinel": True}):
             simulator = LocalSimulator("RoboTwin")
             with self.assertRaises(ValueError): simulator("local", 0, "/step", {"action": [0.0]*14})
             simulator("local", 0, "/reset", {"seed": 7})

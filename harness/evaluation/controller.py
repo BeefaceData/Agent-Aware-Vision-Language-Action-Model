@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 import yaml
 
-from harness.assessment_log import append_jsonl
+from harness.jsonl import append_jsonl
 from harness.exploration.controller import write_json
 from harness.memory import MemorySnapshot
 from .manifest import FrozenEvaluation

@@ -50,6 +50,17 @@ class OpusFrameGroundingTests(unittest.TestCase):
             "type": "tool", "name": "report_object_frame_keypoints"})
         self.assertIn("rack_frame_grounding.md", grounder.PROMPTS["rack_peg"])
 
+    def test_empty_image_is_rejected_before_any_provider_request(self):
+        client = FakeClient({})
+        empty = Observation(8, {**images(), "head_camera": np.zeros((0, 4, 3), dtype=np.uint8)},
+                            (0.0,) * 14)
+        grounder = OpusObjectFrameGrounder(client, "claude-test-model",
+            target="rack_peg", camera="head_camera")
+
+        with self.assertRaisesRegex(ValueError, "frame_grounding_requires_uint8_rgb"):
+            grounder.locate(empty)
+        self.assertEqual(client.messages.requests, [])
+
     def test_unavailable_and_ambiguous_landmarks_fail_closed(self):
         missed = FakeClient({"visible": False, "keypoints_px": None,
             "description": "occluded", "confidence": .1})

@@ -1,23 +1,21 @@
 """Phase composition and evidence accounting without native simulation or APIs."""
 
 from functools import partial
-import json
 from pathlib import Path
 import tempfile
 import unittest
-import numpy as np
 from unittest.mock import patch
 
-from harness.assessment_log import append_jsonl
+from harness.jsonl import append_jsonl
 from harness.planner.handoff import HandoffPlanner
 from harness.planner.scripted import GraspRetrySettings
 from harness.predicates.hanging_mug import HangingMugPredicates
 from harness.predicates.registry import PredicateRegistry
-from harness.skill_orchestrator import SkillOrchestrator
+from harness.runtime.orchestrator import SkillOrchestrator
 from harness.skills.schemas import VLAParameters
 from harness.skills.schemas import MoveParameters, SkillCommand
 from harness.perception.anchors import Anchor
-from development.skill_oracle import oracle_anchor_preparer
+from development.simulator.skill_oracle import oracle_anchor_preparer
 from harness.evaluation.manifest import EvaluationSettings
 from harness.exploration.candidates import candidates_from_attempt
 from harness.exploration.controller import ExplorationController, write_json
@@ -371,7 +369,7 @@ class HandoffTests(unittest.TestCase):
             self.assertFalse((p/'out').exists())
 
     def test_left_transfer_stop_requires_handoff_recipe(self):
-        from harness.skill_config import RunSettings
+        from harness.runtime.settings import RunSettings
         with self.assertRaisesRegex(ValueError, 'left_transfer_stop_requires_handoff_recipe'):
             RunSettings(stop_after_left_transfer=True)
         settings=RunSettings.model_validate({"stop_after_left_transfer":True,"handoff":{

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from development.local_simulator import LocalSimulator
+from development.simulator.local_simulator import LocalSimulator
 from harness.environment.base import Observation
 from harness.environment.client import EnvironmentClient
 from harness.perception.observations import ObservationStore
@@ -19,7 +19,7 @@ from harness.planner.base import PlannerContext
 from harness.planner.prompt_builder import user_content
 from harness.vla.modal_client import ModalVLAClient
 from tests.helpers import images
-from harness.trace import CAMERAS
+from harness.environment.base import CAMERAS
 
 
 def camera(*, depth=None, intrinsic=None, world_to_camera=None):
@@ -93,24 +93,24 @@ class RGBDPerceptionTests(unittest.TestCase):
         np.testing.assert_allclose(frames["head_camera"].unproject(1, .5), [-.1, -.2, 1.7])
 
     def test_simulator_observation_adapter_exports_optional_calibration_and_raw_depth_mm(self):
-        import run_inference_chunked
+        from harness.environment import robotwin
         cameras = {}
         for name in CAMERAS:
             cameras[name] = {"rgb": np.zeros((2, 3, 3), dtype=np.uint8),
                 "depth": np.full((2, 3), 1500., dtype=np.float64),
                 "intrinsic_cv": np.eye(3), "extrinsic_cv": np.eye(4)}
         task = SimpleNamespace(get_obs=lambda: {"observation": cameras, "joint_action": {"vector": np.zeros(14)}})
-        observation = run_inference_chunked.observation_of(task, np.zeros((2, 3, 3), dtype=np.uint8), False)
+        observation = robotwin.observation_of(task, np.zeros((2, 3, 3), dtype=np.uint8), False)
         self.assertEqual(float(observation["head_camera__depth_mm"][0, 0]), 1500.)
         self.assertEqual(observation["head_camera__intrinsic_cv"].shape, (3, 3))
         self.assertEqual(observation["right_camera__extrinsic_cv"].shape, (4, 4))
         self.assertEqual(observation["head_camera"].dtype, np.uint8)
 
     def test_legacy_rgb_observation_payload_is_unchanged_when_depth_is_disabled(self):
-        import run_inference_chunked
+        from harness.environment import robotwin
         raw = {name: {"rgb": np.zeros((2, 3, 3), dtype=np.uint8)} for name in CAMERAS}
         task = SimpleNamespace(get_obs=lambda: {"observation": raw, "joint_action": {"vector": np.zeros(14)}})
-        observation = run_inference_chunked.observation_of(task, np.zeros((2, 3, 3), dtype=np.uint8), False)
+        observation = robotwin.observation_of(task, np.zeros((2, 3, 3), dtype=np.uint8), False)
         self.assertEqual(set(observation), {*CAMERAS, "state", "success"})
 
     def test_partial_or_misaligned_rgbd_payload_fails_closed(self):
@@ -165,13 +165,13 @@ class RGBDPerceptionTests(unittest.TestCase):
         self.assertNotIn("intrinsic", text)
 
     def test_local_simulator_depth_capture_is_opt_in(self):
-        import run_inference_chunked
+        from harness.environment import robotwin
         task = SimpleNamespace()
         setup = {"data_type": {"depth": False}}
-        with patch.object(run_inference_chunked, "build_task", return_value=(task, setup)):
+        with patch.object(robotwin, "build_task", return_value=(task, setup)):
             baseline = LocalSimulator("RoboTwin")
             self.assertFalse(baseline.setup["data_type"]["depth"])
-        with patch.object(run_inference_chunked, "build_task", return_value=(task, setup)):
+        with patch.object(robotwin, "build_task", return_value=(task, setup)):
             perception = LocalSimulator("RoboTwin", rgbd_enabled=True)
             self.assertTrue(perception.setup["data_type"]["depth"])
         with self.assertRaises(ValueError):

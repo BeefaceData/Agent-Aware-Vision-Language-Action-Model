@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 import run_inference_chunked as runner
-from harness.orchestrator import PassThroughHarness
+from harness.legacy.pass_through import PassThroughHarness
 from tests.helpers import config, images
 
 
@@ -52,7 +52,7 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_imports_do_not_load_policy_simulator_or_provider(self):
         script = (
-            "import harness.orchestrator, sys; "
+            "import harness.legacy.pass_through, sys; "
             "assert not set(['torch', 'sapien', 'lerobot', 'modal', 'anthropic']) & set(sys.modules)"
         )
         subprocess.run([sys.executable, "-c", script], check=True)
@@ -76,7 +76,7 @@ class OrchestratorTests(unittest.TestCase):
                     raise KeyboardInterrupt
             self.assertEqual(json.loads(harness.evaluation_path.read_text())["error_type"], "KeyboardInterrupt")
             with self.assertWarns(RuntimeWarning), self.assertRaisesRegex(ValueError, "original"), \
-                 patch("harness.orchestrator.append_jsonl", side_effect=OSError):
+                 patch("harness.legacy.pass_through.append_jsonl", side_effect=OSError):
                 with harness.episode(seed=1, max_steps=2, chunk_size=2):
                     raise ValueError("original")
 

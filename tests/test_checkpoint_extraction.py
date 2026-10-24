@@ -3,9 +3,9 @@ import unittest
 
 import numpy as np
 
-from development.extract_checkpoint import extract_checkpoint
-from development.checkpoint_bank import load_prefix
-from development.replay import ReplayEnvironment
+from development.checkpoints.extract import extract_checkpoint
+from development.checkpoints.bank import load_prefix
+from development.checkpoints.replay import ReplayEnvironment
 from tests import test_checkpoints as fixtures
 from tests.test_baseline_compatibility import FakeRuntime
 

@@ -1,17 +1,16 @@
 import json
 import contextlib
 import io
-from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import numpy as np
 
-from development.hanging_check import observe_hanging
-from development.episode_demo import run_demo
-from development.fresh_episode_demo import run_fresh, demonstration_boundary
-from development.rack_geometry import rack_diagnostics
+from development.simulator.hanging_check import observe_hanging
+from development.demos.episode_demo import run_demo
+from development.demos.fresh_episode_demo import run_fresh, demonstration_boundary
+from development.simulator.rack_geometry import rack_diagnostics
 from tests import test_checkpoints as fixtures
 from tests.test_baseline_compatibility import FakeRuntime
 from tests.test_rack_recovery import RackTask
@@ -32,7 +31,7 @@ class HangingCheckTests(unittest.TestCase):
             ({"mug_contact_entities": ["rack", "fr_link8"]}, False),
             ({"mug_contact_entities": ["rack", "right_camera"]}, False),
             ({"mug_contact_entities": ["table"]}, False), ({"task_success": False}, False)):
-            with patch("development.hanging_check.rack_diagnostics", return_value={**sample, **change}):
+            with patch("development.simulator.hanging_check.rack_diagnostics", return_value={**sample, **change}):
                 r = observe_hanging(task, log=lambda e: None, ticks=3, window=3)
                 self.assertEqual(r["stable_hanging"], expected)
                 self.assertFalse(r["actuator_commands_written"])
@@ -40,10 +39,10 @@ class HangingCheckTests(unittest.TestCase):
     def test_motion_and_incomplete_stable_window_fail(self):
         task, sample = self.task_and_sample()
         moving = [sample, {**sample, "mug_position": [0.22, 0.15, 0.85]}, sample]
-        with patch("development.hanging_check.rack_diagnostics", side_effect=moving):
+        with patch("development.simulator.hanging_check.rack_diagnostics", side_effect=moving):
             self.assertFalse(observe_hanging(task, log=lambda e: None, ticks=3, window=3)["stable_hanging"])
         transient = [sample, {**sample, "task_success": False}, sample]
-        with patch("development.hanging_check.rack_diagnostics", side_effect=transient):
+        with patch("development.simulator.hanging_check.rack_diagnostics", side_effect=transient):
             self.assertFalse(observe_hanging(task, log=lambda e: None, ticks=3, window=3)["stable_hanging"])
         with self.assertRaises(ValueError): observe_hanging(task, log=lambda e: None, ticks=1, window=2)
 
@@ -70,8 +69,8 @@ class EpisodeDemoTests(unittest.TestCase):
             self.assertEqual(runtime.actions, [])
             report["status"] = "stable_hanging"
             return report
-        with patch("development.fresh_episode_demo.DemoVideo", return_value=video), \
-             patch("development.fresh_episode_demo.finish_demo", side_effect=finish), \
+        with patch("development.demos.fresh_episode_demo.DemoVideo", return_value=video), \
+             patch("development.demos.fresh_episode_demo.finish_demo", side_effect=finish), \
              contextlib.redirect_stdout(io.StringIO()):
             report = run_fresh(runtime, sim, fixture.root / "fresh", steps=5, chunk_size=3)
         self.assertEqual(report["modal_reset_calls"], 1)
@@ -99,10 +98,10 @@ class EpisodeDemoTests(unittest.TestCase):
             def append(self, rgb, title, detail, repeat=1):
                 labels.append(title); self.frames += repeat
             def close(self): pass
-        with patch("development.episode_demo.DemoVideo", Video), \
-             patch("run_inference_chunked.observation_of", return_value=images()), \
-             patch("development.episode_demo.observe_hanging", return_value={"stable_hanging": True}), \
-             patch("run_inference_chunked.ModalPolicyClient", side_effect=AssertionError("no policy calls")):
+        with patch("development.demos.episode_demo.DemoVideo", Video), \
+             patch("harness.environment.robotwin.observation_of", return_value=images()), \
+             patch("development.demos.episode_demo.observe_hanging", return_value={"stable_hanging": True}), \
+             patch("harness.vla.modal_client.ModalPolicyClient", side_effect=AssertionError("no policy calls")):
             r = run_demo(fixture.bank, cp, Simulator(), fixture.root / "demo")
         self.assertEqual(r["status"], "stable_hanging")
         self.assertEqual(len(runtime.actions), cp.step)

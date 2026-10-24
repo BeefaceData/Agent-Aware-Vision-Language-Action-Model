@@ -21,7 +21,7 @@ RoboTwin's simulator assets. Run these commands from the repository:
 ```bash
 conda create -n robotwin python=3.10 -y
 conda activate robotwin
-python -m pip install -r requirements-sim.txt -r requirements-planner.txt 'modal>=1,<2'
+python -m pip install -r requirements/sim.txt -r requirements/planner.txt 'modal>=1,<2'
 git clone https://github.com/RoboTwin-Platform/RoboTwin.git RoboTwin
 git -C RoboTwin checkout ea8b21121ebb3cd201ff5b3fe361944ac94eda3f
 git -C RoboTwin apply ../patches/robotwin-renderer.patch
@@ -40,13 +40,13 @@ Deploy the frozen policy worker:
 
 ```bash
 modal setup
-modal deploy modal_policy_chunked.py
+modal deploy modal_apps/policy.py
 ```
 
 For Anthropic planning, export `ANTHROPIC_API_KEY` in your environment. Never
 commit it. For optional SAM 3 perception, request gated Hugging Face model
 access, configure a Modal secret named `huggingface` with `HF_TOKEN`, then run
-`modal deploy modal_sam3.py`. SAM 3 dependencies and weights stay on the Modal
+`modal deploy modal_apps/sam3.py`. SAM 3 dependencies and weights stay on the Modal
 T4 worker, separate from the local simulator.
 
 ## Run and test
@@ -61,7 +61,7 @@ One bounded scripted exploration episode:
 
 ```bash
 python run_exploration.py --config configs/explore_natural_acquisition.yaml \
-  --output data/runs/acquisition_01
+  --development-oracle --output data/runs/acquisition_01
 ```
 
 One Anthropic development episode with public RGB-D perception:

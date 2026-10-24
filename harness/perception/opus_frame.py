@@ -1,13 +1,13 @@
 """One-shot Opus image keypoints for public RGB-D object-frame grounding."""
 
-import base64
 from hashlib import sha256
-from io import BytesIO
-from pathlib import Path
 
 import numpy as np
 
+from harness.prompts import read_prompt
 from .pose_grounding import grounded_frame_from_pixels
+from .vision_request import (bounded_text, image_block, png_bytes, request_tool_input,
+                             require_messages_client, rgb_view, unit_interval)
 
 
 class OpusObjectFrameGrounder:
@@ -19,17 +19,13 @@ class OpusObjectFrameGrounder:
     }
 
     def __init__(self, client, model, *, target, camera):
-        if not callable(getattr(getattr(client, "messages", None), "create", None)):
-            raise ValueError("anthropic_messages_client_required")
-        if not isinstance(model, str) or not model:
-            raise ValueError("anthropic_model_required")
+        require_messages_client(client, model)
         if target not in self.PROMPTS or camera not in (
                 "head_camera", "left_camera", "right_camera"):
             raise ValueError("unsupported_frame_grounding_target")
         self.client, self.model = client, model
         self.target, self.camera = target, camera
-        path = Path(__file__).resolve().parents[1] / "prompts" / self.PROMPTS[target]
-        self.system_prompt = path.read_text(encoding="utf-8")
+        self.system_prompt = read_prompt(self.PROMPTS[target])
 
     @staticmethod
     def _tool_schema():
@@ -54,36 +50,18 @@ class OpusObjectFrameGrounder:
         }
 
     def locate(self, observation):
-        from PIL import Image
-
-        image = observation.images.get(self.camera)
-        if image is None:
-            raise ValueError("frame_grounding_camera_unavailable")
-        image = np.asarray(image)
-        if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
-            raise ValueError("frame_grounding_requires_uint8_rgb")
+        image = rgb_view(observation, self.camera,
+                         missing_error="frame_grounding_camera_unavailable",
+                         format_error="frame_grounding_requires_uint8_rgb")
         height, width = image.shape[:2]
-        stream = BytesIO()
-        Image.fromarray(image).save(stream, format="PNG", optimize=True)
-        png = stream.getvalue()
-        tool = self._tool_schema()
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=350,
-            system=self.system_prompt,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": tool["name"]},
-            messages=[{"role": "user", "content": [
+        png = png_bytes(image)
+        result = request_tool_input(
+            self.client, model=self.model, max_tokens=350, system=self.system_prompt,
+            tool=self._tool_schema(), content=[
                 {"type": "text", "text": (
                     f"Target={self.target}; camera={self.camera}; "
                     f"observation={observation.sequence}; image={width}x{height} pixels.")},
-                {"type": "image", "source": {"type": "base64",
-                    "media_type": "image/png", "data": base64.b64encode(png).decode("ascii")}},
-            ]}],
-        )
-        result = next((item.input for item in response.content
-                       if getattr(item, "type", None) == "tool_use"
-                       and getattr(item, "name", None) == tool["name"]), None)
+                image_block(png)])
         if not isinstance(result, dict):
             raise ValueError("frame_grounding_structured_result_missing")
         visible = result.get("visible")
@@ -185,18 +163,8 @@ def _keypoints(value):
 
 
 def _confidence(value):
-    if isinstance(value, bool):
-        raise ValueError("frame_grounding_confidence_invalid")
-    try:
-        value = float(value)
-    except (TypeError, ValueError, OverflowError):
-        raise ValueError("frame_grounding_confidence_invalid") from None
-    if not np.isfinite(value) or not 0 <= value <= 1:
-        raise ValueError("frame_grounding_confidence_invalid")
-    return value
+    return unit_interval(value, "frame_grounding_confidence_invalid")
 
 
 def _description(value):
-    if not isinstance(value, str):
-        raise ValueError("frame_grounding_description_invalid")
-    return value[:500]
+    return bounded_text(value, 500, "frame_grounding_description_invalid")

@@ -5,8 +5,29 @@ from typing import Protocol
 
 import numpy as np
 
-from harness.trace import copy_images, vector14
 from harness.perception.rgbd import RGBDCamera
+from harness.schemas import StateSummary
+from .layout import CAMERAS
+
+
+def vector14(value) -> tuple[float, ...]:
+    array = np.asarray(value)
+    if array.shape != (14,) or array.dtype.kind not in "fiu":
+        raise ValueError("expected a numeric 14-element vector")
+    # Validate before conversion (including overflow in unusually large integers).
+    return StateSummary(command_state=tuple(array.tolist())).command_state
+
+
+def copy_images(images: dict) -> dict[str, np.ndarray]:
+    if set(images) != set(CAMERAS):
+        raise ValueError("images must contain exactly the three public RGB cameras")
+    copied = {}
+    for camera in CAMERAS:
+        image = np.asarray(images[camera])
+        if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3 or min(image.shape) == 0:
+            raise ValueError(f"{camera} must be nonempty HxWx3 uint8 RGB")
+        copied[camera] = image.copy()
+    return copied
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from development.sam3_prompt_replay import PROMPTS, replay, validate_selection
+from development.replays.sam3_prompt import PROMPTS, replay, validate_selection
 
 
 class Remote:

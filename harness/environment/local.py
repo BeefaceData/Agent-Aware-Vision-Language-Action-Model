@@ -26,7 +26,7 @@ class LocalEnvironmentClient(EnvironmentClient):
     def observe(self):
         if self._observation is None or self._uncertain:
             raise RuntimeError("environment has no confirmed current observation")
-        from run_inference_chunked import observation_of
+        from harness.environment.robotwin import observation_of
         return self._accept(observation_of(self.simulator.task, self.simulator.blank,
                                            self.native_success), self._sequence)
 

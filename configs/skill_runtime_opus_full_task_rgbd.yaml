@@ -1,6 +1,6 @@
 # Full-task Opus orchestration with public RGB-D sensor capture enabled.
 # SAM 3 runs in its separate Modal app, never on the local simulator host.
-# Deploy modal_sam3.py and configure the Modal `huggingface` secret first.
+# Deploy modal_apps/sam3.py and configure the Modal `huggingface` secret first.
 record_video: true
 max_turns: 100
 perception:

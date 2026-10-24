@@ -5,8 +5,9 @@ from typing import Annotated, Literal
 from pydantic import Field, StrictFloat
 
 from .base import RecoverySkill
-from harness.schemas import FailureType, Model, TaskPhase, SkillResult
-from harness.skill_executor import SkillStopped
+from harness.legacy.schemas import FailureType, TaskPhase, SkillResult
+from harness.schemas import Model
+from harness.skills.motion import SkillStopped
 
 
 class RetryGraspParameters(Model):
@@ -29,7 +30,7 @@ class RetryGrasp(RecoverySkill):
     returns_to_policy = False  # Manual experiment ends; policy resume belongs to Phase 7.
     _root = Path(__file__).resolve().parents[2]
     dependency_files = (
-        _root / "skill_executor.py", _root.parent / "development/retry_grasp_context.py",
+        _root / "skills/motion.py", _root.parent / "development/recovery/retry_grasp_context.py",
         _root.parent / "RoboTwin/envs/_base_task.py",
         _root.parent / "RoboTwin/envs/robot/robot.py",
         _root.parent / "RoboTwin/envs/robot/planner.py",

@@ -5,8 +5,9 @@ from typing import Annotated
 from pydantic import Field, StrictFloat
 
 from .base import RecoverySkill
-from harness.schemas import FailureType, Model, TaskPhase, SkillResult
-from harness.skill_executor import SkillStopped
+from harness.legacy.schemas import FailureType, TaskPhase, SkillResult
+from harness.schemas import Model
+from harness.skills.motion import SkillStopped
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -28,7 +29,7 @@ class BackoffReapproachRack(RecoverySkill):
     runtime_observation_compatible = False
     returns_to_policy = False
     dependency_files = tuple(ROOT / name for name in (
-        "harness/skill_executor.py", "development/rack_approach_context.py", "development/rack_geometry.py",
+        "harness/skills/motion.py", "development/recovery/rack_approach_context.py", "development/simulator/rack_geometry.py",
         "RoboTwin/envs/_base_task.py", "RoboTwin/envs/hanging_mug.py", "RoboTwin/envs/robot/robot.py",
         "RoboTwin/envs/robot/planner.py", "RoboTwin/envs/utils/transforms.py", "RoboTwin/envs/utils/actor_utils.py",
         "RoboTwin/assets/embodiments/aloha-agilex/config.yml",

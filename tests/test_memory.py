@@ -91,7 +91,7 @@ class MemoryTests(unittest.TestCase):
 
     def test_orchestrator_records_snapshot_and_provider_receives_memory(self):
         from harness.planner.anthropic import AnthropicPlanner, AnthropicSettings
-        from harness.skill_orchestrator import SkillOrchestrator
+        from harness.runtime.orchestrator import SkillOrchestrator
         from tests.test_skills import setup_runtime
         runtime, executor, _ = setup_runtime()
         provider = Provider([response("abort", arm="auto", parameters={}, reason="End test")])

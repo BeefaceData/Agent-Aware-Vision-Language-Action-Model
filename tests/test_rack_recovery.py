@@ -10,11 +10,11 @@ from unittest.mock import patch
 import numpy as np
 from pydantic import ValidationError
 
-from development.capture_rack_failure import capture
-from development.checkpoint_bank import CheckpointBank, load_prefix
-from development.rack_approach_context import RackApproachContext
-from development.rack_geometry import premature_release_candidate, rack_diagnostics, release_geometry_ready, supported_release_ready
-from harness.skill_executor import SkillStopped
+from development.capture.rack_failure import capture
+from development.checkpoints.bank import CheckpointBank, load_prefix
+from development.recovery.rack_approach_context import RackApproachContext
+from development.simulator.rack_geometry import premature_release_candidate, rack_diagnostics, release_geometry_ready, supported_release_ready
+from harness.skills.motion import SkillStopped
 from harness.legacy.recovery_skills.backoff_reapproach_rack import BackoffReapproachRack
 from tests.test_baseline_compatibility import FakeRuntime
 from tests.test_recovery_execution import FakeRobot
@@ -248,8 +248,8 @@ class RackRecoveryTests(unittest.TestCase):
             self.assertFalse(any("privileged" in e for e in events))
 
     def test_manual_allowlist_dispatches_rack_candidate_and_keeps_outcome_unknown(self):
-        from development.manual_skill import run_manual
-        from development.schemas import ReplayReport
+        from development.recovery.manual_skill import run_manual
+        from development.checkpoints.schemas import ReplayReport
         from tests.helpers import images
         fixture = checkpoint_fixtures.CheckpointTests()
         fixture.setUp()
@@ -259,9 +259,9 @@ class RackRecoveryTests(unittest.TestCase):
             matched = ReplayReport(checkpoint_id=cp.checkpoint_id, status="matched", expected_steps=cp.step,
                                    executed_steps=cp.step, reason="fixture")
             simulator = SimpleNamespace(task=RackTask(), blank=np.zeros((2, 3, 3), dtype=np.uint8))
-            with patch("development.manual_skill.ReplayEnvironment.restore_checkpoint", return_value=matched), \
-                    patch("run_inference_chunked.observation_of", return_value=images()), \
-                    patch("run_inference_chunked.ModalPolicyClient", side_effect=AssertionError("no policy call")):
+            with patch("development.recovery.manual_skill.ReplayEnvironment.restore_checkpoint", return_value=matched), \
+                    patch("harness.environment.robotwin.observation_of", return_value=images()), \
+                    patch("harness.vla.modal_client.ModalPolicyClient", side_effect=AssertionError("no policy call")):
                 report = run_manual(fixture.bank, cp, simulator, fixture.root / "rack_manual",
                                     skill_id="backoff_reapproach_rack")
             self.assertEqual(report["status"], "invoked")

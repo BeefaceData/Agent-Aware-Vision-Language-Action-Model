@@ -4,7 +4,7 @@ import time
 
 import numpy as np
 
-from harness.trace import vector14
+from harness.environment.base import vector14
 from .base import ExecutionContext
 from .schemas import SkillCommand
 

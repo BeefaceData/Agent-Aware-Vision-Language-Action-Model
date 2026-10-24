@@ -1,13 +1,12 @@
 """Episode-local rack frame cache and grasp-aware analytic hang anchors."""
 
-from hashlib import sha256
-
 import numpy as np
 
 from .anchors import Anchor
 from .geometry import pose7
 from .opus_frame import ground_public_object_frame
 from .pose_grounding import tcp_targets_for_mug_alignment
+from .rgbd import calibration_sha256, intrinsic_sha256
 
 
 class StaticRackFrameCache:
@@ -46,8 +45,8 @@ class StaticRackFrameCache:
             "camera": camera_name,
             "sequence": observation.sequence,
             "image_shape": tuple(image.shape[:2]),
-            "intrinsic_sha256": _intrinsic_hash(camera),
-            "calibration_sha256": _calibration_hash(camera),
+            "intrinsic_sha256": intrinsic_sha256(camera),
+            "calibration_sha256": calibration_sha256(camera),
             "confidence": float(report["confidence"]),
         }
         return self.metadata()
@@ -62,7 +61,7 @@ class StaticRackFrameCache:
         if image is None or camera is None:
             raise ValueError("rack_frame_camera_unavailable")
         if (tuple(np.asarray(image).shape[:2]) != reference["image_shape"]
-                or _intrinsic_hash(camera) != reference["intrinsic_sha256"]):
+                or intrinsic_sha256(camera) != reference["intrinsic_sha256"]):
             raise ValueError("rack_frame_camera_changed")
         return np.asarray(reference["pose"], dtype=float)
 
@@ -114,14 +113,3 @@ def bind_hang_targets(cache, observation, mug_report, mug_mask, *, tcp_pose,
                                        source="perception"))
     return {"rack_approach": anchors.resolve("rack_approach", arm, observation),
             "rack_seat": anchors.resolve("rack_seat", arm, observation)}
-
-
-def _calibration_hash(camera):
-    digest = sha256()
-    digest.update(np.asarray(camera.intrinsic, dtype=np.float64).tobytes())
-    digest.update(np.asarray(camera.world_to_camera, dtype=np.float64).tobytes())
-    return digest.hexdigest()
-
-
-def _intrinsic_hash(camera):
-    return sha256(np.asarray(camera.intrinsic, dtype=np.float64).tobytes()).hexdigest()

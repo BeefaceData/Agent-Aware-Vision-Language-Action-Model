@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from development.pixel_grounding_replay import replay, replay_reselection
+from development.replays.pixel_grounding import replay, replay_reselection
 from harness.environment.base import Observation
 from harness.perception.observations import ObservationStore
 from harness.perception.rgbd import RGBDCamera

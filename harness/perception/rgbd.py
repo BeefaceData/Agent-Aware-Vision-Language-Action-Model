@@ -6,6 +6,7 @@ when its observation payload is adapted.
 """
 
 from dataclasses import dataclass
+from hashlib import sha256
 
 import numpy as np
 
@@ -110,6 +111,19 @@ class RGBDCamera:
         if not np.isfinite(world).all() or abs(world[3]) < 1e-9:
             raise ValueError("invalid_unprojected_point")
         return tuple(float(value) for value in world[:3] / world[3])
+
+
+def intrinsic_sha256(camera) -> str:
+    """Identify a camera's lens model; unchanged while the robot moves the camera."""
+    return sha256(np.asarray(camera.intrinsic, dtype=np.float64).tobytes()).hexdigest()
+
+
+def calibration_sha256(camera) -> str:
+    """Identify a camera's full calibration (intrinsic plus world-to-camera pose)."""
+    digest = sha256()
+    digest.update(np.asarray(camera.intrinsic, dtype=np.float64).tobytes())
+    digest.update(np.asarray(camera.world_to_camera, dtype=np.float64).tobytes())
+    return digest.hexdigest()
 
 
 def camera_frames_from_payload(payload, images):

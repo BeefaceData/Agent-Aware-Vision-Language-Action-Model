@@ -3,8 +3,9 @@
 from typing import Annotated
 from pydantic import Field, StrictFloat
 
-from harness.schemas import FailureType, Model, SkillResult, TaskPhase
-from harness.skill_registry import SkillMetadata, ValidationEvidence, VerifiedSkillRegistry
+from harness.legacy.schemas import FailureType, SkillResult, TaskPhase
+from harness.schemas import Model
+from harness.legacy.skill_registry import SkillMetadata, ValidationEvidence, VerifiedSkillRegistry
 from harness.legacy.recovery_skills.base import RecoverySkill
 
 
@@ -47,7 +48,7 @@ def registry_with_verified_skill():
 
 
 def skill_decision(**updates):
-    from harness.schemas import SupervisorDecision
+    from harness.legacy.schemas import SupervisorDecision
     return SupervisorDecision.model_validate({
         "decision": "execute_skill", "skill_id": "test_only", "phase": "grasp_mug",
         "failure_type": "missed_grasp", "confidence": 0.9,

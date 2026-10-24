@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from development.perception_replay import replay
+from development.replays.perception import replay
 from harness.environment.base import Observation
 from harness.perception.observations import ObservationStore
 from harness.perception.replay import (

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import run_inference_chunked as runner
-from harness.orchestrator import PassThroughHarness
+from harness.legacy.pass_through import PassThroughHarness
 from tests.helpers import config
 from tests.test_baseline_compatibility import FakeRuntime, read_jsonl, run_fake
 
@@ -57,7 +57,7 @@ class AbortTests(unittest.TestCase):
             original = runner.supervise
 
             def hook(step, images, state, action, **kwargs):
-                from harness.schemas import TaskPhase
+                from harness.legacy.schemas import TaskPhase
                 kwargs["harness"].safety.reserve({}, current_phase=TaskPhase.UNKNOWN, safety_abort=True)
                 return original(step, images, state, action, **kwargs)
 

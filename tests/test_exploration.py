@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, Mock
 
-from harness.assessment_log import append_jsonl
+from harness.jsonl import append_jsonl
 from harness.exploration.config import ExploreSettings
 from harness.exploration.controller import ExplorationController, write_json
 from harness.exploration.process import AttemptExit, ProcessAttemptRunner
@@ -20,7 +20,7 @@ from harness.planner.scripted import GraspRetryPlanner, GraspRetrySettings
 from harness.predicates.hanging_mug import HangingMugPredicates
 from harness.predicates.registry import PredicateRegistry
 from harness.perception.anchors import Anchor
-from harness.skill_orchestrator import SkillOrchestrator
+from harness.runtime.orchestrator import SkillOrchestrator
 from tests.test_analytic_skills import executor as make_executor
 from tests.test_skill_orchestrator import AcquisitionEnvironment
 

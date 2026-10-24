@@ -3,7 +3,8 @@ import unittest
 
 from pydantic import ValidationError
 
-from harness.schemas import DecisionType, StateSummary, SupervisorDecision
+from harness.legacy.schemas import DecisionType, SupervisorDecision
+from harness.schemas import StateSummary
 from tests.helpers import assessment, decision
 
 

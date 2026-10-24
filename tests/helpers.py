@@ -2,9 +2,9 @@ from pathlib import Path
 
 import numpy as np
 
-from harness.config import HarnessConfig
-from harness.schemas import AssessmentRecord, SupervisorDecision
-from harness.trace import CAMERAS
+from harness.legacy.config import HarnessConfig
+from harness.legacy.schemas import AssessmentRecord, SupervisorDecision
+from harness.environment.base import CAMERAS
 
 
 def images(value=0):

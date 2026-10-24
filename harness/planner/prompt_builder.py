@@ -4,18 +4,17 @@ import base64
 from hashlib import sha256
 from io import BytesIO
 import json
-from pathlib import Path
 
-from harness.trace import CAMERAS
+from harness.environment.base import CAMERAS
+from harness.prompts import read_prompt
 from harness.predicates.registry import PREDICATE_NAMES
 
 
 def prompt_bundle(task_scope="acquisition"):
-    directory = Path(__file__).resolve().parent.parent / "prompts"
     if task_scope not in ("acquisition", "full_task"):
         raise ValueError("unsupported_task_scope")
     scope_prompt = "acquisition.md" if task_scope == "acquisition" else "full_task.md"
-    prompt = "\n\n".join((directory / name).read_text() for name in ("common.md", scope_prompt))
+    prompt = "\n\n".join(read_prompt(name) for name in ("common.md", scope_prompt))
     return prompt, sha256(prompt.encode()).hexdigest()
 
 
@@ -60,8 +59,6 @@ def user_content(context, *, limits, history, pixel_grounding=False):
         rack_reference = visual.get("rack_static_reference", {})
         cached_rack_target = (limits.get("vla_phase") == "hang"
                               and rack_reference.get("world_anchor_available") is True)
-        public = {item.name: item.value for item in context.predicates
-                  if item.source in ("perception", "runtime")}
         if pixel_grounding or status.get("mug") == "grounded":
             available_targets.append("mug_pregrasp")
         if pixel_grounding or status.get("rack") == "grounded" or cached_rack_target:

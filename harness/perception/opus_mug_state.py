@@ -1,10 +1,10 @@
 """Structured visual mug-state assessment from phase-relevant public RGB views."""
 
-import base64
-from io import BytesIO
-from pathlib import Path
-
 import numpy as np
+
+from harness.prompts import read_prompt
+from .vision_request import (image_block, png_bytes, request_tool_input,
+                             require_messages_client, rgb_view)
 
 
 PHASE_CAMERAS = {
@@ -27,15 +27,10 @@ class OpusMugStateAssessor:
     not establish contact, grasp, or lift; those require temporal corroboration.
     """
 
-    PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "mug_state_assessment.md"
-
     def __init__(self, client, model):
-        if not callable(getattr(getattr(client, "messages", None), "create", None)):
-            raise ValueError("anthropic_messages_client_required")
-        if not isinstance(model, str) or not model:
-            raise ValueError("anthropic_model_required")
+        require_messages_client(client, model)
         self.client, self.model = client, model
-        self.system_prompt = self.PROMPT_PATH.read_text(encoding="utf-8")
+        self.system_prompt = read_prompt("mug_state_assessment.md")
 
     @staticmethod
     def _tool_schema():
@@ -78,8 +73,6 @@ class OpusMugStateAssessor:
         }
 
     def assess(self, observation, *, phase, cameras=None):
-        from PIL import Image
-
         if phase not in PHASE_CAMERAS:
             raise ValueError("unsupported_mug_assessment_phase")
         if cameras is None:
@@ -88,35 +81,21 @@ class OpusMugStateAssessor:
                 or len(cameras) > 3 or len(set(cameras)) != len(cameras)
                 or any(camera not in PHASE_CAMERAS[phase] for camera in cameras)):
             raise ValueError("unsupported_mug_assessment_cameras")
-        images = {}
-        for camera in cameras:
-            image = observation.images.get(camera)
-            if image is None:
-                raise ValueError("mug_assessment_camera_unavailable")
-            image = np.asarray(image)
-            if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
-                raise ValueError("mug_assessment_requires_uint8_rgb")
-            images[camera] = image
+        images = {camera: rgb_view(observation, camera,
+                                   missing_error="mug_assessment_camera_unavailable",
+                                   format_error="mug_assessment_requires_uint8_rgb")
+                  for camera in cameras}
 
         content = [{"type": "text", "text": (
             f"Observation={observation.sequence}; phase={phase}. "
             "The following synchronized views are labelled by camera:")}]
         for camera, image in images.items():
-            stream = BytesIO()
-            Image.fromarray(image).save(stream, format="PNG", optimize=True)
             content.append({"type": "text", "text": camera})
-            content.append({"type": "image", "source": {"type": "base64",
-                "media_type": "image/png", "data": base64.b64encode(
-                    stream.getvalue()).decode("ascii")}})
+            content.append(image_block(png_bytes(image)))
 
-        tool = self._tool_schema()
-        response = self.client.messages.create(model=self.model, max_tokens=800,
-            system=self.system_prompt, tools=[tool],
-            tool_choice={"type": "tool", "name": tool["name"]},
-            messages=[{"role": "user", "content": content}])
-        result = next((item.input for item in response.content
-                       if getattr(item, "type", None) == "tool_use"
-                       and getattr(item, "name", None) == tool["name"]), None)
+        result = request_tool_input(self.client, model=self.model, max_tokens=800,
+                                    system=self.system_prompt, tool=self._tool_schema(),
+                                    content=content)
         return self._validate(result, phase, images, observation.sequence)
 
     @classmethod

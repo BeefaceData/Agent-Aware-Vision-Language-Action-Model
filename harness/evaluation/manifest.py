@@ -8,8 +8,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StrictInt, model_validator
 from harness.schemas import Model
-from harness.skill_config import RunSettings
-from harness.memory.snapshot import MemoryCatalog, MemorySnapshot, Digest, canonical
+from harness.runtime.settings import RunSettings
+from harness.memory.snapshot import MemoryCatalog, Digest, canonical
 from harness.skills.registry import SkillRegistry
 
 
@@ -40,9 +40,9 @@ def runtime_identity(root):
     paths = set()
     # Scope deliberately excludes data, secrets, docs/tests and native generated
     # *_tmp configs. External packages/assets/remote weights are not byte-attested.
-    patterns = ("harness/**/*.py", "harness/prompts/*.md", "development/*.py",
-        "run_skills.py", "run_evaluation.py", "run_inference_chunked.py", "modal_policy*.py",
-        "requirements-*.txt", "RoboTwin/envs/*.py", "RoboTwin/envs/robot/**/*.py",
+    patterns = ("harness/**/*.py", "harness/prompts/*.md", "development/**/*.py",
+        "run_skills.py", "run_evaluation.py", "run_inference_chunked.py", "modal_apps/*.py",
+        "requirements/*.txt", "RoboTwin/envs/*.py", "RoboTwin/envs/robot/**/*.py",
         "RoboTwin/envs/utils/**/*.py", "RoboTwin/envs/camera/**/*.py",
         "RoboTwin/env_cfg/**/*.yml", "RoboTwin/assets/embodiments/aloha-agilex/*.yml")
     for pattern in patterns:

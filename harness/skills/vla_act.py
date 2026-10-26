@@ -42,6 +42,12 @@ class VLAAct:
                          "observation": context.observation.sequence})
         def predicate_stop():
             if command.stop not in (None, "task_success", "chunk_budget_exhausted"):
+                # Public visual predicates are checked once when this bounded
+                # VLA segment returns to the planner. Polling them on every
+                # action would cause repeated Opus/SAM requests and make the
+                # planner's configured feedback horizon meaningless.
+                if command.stop in context.feedback_boundary_predicates:
+                    return None
                 value = context.check_predicate(command.stop)
                 if value is None: return "predicate_unavailable"
                 if value: return "predicate_satisfied"

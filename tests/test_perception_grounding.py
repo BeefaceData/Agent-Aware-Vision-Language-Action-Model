@@ -22,9 +22,9 @@ def camera(depth=None):
         np.array([[2., 0., 1.], [0., 2., .5], [0., 0., 1.]]), np.eye(4))
 
 
-def observation(sequence=0, depth=None):
+def observation(sequence=0, depth=None, measured_tcp_poses=None):
     return Observation(sequence, images(), (0.,) * 14,
-                       {"head_camera": camera(depth)})
+                       {"head_camera": camera(depth)}, measured_tcp_poses)
 
 
 def mask(pixel=(0, 1)):
@@ -48,6 +48,26 @@ class FakeDetector:
 
 
 class PerceptionGroundingTests(unittest.TestCase):
+    def test_table_relative_lift_predicate_skips_sam_detector(self):
+        class Tracker:
+            def __init__(self):
+                self.calls = []
+
+            def evaluate(self, obs):
+                self.calls.append(obs.sequence)
+                return {"value": True, "reason": "stable_public_table_relative_lift"}
+
+        detector = FakeDetector(lambda seq: (_ for _ in ()).throw(
+            AssertionError("SAM should not run for table-relative mug-lift evidence")))
+        provider = RGBDPerceptionProvider(detector)
+        tracker = Tracker()
+        provider.set_mug_lift_evidence_tracker(tracker)
+        evidence = provider.evaluate("mug_lifted", observation(4))
+        self.assertTrue(evidence.value)
+        self.assertEqual(evidence.reason, "stable_public_table_relative_lift")
+        self.assertEqual(tracker.calls, [4])
+        self.assertEqual(detector.calls, [])
+
     def test_configured_table_plane_lift_tracker_overrides_sam_centroid_latch(self):
         class Tracker:
             def evaluate(self, obs):
@@ -75,6 +95,7 @@ class PerceptionGroundingTests(unittest.TestCase):
         image_map = {name: np.zeros((size, size, 3), dtype=np.uint8)
                      for name in ("head_camera", "left_camera", "right_camera")}
         depth = np.full((size, size), .9, dtype=np.float32)
+        depth[8:13, 8:13] = .5  # The Opus peg pixel is directly on this surface.
         mask_data = np.zeros((size, size), dtype=bool)
         mask_data[8:13, 11:16] = True
         depth[mask_data] = .5
@@ -97,7 +118,7 @@ class PerceptionGroundingTests(unittest.TestCase):
         return obs, reference, DetectionBatch(0, "head_camera", (
             Detection("rack", .5, mask_data),) if rack_mask else ())
 
-    def test_static_sam_depth_point_is_cached_for_measured_start_rack_staging(self):
+    def test_static_opus_rgbd_point_is_cached_for_measured_start_rack_staging(self):
         from harness.perception.preparation import PerceptionAnchorPreparer
         initial, reference, batch = self._large_observation(0)
         detector = FakeDetector(lambda seq: batch if seq == 0 else
@@ -109,9 +130,10 @@ class PerceptionGroundingTests(unittest.TestCase):
         quality = provider.set_static_rack_reference(reference, observation=initial)
 
         self.assertTrue(quality["world_anchor_available"])
-        self.assertEqual(quality["world_anchor_reason"], "head_sam_mask_local_depth")
+        self.assertEqual(quality["world_anchor_reason"], "opus_keypoint_local_depth")
         self.assertEqual(quality["world_anchor_valid_depth_samples"], 25)
-        self.assertEqual(quality["world_anchor_peg_to_mask_px"], 1.0)
+        self.assertLessEqual(quality["world_anchor_depth_gap_m"], .06)
+        self.assertEqual(detector.calls, [])  # Pose grounding does not invoke SAM 3.
         self.assertTrue(detector.static_rack_reference)
         summary = provider.planner_summary(initial)
         self.assertTrue(summary["rack_static_reference"]["world_anchor_available"])
@@ -130,17 +152,19 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.linalg.norm(np.asarray(anchor.pose[:3])
             - np.array([0., 0., 0.]))), .383, places=2)
 
-    def test_static_rack_anchor_rejects_weak_mask_depth_and_keeps_detection_enabled(self):
+    def test_static_rack_anchor_rejects_unavailable_depth_and_keeps_detection_enabled(self):
         initial, reference, _ = self._large_observation(0)
-        empty = DetectionBatch(0, "head_camera", ())
-        detector = FakeDetector(lambda _seq: empty)
+        frame = initial.camera_frames["head_camera"]
+        initial.camera_frames["head_camera"] = RGBDCamera(
+            np.zeros_like(frame.depth_m), frame.intrinsic, frame.world_to_camera)
+        detector = FakeDetector(lambda _seq: DetectionBatch(0, "head_camera", ()))
         provider = RGBDPerceptionProvider(detector,
             min_confidence_by_label={"rack": .18})
 
         quality = provider.set_static_rack_reference(reference, observation=initial)
 
         self.assertFalse(quality["world_anchor_available"])
-        self.assertEqual(quality["world_anchor_reason"], "rack_mask_depth_support_not_found")
+        self.assertEqual(quality["world_anchor_reason"], "depth_unavailable")
         self.assertFalse(detector.static_rack_reference)
 
     def test_static_rack_anchor_invalidates_when_camera_calibration_changes(self):
@@ -400,7 +424,7 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertEqual(reason, "mug_table_support_not_established")
 
-    def test_right_lift_gate_uses_fresh_rgbd_height_and_stays_unknown_without_mug(self):
+    def test_right_lift_requires_arm_association_not_height_alone(self):
         detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
             Detection("mug", .99, mask()),)))
         provider = RGBDPerceptionProvider(detector)
@@ -411,13 +435,57 @@ class PerceptionGroundingTests(unittest.TestCase):
         raised = Observation(1, images(), (0.,) * 14, {"head_camera": camera(
             np.full((2, 3), 2.1, dtype=np.float32))})
         provider.observe(raised)
-        self.assertTrue(provider.predicate_evidence("right_mug_lifted", raised)["value"])
+        evidence = provider.predicate_evidence("right_mug_lifted", raised)
+        self.assertIsNone(evidence["value"])
+        self.assertEqual(evidence["reason"], "measured_arm_tcp_poses_unavailable")
 
         missing_detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ()))
         missing_provider = RGBDPerceptionProvider(missing_detector)
         missing_provider.observe(baseline)
         self.assertIsNone(missing_provider.predicate_evidence(
             "right_mug_lifted", baseline)["value"])
+
+    def test_left_arm_lift_does_not_confirm_right_arm_handoff(self):
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
+            Detection("mug", .99, mask()),)))
+        provider = RGBDPerceptionProvider(detector)
+        baseline = observation(0)
+        provider.observe(baseline)
+        mug_xyz = np.asarray((0., -.525, 2.1))
+        left = np.r_[mug_xyz, (0., 0., 0., 1.)]
+        right = np.r_[mug_xyz + np.asarray((.30, 0., 0.)), (0., 0., 0., 1.)]
+        raised = observation(1, np.full((2, 3), 2.1, dtype=np.float32),
+            {"left": tuple(left), "right": tuple(right)})
+        provider.observe(raised)
+
+        evidence = provider.predicate_evidence("right_mug_lifted", raised)
+
+        self.assertFalse(evidence["value"])
+        self.assertEqual(evidence["reason"], "mug_associated_with_left_gripper")
+
+    def test_right_arm_lift_requires_stable_right_gripper_association(self):
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
+            Detection("mug", .99, mask()),)))
+        provider = RGBDPerceptionProvider(detector)
+        baseline = observation(0)
+        provider.observe(baseline)
+        mug_xyz = np.asarray((0., -.525, 2.1))
+        left = np.r_[mug_xyz + np.asarray((.30, 0., 0.)), (0., 0., 0., 1.)]
+        right = np.r_[mug_xyz, (0., 0., 0., 1.)]
+
+        first = observation(1, np.full((2, 3), 2.1, dtype=np.float32),
+            {"left": tuple(left), "right": tuple(right)})
+        provider.observe(first)
+        self.assertIsNone(provider.predicate_evidence("right_mug_lifted", first)["value"])
+        # Re-evaluating a single frame must not satisfy the two-observation gate.
+        self.assertIsNone(provider.predicate_evidence("right_mug_lifted", first)["value"])
+
+        second = observation(2, np.full((2, 3), 2.1, dtype=np.float32),
+            {"left": tuple(left), "right": tuple(right)})
+        provider.observe(second)
+        evidence = provider.predicate_evidence("right_mug_lifted", second)
+        self.assertTrue(evidence["value"])
+        self.assertEqual(evidence["reason"], "stable_right_gripper_lift_association")
 
     def test_staged_milestone_requires_public_lift_then_table_support(self):
         detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (

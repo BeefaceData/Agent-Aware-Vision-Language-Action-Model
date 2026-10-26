@@ -4,7 +4,7 @@ import numpy as np
 
 from .anchors import Anchor
 from .geometry import pose7
-from .opus_frame import ground_public_object_frame
+from .opus_frame import ground_public_object_frame_rgbd
 from .pose_grounding import tcp_targets_for_mug_alignment
 from .rgbd import calibration_sha256, intrinsic_sha256
 
@@ -13,29 +13,27 @@ class StaticRackFrameCache:
     """Cache one grounded rack frame and resolve it through later occlusion.
 
     The cache is created per episode. A frame is admitted only from a same-
-    observation RGB keypoint report, a same-camera SAM mask and matching public
-    RGB-D. Later lookups require the same camera image shape and intrinsics;
+    observation RGB keypoint report and matching public RGB-D with locally
+    continuous depth at each point. No segmentation model is used for pose
+    calculation. Later lookups require the same camera image shape and intrinsics;
     the camera extrinsic may change as the robot moves. The cached pose is
     already in world coordinates, so later rack visibility is unnecessary.
     """
 
-    def __init__(self, *, minimum_confidence=0.55,
-                 max_mask_gap_px=8.0, max_depth_gap_m=0.06):
-        limits = (minimum_confidence, max_mask_gap_px, max_depth_gap_m)
+    def __init__(self, *, minimum_confidence=0.55, max_depth_gap_m=0.06):
+        limits = (minimum_confidence, max_depth_gap_m)
         if (not np.isfinite(limits).all() or not 0 <= minimum_confidence <= 1
-                or max_mask_gap_px < 0 or max_depth_gap_m < 0):
+                or max_depth_gap_m < 0):
             raise ValueError("invalid_rack_frame_cache_limits")
         self.minimum_confidence = float(minimum_confidence)
-        self.max_mask_gap_px = float(max_mask_gap_px)
         self.max_depth_gap_m = float(max_depth_gap_m)
         self._reference = None
 
-    def cache(self, observation, report, mask):
+    def cache(self, observation, report):
         if not isinstance(report, dict) or report.get("target") != "rack_peg":
             raise ValueError("rack_frame_report_required")
-        pose = ground_public_object_frame(observation, report, mask,
+        pose = ground_public_object_frame_rgbd(observation, report,
             minimum_confidence=self.minimum_confidence,
-            max_mask_gap_px=self.max_mask_gap_px,
             max_depth_gap_m=self.max_depth_gap_m)
         camera_name = report["camera"]
         image = np.asarray(observation.images[camera_name])
@@ -79,7 +77,7 @@ class StaticRackFrameCache:
                 "camera_calibration_sha256": reference["calibration_sha256"]}
 
 
-def bind_hang_targets(cache, observation, mug_report, mug_mask, *, tcp_pose,
+def bind_hang_targets(cache, observation, mug_report, *, tcp_pose,
                       anchors, arm, approach_offset_m=0.05,
                       max_target_distance_m=0.65):
     """Ground a current mug handle and bind measured-grasp-aware move targets.
@@ -99,7 +97,7 @@ def bind_hang_targets(cache, observation, mug_report, mug_mask, *, tcp_pose,
     if not isinstance(mug_report, dict) or mug_report.get("target") != "mug_handle":
         raise ValueError("mug_handle_report_required")
     rack_pose = cache.resolve(observation)
-    mug_pose = ground_public_object_frame(observation, mug_report, mug_mask)
+    mug_pose = ground_public_object_frame_rgbd(observation, mug_report)
     measured_tcp = pose7(tcp_pose)
     prehang_tcp, seat_tcp = tcp_targets_for_mug_alignment(
         measured_tcp, mug_pose, rack_pose,

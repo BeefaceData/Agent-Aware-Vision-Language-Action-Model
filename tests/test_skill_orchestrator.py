@@ -81,11 +81,10 @@ class OrchestratorTests(unittest.TestCase):
                            decisions[1].previous.observation_before)
         self.assertEqual(summary["outcome"], "Stop after planner receives the changed public evidence")
 
-    def test_public_perception_gap_returns_to_planner_with_fresh_state(self):
+    def test_public_perception_is_checked_at_feedback_boundary_and_frame_reused(self):
         from harness.planner.base import PlannerSelection
         from harness.predicates.base import PredicateResult
-        from harness.skills.schemas import (SkillCommand,
-                                            is_recoverable_predicate_unavailable)
+        from harness.skills.schemas import SkillCommand
 
         class IntermittentPerception:
             source = "perception"
@@ -121,11 +120,11 @@ class OrchestratorTests(unittest.TestCase):
                 if context.previous is None:
                     return PlannerSelection(SkillCommand(action="vla_act", arm="both",
                         stop="mug_lifted", parameters={"max_chunks": 1, "chunk_size": 4,
-                            "max_policy_actions": 4}, reason="Approach and assess the mug"), "GRASP")
-                if context.previous.stop_reason == "predicate_unavailable":
+                            "max_policy_actions": 8}, reason="Approach and assess the mug"), "GRASP")
+                if context.turn == 2 and context.previous.stop_reason == "chunk_budget_exhausted":
                     return PlannerSelection(SkillCommand(action="vla_act", arm="both",
                         stop="chunk_budget_exhausted", parameters={"max_chunks": 1,
-                            "chunk_size": 4, "max_policy_actions": 4},
+                            "chunk_size": 4, "max_policy_actions": 8},
                         reason="Use one feedback chunk while visual evidence recovers"), "GRASP", 1)
                 return PlannerSelection(SkillCommand(action="abort", reason="end CPU scenario"), "FAILED")
 
@@ -135,40 +134,19 @@ class OrchestratorTests(unittest.TestCase):
                 save_observation=store.save, episode_id="perception-gap-retry", seed=12,
                 max_turns=3, completion_predicate="task_success").run()
 
-        gap_events = [event for event in assessments if event.get("event_type") == "planner_turn_result"
-                      and event.get("failure_type") == "predicate_unavailable"]
-        self.assertTrue(gap_events, repr(assessments))
-        gap = gap_events[0]
-        self.assertTrue(gap["recoverable_perception_gap"])
-        self.assertFalse(gap["result"]["episode_terminal"])
-        self.assertEqual(decisions[1].previous.predicate.value, None)
-        self.assertGreater(decisions[1].observation.sequence,
-                           decisions[1].previous.observation_before)
+        feedback = [event for event in assessments if event.get("event_type") == "planner_turn_result"
+                    and event.get("planner_turn") == 1][0]
+        lift = next(item for item in feedback["post_condition"] if item["name"] == "mug_lifted")
+        self.assertIsNone(lift["value"])
+        self.assertTrue(feedback["result"]["completed"])
+        self.assertEqual(feedback["result"]["stop_reason"], "chunk_budget_exhausted")
+        self.assertEqual(decisions[1].observation.sequence,
+                         decisions[1].previous.observation_after)
         actions = [event["command"]["action"] for event in events
                    if event.get("event_type") == "skill_requested"]
         self.assertEqual(actions, ["vla_act", "vla_act", "abort"])
         self.assertEqual(worker.chunks, 2)
         self.assertEqual(gates.perception.phases[:2], ["APPROACH_MUG", "GRASP"])
-        first = next(event["result"] for event in assessments
-                     if event.get("event_type") == "planner_turn_result"
-                     and event.get("failure_type") == "predicate_unavailable")
-        self.assertEqual(first["discarded_actions"], 3)
-        result = decisions[1].previous
-        self.assertTrue(is_recoverable_predicate_unavailable(result))
-        self.assertFalse(is_recoverable_predicate_unavailable(
-            result.model_copy(update={"execution_uncertain": True})))
-        self.assertFalse(is_recoverable_predicate_unavailable(
-            result.model_copy(update={"information_source": "development_oracle"})))
-        self.assertFalse(is_recoverable_predicate_unavailable(
-            result.model_copy(update={"observation_after": result.observation_before})))
-        no_motion_gap = result.model_copy(update={
-            "executed_policy_actions": 0, "vla_chunks_requested": 0,
-            "observation_after": result.observation_before,
-            "state_after": result.state_before,
-            "predicate": result.predicate.model_copy(update={
-                "observation_sequence": result.observation_before}),
-        })
-        self.assertTrue(is_recoverable_predicate_unavailable(no_motion_gap))
         self.assertEqual(summary["outcome"], "end CPU scenario")
 
     def test_inter_arm_contact_is_returned_to_planner_for_retreat(self):

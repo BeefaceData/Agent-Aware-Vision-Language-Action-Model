@@ -17,6 +17,9 @@ class PerceptionSettings(Model):
     # Experimental: cache a reset table plane, then ground Opus mug support
     # pixels against fresh head-camera RGB-D for temporal lift evidence.
     opus_mug_lift_grounding: StrictBool = False
+    # Defer the first expensive public lift assessment until this many VLA
+    # actions have run; later checks stay aligned to planner feedback turns.
+    mug_lift_first_check_after_actions: Annotated[StrictInt, Field(ge=0, le=10000)] = 0
     rack_grounding_camera: Literal["head_camera", "left_camera", "right_camera"] = "head_camera"
     # Experimental rack grounding uses a separately calibrated SAM 3 prompt
     # and confidence threshold. Default/evaluation behavior remains unchanged.

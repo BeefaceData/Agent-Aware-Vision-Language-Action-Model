@@ -149,6 +149,19 @@ def camera_frames_from_payload(payload, images):
     return frames
 
 
+def require_camera_frames(observation, required_cameras):
+    """Fail clearly when an RGB-D-enabled run lacks a required camera frame."""
+    if not isinstance(required_cameras, (tuple, list, set, frozenset)):
+        raise ValueError("invalid_required_rgbd_cameras")
+    if any(not isinstance(name, str) or not name for name in required_cameras):
+        raise ValueError("invalid_required_rgbd_cameras")
+    frames = observation.camera_frames or {}
+    missing = sorted(set(required_cameras) - set(frames))
+    if missing:
+        raise ValueError("required_rgbd_camera_frames_missing:" + ",".join(missing))
+    return observation
+
+
 def camera_archive_values(frames):
     """Return NPZ-safe metric sensor fields for replayable public observations."""
     values = {}

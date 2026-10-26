@@ -23,6 +23,10 @@ anthropic:
   timeout_seconds: 45.0
   max_calls: 100
   planner_feedback_chunks: 1
+  # Historical phase durations: delay first check, then use one 8-action chunk.
+  grasp_initial_feedback_after_actions: 64
+  handoff_initial_feedback_after_actions: 128
+  hang_initial_feedback_after_actions: 64
   vla:
     max_chunks: 32
     chunk_size: 8

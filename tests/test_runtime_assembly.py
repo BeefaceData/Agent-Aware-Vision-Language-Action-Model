@@ -135,11 +135,10 @@ class TurnDecisionTests(unittest.TestCase):
         self.assertEqual(avoid, "left_camera")
         self.assertIn("different camera view", feedback)
 
-    def test_vla_call_without_confirmed_stop_is_classified_unconfirmed(self):
+    def test_vla_chunk_boundary_returns_control_for_planner_feedback(self):
         command = SkillCommand(action="vla_act", stop="mug_lifted")
         result = SimpleNamespace(completed=True, stop_reason="chunk_budget_exhausted")
-        self.assertEqual(turn_failure(command, result, [predicate("mug_lifted", False)]),
-                         "acquisition_unconfirmed")
+        self.assertIsNone(turn_failure(command, result, [predicate("mug_lifted", False)]))
         self.assertIsNone(turn_failure(command, result, [predicate("mug_lifted", True)]))
 
 

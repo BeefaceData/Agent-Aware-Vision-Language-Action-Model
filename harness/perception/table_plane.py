@@ -198,7 +198,8 @@ class MugLiftEvidenceTracker:
 
     def __init__(self, table_plane, grounder, *, minimum_confidence=0.55,
                  lifted_distance_m=0.04, table_distance_m=0.025,
-                 consecutive_observations=2):
+                 consecutive_observations=2,
+                 minimum_policy_actions=0):
         if (not isinstance(table_plane, StaticTablePlaneCache)
                 or not callable(getattr(grounder, "locate", None))
                 or not np.isfinite((minimum_confidence, lifted_distance_m,
@@ -206,17 +207,26 @@ class MugLiftEvidenceTracker:
                 or not 0 <= minimum_confidence <= 1
                 or not 0 < table_distance_m < lifted_distance_m <= 0.20
                 or type(consecutive_observations) is not int
-                or not 2 <= consecutive_observations <= 5):
+                or not 2 <= consecutive_observations <= 5
+                or type(minimum_policy_actions) is not int
+                or not 0 <= minimum_policy_actions <= 10000):
             raise ValueError("invalid_mug_lift_tracker_settings")
         self.table_plane, self.grounder = table_plane, grounder
         self.minimum_confidence = float(minimum_confidence)
         self.lifted_distance_m = float(lifted_distance_m)
         self.table_distance_m = float(table_distance_m)
         self.consecutive_observations = consecutive_observations
+        self.minimum_policy_actions = minimum_policy_actions
+        self.policy_actions_executed = 0
         self._last_sequence = -1
         self._last_result = None
         self._lift_streak = 0
         self._lift_latched = False
+
+    def set_policy_action_count(self, count):
+        if type(count) is not int or count < self.policy_actions_executed:
+            raise ValueError("policy_action_count_must_be_monotonic")
+        self.policy_actions_executed = count
 
     def evaluate(self, observation):
         if observation.sequence == self._last_sequence:
@@ -224,6 +234,12 @@ class MugLiftEvidenceTracker:
         if observation.sequence < self._last_sequence:
             return self._unknown(observation.sequence, "stale_observation")
         self._last_sequence = observation.sequence
+        if self.policy_actions_executed < self.minimum_policy_actions:
+            return self._store({"value": None,
+                "reason": "mug_lift_check_deferred_until_feedback_window",
+                "observation_sequence": observation.sequence,
+                "policy_actions_executed": self.policy_actions_executed,
+                "first_check_policy_actions": self.minimum_policy_actions})
         try:
             report = self.grounder.locate(observation)
             if (report.get("status") != "grounded"

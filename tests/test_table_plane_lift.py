@@ -75,6 +75,28 @@ class MugSupportTests(unittest.TestCase):
         result = MugLiftEvidenceTracker(cache, invisible).evaluate(observation(1))
         self.assertIsNone(result["value"])
 
+    def test_opus_support_checks_wait_until_configured_acquisition_window(self):
+        cache = StaticTablePlaneCache()
+        cache.cache(observation(0), np.ones((48, 48), dtype=bool))
+        grounder = FakeGrounder([{
+            "status": "grounded", "camera": "head_camera",
+            "observation_sequence": seq, "confidence": .8,
+            "support_pixel": [23., 23.],
+        } for seq in (74, 82)])
+        tracker = MugLiftEvidenceTracker(cache, grounder,
+            minimum_policy_actions=64)
+
+        self.assertEqual(tracker.evaluate(observation(0))["reason"],
+                         "mug_lift_check_deferred_until_feedback_window")
+        tracker.set_policy_action_count(63)
+        self.assertIsNone(tracker.evaluate(observation(73, lifted=True))["value"])
+        self.assertEqual(grounder.calls, 0)
+        tracker.set_policy_action_count(64)
+        self.assertIsNone(tracker.evaluate(observation(74, lifted=True))["value"])
+        tracker.set_policy_action_count(72)
+        self.assertTrue(tracker.evaluate(observation(82, lifted=True))["value"])
+        self.assertEqual(grounder.calls, 2)
+
     def test_opus_schema_requests_pixel_only_and_rejects_bad_reports(self):
         class Client:
             class messages:

@@ -14,6 +14,7 @@ from harness.environment.client import EnvironmentClient
 from harness.perception.observations import ObservationStore
 from harness.perception.rgbd import (
     RGBDCamera, camera_frames_from_archive, camera_frames_from_payload,
+    require_camera_frames,
 )
 from harness.planner.base import PlannerContext
 from harness.planner.prompt_builder import user_content
@@ -40,6 +41,12 @@ def payload():
 
 
 class RGBDPerceptionTests(unittest.TestCase):
+    def test_rgbd_enabled_run_requires_configured_camera_frames(self):
+        observation = EnvironmentClient(lambda *args: (payload(), {})).reset(3)
+        self.assertIs(require_camera_frames(observation, ("head_camera",)), observation)
+        with self.assertRaisesRegex(ValueError, "required_rgbd_camera_frames_missing:wrist_camera"):
+            require_camera_frames(observation, ("right_camera", "wrist_camera"))
+
     def test_metric_unprojection_uses_depth_intrinsics_and_world_transform(self):
         world_to_camera = np.eye(4)
         world_to_camera[:3, 3] = [-1., -2., -3.]
@@ -139,6 +146,19 @@ class RGBDPerceptionTests(unittest.TestCase):
                 restored = camera_frames_from_archive(data, images())
                 self.assertEqual(float(restored["head_camera"].depth_m[0, 0]), 2.0)
 
+    def test_observation_store_roundtrips_measured_tcp_poses_for_replay(self):
+        from harness.perception.replay import load_public_observation
+
+        poses = {"left": (0., 0., 0., 0., 0., 0., 1.),
+                 "right": (1., 0., 0., 0., 0., 0., 1.)}
+        observation = Observation(7, images(), (0.,)*14,
+            {"head_camera": camera()}, poses)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ObservationStore(Path(tmp) / "observations")
+            ref = store.save(observation)
+            restored = load_public_observation(store.directory / Path(ref["path"]).name)
+        self.assertEqual(restored.measured_tcp_poses, poses)
+
     def test_modal_policy_receives_only_original_rgb_and_state(self):
         class Worker:
             def act_chunk(self, images_arg, state, size):
@@ -156,13 +176,17 @@ class RGBDPerceptionTests(unittest.TestCase):
 
     def test_current_opus_prompt_does_not_serialize_internal_depth_or_calibration(self):
         frame = camera()
+        poses = {"left": (0., 0., 0., 0., 0., 0., 1.),
+                 "right": (1., 0., 0., 0., 0., 0., 1.)}
         context = PlannerContext(1, Observation(0, images(), (0.,)*14,
-            {"head_camera": frame}), (), None)
+            {"head_camera": frame}, poses), (), None)
         content = user_content(context, limits={}, history=[])
         text = " ".join(block.get("text", "") for block in content if block["type"] == "text")
         self.assertNotIn("depth_m", text)
         self.assertNotIn("world_to_camera", text)
         self.assertNotIn("intrinsic", text)
+        self.assertNotIn("measured_tcp_poses", text)
+        self.assertNotIn("left_tcp_pose", text)
 
     def test_local_simulator_depth_capture_is_opt_in(self):
         from harness.environment import robotwin

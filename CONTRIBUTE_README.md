@@ -2,7 +2,7 @@
 
 This repository supervises a **frozen Neotix vision-language-action policy** on RoboTwin's `hanging_mug` task. RoboTwin and motion execution run on the local machine; policy inference stays on Modal. Anthropic Opus can select one bounded, typed skill at a time. The planner does not emit low-level joint commands. The baseline inference runner remains available independently, and the policy is not retrained here.
 
-This guide is for contributors extending the runtime, especially public perception. `data/` and `docs/` are local-only and ignored by Git; generated validation reports, videos, observations, checkpoints, implementation notes, and API credentials should not be committed.
+This guide is for contributors extending the runtime, especially public perception. The reviewed project guide in `docs/v1/` and task-specific collaboration notes in `docs/Collaboration/` are versioned. Generated validation reports, videos, observations, checkpoints, older implementation notes, and API credentials remain local and should not be committed.
 
 ## Runtime path
 
@@ -118,4 +118,12 @@ Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run c
 
 ## Collaboration notes
 
-Keep pull requests focused on one subsystem and include the contract change, one or more CPU/replay checks, and any effect on the public evidence boundary. Runtime prompt files under `harness/prompts/` are executable inputs and should be versioned with the parser/schema they serve. `README.md` is the short setup guide; this file is the technical map. Generated notes and validation reports in `docs/` remain local by repository policy.
+Keep pull requests focused on one subsystem and include the contract change, one or more CPU/replay checks, and any effect on the public evidence boundary. Runtime prompt files under `harness/prompts/` are executable inputs and should be versioned with the parser/schema they serve. `README.md` is the short setup guide; this file is the technical map. Start with the task-specific guide for your assigned work:
+
+- [Olusola — perception and object grounding](docs/Collaboration/Olusola.md)
+- [Boniface — hanging phase](docs/Collaboration/Boniface.md)
+- [Thabo — grasping phase](docs/Collaboration/Thabo.md)
+- [Almond — efficient observation sampling](docs/Collaboration/Almond.md)
+- [Gabriel — latency analysis](docs/Collaboration/Gabriel.md)
+
+The guides share the same branch, test, and PR workflow. Historical run reports and implementation notes remain excluded; only reviewed team documentation is explicitly unignored in `.gitignore`.

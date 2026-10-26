@@ -28,6 +28,11 @@ git -C RoboTwin apply ../patches/robotwin-renderer.patch
 (cd RoboTwin && bash scripts/_download_assets.sh)
 git clone --branch v0.7.8 https://github.com/NVlabs/curobo.git RoboTwin/envs/curobo
 git -C RoboTwin/envs/curobo checkout d64c4b005459db10c5dd867d8b30a87d5bda9bdb
+# CUDA 12.1 nvcc rejects gcc > 12. Pin the env's build tools once (needs g++-12);
+# set TORCH_CUDA_ARCH_LIST to your GPU's compute capability.
+conda env config vars set CUDA_HOME="$CONDA_PREFIX" CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 \
+  CUDAHOSTCXX=/usr/bin/g++-12 NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++-12" TORCH_CUDA_ARCH_LIST=8.6
+conda activate robotwin
 python -m pip install -e RoboTwin/envs/curobo --no-build-isolation
 python -m pip install warp-lang==1.12.0
 ```

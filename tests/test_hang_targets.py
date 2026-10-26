@@ -18,9 +18,10 @@ from harness.skills.schemas import SkillCommand
 CAMERA = "right_camera"
 
 
-def make_observation(sequence=0, *, calibration_shift=0.0, camera_motion=0.0):
+def make_observation(sequence=0, *, calibration_shift=0.0, camera_motion=0.0,
+                     surface_depth=1.0):
     image = np.zeros((80, 80, 3), dtype=np.uint8)
-    depth = np.ones((80, 80), dtype=np.float32)
+    depth = np.full((80, 80), surface_depth, dtype=np.float32)
     intrinsic = np.array([[100., 0., 40.], [0., 100., 40.], [0., 0., 1.]])
     intrinsic[0, 2] += calibration_shift
     extrinsic = np.eye(4)
@@ -44,7 +45,11 @@ def report(target, sequence, points):
 
 
 class Detector:
+    def __init__(self):
+        self.calls = 0
+
     def detect(self, images, *, observation_sequence):
+        self.calls += 1
         return DetectionBatch(observation_sequence, CAMERA, (
             Detection("rack", .95, mask_for(RACK_POINTS)),
             Detection("mug", .95, mask_for(MUG_POINTS))))
@@ -63,8 +68,7 @@ class HangTargetTests(unittest.TestCase):
     def setUp(self):
         self.obs = make_observation()
         self.cache = StaticRackFrameCache()
-        self.cache.cache(self.obs, report("rack_peg", 0, RACK_POINTS),
-                         mask_for(RACK_POINTS))
+        self.cache.cache(self.obs, report("rack_peg", 0, RACK_POINTS))
 
     def test_rack_frame_resolves_when_later_view_is_occluded(self):
         later = make_observation(1)
@@ -83,20 +87,39 @@ class HangTargetTests(unittest.TestCase):
         np.testing.assert_allclose(self.cache.resolve(moved),
                                    self.cache.resolve(self.obs))
 
-    def test_cache_requires_rack_report_and_same_frame_depth_mask(self):
+    def test_cached_rack_world_position_comes_from_reset_frame_depth(self):
+        deeper_observation = make_observation(surface_depth=1.12)
+        deeper_cache = StaticRackFrameCache()
+        deeper_cache.cache(deeper_observation, report("rack_peg", 0, RACK_POINTS))
+
+        reset_pose = self.cache.resolve(self.obs)
+        deeper_pose = deeper_cache.resolve(deeper_observation)
+        np.testing.assert_allclose(deeper_pose[:3] - reset_pose[:3],
+                                   [0., 0., .12], atol=1e-6)
+
+    def test_cache_requires_current_rack_keypoints_and_rgbd(self):
         with self.assertRaisesRegex(ValueError, "rack_frame_report_required"):
-            StaticRackFrameCache().cache(
-                self.obs, report("mug_handle", 0, RACK_POINTS), mask_for(RACK_POINTS))
+            StaticRackFrameCache().cache(self.obs, report("mug_handle", 0, RACK_POINTS))
         stale = report("rack_peg", 3, RACK_POINTS)
         with self.assertRaisesRegex(ValueError, "stale_or_wrong_camera"):
-            StaticRackFrameCache().cache(self.obs, stale, mask_for(RACK_POINTS))
+            StaticRackFrameCache().cache(self.obs, stale)
+
+    def test_cache_rejects_keypoints_on_a_discontinuous_depth_surface(self):
+        obs = make_observation()
+        camera = obs.camera_frames[CAMERA]
+        depth = camera.depth_m.copy()
+        depth[39:42, 39:42] = 1.5
+        obs.camera_frames[CAMERA] = RGBDCamera(depth, camera.intrinsic,
+                                                camera.world_to_camera)
+        with self.assertRaisesRegex(ValueError, "keypoint_depth_discontinuity"):
+            StaticRackFrameCache().cache(obs, report("rack_peg", 0, RACK_POINTS))
 
     def test_binds_targets_from_cached_rack_current_mug_and_measured_tcp(self):
         anchors = AnchorRegistry()
         tcp = (0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0)
         result = bind_hang_targets(
             self.cache, self.obs, report("mug_handle", 0, MUG_POINTS),
-            mask_for(MUG_POINTS), tcp_pose=tcp, anchors=anchors, arm="right")
+            tcp_pose=tcp, anchors=anchors, arm="right")
         self.assertEqual(set(result), {"rack_approach", "rack_seat"})
         self.assertGreater(result["rack_approach"].pose[0], result["rack_seat"].pose[0])
         for anchor in result.values():
@@ -104,14 +127,13 @@ class HangTargetTests(unittest.TestCase):
             self.assertEqual(anchor.source, "perception")
 
     def test_rejects_wrong_or_stale_mug_frame(self):
-        args = (self.cache, self.obs, report("rack_peg", 0, MUG_POINTS),
-                mask_for(MUG_POINTS))
+        args = (self.cache, self.obs, report("rack_peg", 0, MUG_POINTS))
         with self.assertRaisesRegex(ValueError, "mug_handle_report_required"):
             bind_hang_targets(*args, tcp_pose=(0., 0., 1., 1., 0., 0., 0.),
                               anchors=AnchorRegistry(), arm="right")
         stale = report("mug_handle", 4, MUG_POINTS)
         with self.assertRaisesRegex(ValueError, "stale_or_wrong_camera"):
-            bind_hang_targets(self.cache, self.obs, stale, mask_for(MUG_POINTS),
+            bind_hang_targets(self.cache, self.obs, stale,
                               tcp_pose=(0., 0., 1., 1., 0., 0., 0.),
                               anchors=AnchorRegistry(), arm="right")
 
@@ -119,7 +141,7 @@ class HangTargetTests(unittest.TestCase):
         anchors = AnchorRegistry()
         tcp = (0., 0., 1., 1., 0., 0., 0.)
         bind_hang_targets(self.cache, self.obs, report("mug_handle", 0, MUG_POINTS),
-                          mask_for(MUG_POINTS), tcp_pose=tcp, anchors=anchors,
+                          tcp_pose=tcp, anchors=anchors,
                           arm="right")
         provider = RGBDPerceptionProvider(lambda *args, **kwargs: None, anchors)
         environment = SimpleNamespace(arm_state=lambda arm: {"pose": tcp})
@@ -144,7 +166,8 @@ class HangTargetTests(unittest.TestCase):
 
     def test_runtime_preparer_regrounds_mug_and_binds_cached_rack_composition(self):
         anchors = AnchorRegistry()
-        provider = RGBDPerceptionProvider(Detector(), anchors)
+        detector = Detector()
+        provider = RGBDPerceptionProvider(detector, anchors)
         provider.set_static_rack_frame_cache(self.cache)
         environment = SimpleNamespace(arm_state=lambda arm: {
             "pose": (0., 0., 1., 1., 0., 0., 0.)})
@@ -156,6 +179,7 @@ class HangTargetTests(unittest.TestCase):
 
         anchor = prepare(command, self.obs)
 
+        self.assertEqual(detector.calls, 0)
         self.assertEqual(anchor, anchors.resolve("rack_seat", "right", self.obs))
         summary = provider.planner_summary(self.obs)
         self.assertTrue(summary["rack_static_reference"]["world_anchor_available"])

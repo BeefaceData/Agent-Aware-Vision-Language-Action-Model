@@ -90,8 +90,14 @@ def load_public_observation(path):
         frames = camera_frames_from_archive(archive, images)
         from harness.environment.base import Observation
         sequence = int(archive["sequence"])
+        pose_keys = {"left_tcp_pose", "right_tcp_pose"}
+        present_poses = pose_keys & set(archive.files)
+        if present_poses and present_poses != pose_keys:
+            raise ValueError("incomplete_measured_tcp_pose_archive")
+        measured_tcp_poses = ({arm: tuple(archive[f"{arm}_tcp_pose"].tolist())
+                               for arm in ("left", "right")} if present_poses else None)
         expected = path.stem.removeprefix("observation_")
         if path.stem.startswith("observation_") and expected.isdigit() and int(expected) != sequence:
             raise ValueError("observation_archive_sequence_mismatch")
         return Observation(sequence, images, tuple(archive["command_state"].tolist()),
-                          frames or None).copy()
+                          frames or None, measured_tcp_poses).copy()

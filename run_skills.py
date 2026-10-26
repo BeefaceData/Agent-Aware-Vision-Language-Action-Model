@@ -218,7 +218,15 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
             rgbd_enabled=settings.perception.rgbd_enabled,
             diagnostics=partial(append_jsonl, output / "simulator_timing.jsonl"))
         environment = open_environment(simulator, video=video, frozen=frozen)
-        environment.reset(args.seed)  # Exactly one reset, owned by this runner.
+        initial_observation = environment.reset(args.seed)  # Exactly one reset, owned by this runner.
+        if settings.perception.rgbd_enabled:
+            from harness.perception.rgbd import require_camera_frames
+            required_cameras = {"head_camera"}
+            if settings.perception.opus_rack_grounding:
+                required_cameras.add(settings.perception.rack_grounding_camera)
+            if args.planner_pixel_grounding:
+                required_cameras.update(("head_camera", "left_camera", "right_camera"))
+            require_camera_frames(initial_observation, required_cameras)
 
         rack_frame_cache = None
         if settings.perception.opus_rack_grounding:
@@ -227,7 +235,8 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
                 camera=settings.perception.rack_grounding_camera, log=log_initialization)
         if settings.perception.opus_mug_lift_grounding:
             assembly.initialize_mug_lift_evidence(environment, perception, planner,
-                                                  log=log_initialization)
+                log=log_initialization,
+                minimum_policy_actions=settings.perception.mug_lift_first_check_after_actions)
         predicates, prepare = build_evidence(
             args, settings, environment=environment, simulator=simulator, anchors=anchors,
             perception=perception, planner=planner, rack_frame_cache=rack_frame_cache,

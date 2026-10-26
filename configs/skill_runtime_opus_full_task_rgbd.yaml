@@ -26,9 +26,13 @@ anthropic:
   max_tokens: 4096
   timeout_seconds: 45.0
   max_calls: 100
-  # VLA-first right pickup and rack approach, with one-chunk feedback so Opus
-  # can intervene before the weak policy reaches the failure-prone final contact.
+  # VLA-first execution: phase-local initial horizons, then one-chunk feedback
+  # so Opus can intervene before failure-prone contact phases.
   planner_feedback_chunks: 1
+  # Historical phase durations: delay first check, then use one 8-action chunk.
+  grasp_initial_feedback_after_actions: 64
+  handoff_initial_feedback_after_actions: 128
+  hang_initial_feedback_after_actions: 64
   vla:
     max_chunks: 32
     chunk_size: 8

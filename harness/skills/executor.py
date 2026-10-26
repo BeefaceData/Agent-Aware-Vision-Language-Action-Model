@@ -64,6 +64,7 @@ class SkillExecutor:
                 self._refresh_history,
                 tick_limit=self.budget.max_analytic_ticks-self.executed_physics_ticks,
                 anchors=self.anchors, allow_oracle=self.allow_oracle,
+                feedback_boundary_predicates=self.predicates.feedback_boundary_predicates(),
             )
             context.predicate_check = lambda name, observation, arm: self.predicates.evaluate(
                 name, observation, arm=arm, native_success=self.environment.native_success,

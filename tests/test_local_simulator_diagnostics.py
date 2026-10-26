@@ -38,6 +38,40 @@ def simulator(task, diagnostics):
 
 
 class LocalSimulatorDiagnosticsTests(unittest.TestCase):
+    def test_local_environment_adds_measured_tcp_poses_not_object_state(self):
+        from tests.helpers import images
+
+        def arm_pose(x):
+            return lambda: np.asarray((x, 0., 0., 0., 0., 0., 1.))
+
+        robot = SimpleNamespace()
+        for side, x in (("left", 0.), ("right", 1.)):
+            setattr(robot, f"get_{side}_arm_real_jointState", lambda: [0.] * 6)
+            setattr(robot, f"get_{side}_gripper_val", lambda: 1.)
+            setattr(robot, f"get_{side}_ee_pose", arm_pose(x))
+        environment = LocalEnvironmentClient(SimpleNamespace(task=SimpleNamespace(robot=robot)))
+        raw = {**images(), "state": np.zeros(14, dtype=np.float32),
+               "success": np.asarray(False)}
+
+        observation = environment._accept(raw, 3)
+
+        self.assertEqual(observation.measured_tcp_poses["left"][0], 0.)
+        self.assertEqual(observation.measured_tcp_poses["right"][0], 1.)
+        self.assertFalse(hasattr(observation, "object_poses"))
+
+    def test_rgbd_flag_enables_only_local_task_depth(self):
+        setup = {"data_type": {"rgb": True, "depth": False}}
+        with patch("harness.environment.robotwin.build_task",
+                          return_value=(SimpleNamespace(), setup)):
+            enabled = LocalSimulator("RoboTwin", rgbd_enabled=True)
+        self.assertTrue(enabled.setup["data_type"]["depth"])
+
+        setup = {"data_type": {"rgb": True, "depth": False}}
+        with patch("harness.environment.robotwin.build_task",
+                          return_value=(SimpleNamespace(), setup)):
+            baseline = LocalSimulator("RoboTwin", rgbd_enabled=False)
+        self.assertFalse(baseline.setup["data_type"]["depth"])
+
     def test_local_environment_detects_only_direct_left_right_arm_contacts(self):
         def body(name):
             return SimpleNamespace(entity=SimpleNamespace(name=name))

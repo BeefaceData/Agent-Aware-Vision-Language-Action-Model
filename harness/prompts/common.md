@@ -15,15 +15,17 @@ motion. Analytic tools appear only when public failure evidence calls for
 recovery, or after the confirmed handoff in the known weak hanging phase.
 `runtime_limits.recovery_basis` explains their availability; an unknown
 predicate alone does not unlock them. The tool list shows whether VLA_ACT
-remains available in the active phase. When that phase allowance is exhausted,
-unused later-phase allowances stay reserved until phase evidence advances.
-Use `runtime_limits.vla_phase` as the current phase unless a public milestone
-proves advancement. For VLA_ACT, choose `stop` from the exact
+remains available under the episode-level action/chunk limits. There are no
+per-phase or total VLA-attempt allowances. Use `runtime_limits.vla_phase` as the
+current phase unless a public milestone proves advancement. For VLA_ACT, choose
+`stop` from the exact
 `runtime_limits.vla_stop_predicates` list. Choose `mug_lifted` only when it is
 listed there; the runtime exposes it as a stop only when public perception can
-evaluate it. Otherwise choose `chunk_budget_exhausted` so the planner can inspect
-fresh images and decide what to do next. Never use a hidden development oracle as
-a reason to end a VLA call.
+evaluate it. Public visual predicates are assessed at the configured planner
+feedback boundary, not after every policy action; local safety checks remain
+active during execution. A configured initial grasp horizon may allow several
+chunks before the first feedback. Never use a hidden development oracle as a
+reason to end a VLA call.
 Analytic tools bind to one explicit left/right arm.
 VLA_ACT controls BOTH arms through the unchanged frozen Modal policy. It does not
 accept custom language or exclusive-arm masking. Use analytic motion for staging,
@@ -33,8 +35,8 @@ MOVE_TO preserves the measured gripper orientation. Do not stage near a mug with
 MOVE_TO when that orientation is visibly unsuitable for grasping; let VLA_ACT own
 the approach and contact phase in that case. ROTATE_WRIST only changes world-Z
 yaw, so do not treat it as a general 3D grasp-pose correction.
-All tools return to the controller. A chunk-budget stop means only the attempt
-ended; it does not confirm a grasp or task success. Never invent a successful
+All tools return to the controller. A VLA feedback boundary means only that the
+bounded segment ended; it does not confirm a grasp or task success. Never invent a successful
 postcondition. For VLA_ACT, `executed_policy_actions` counts policy commands that
 were confirmed by the environment. `executed_physics_ticks` counts analytic
 skill ticks only and is normally zero for VLA_ACT; zero analytic ticks does not
@@ -86,10 +88,18 @@ remains, ABORT.
 public evidence cannot evaluate. Consecutive unavailable VLA feedback is
 counted separately from a public false result. In `abort_after_limit` mode the
 runtime ends the episode when that count reaches its configured limit; in
-`continue_to_episode_cap` mode the normal episode budgets still apply. Neither
+`continue_to_episode_cap` mode the normal episode-level budgets still apply. Neither
 mode turns unknown evidence into a confirmed postcondition. Use current images
-to assess whether another bounded VLA segment is safe, and do not spend the
-allowance simply because it is available.
+to assess whether another bounded VLA segment is safe. During VLA-owned grasp,
+handoff, or hang, if public scene status says the mug and its phase-relevant
+support/target are both not detected (mug plus table for grasp/handoff; mug plus
+rack for hang), the runtime forces one configured VLA chunk at a time while
+budgets remain and no hard safety condition is active. This also applies to the
+acquisition-only grasp task. Do not choose an analytic skill without grounded
+targets, and do not claim success from continued motion. At the action/chunk cap,
+report the episode incomplete unless task success was confirmed. This continuation rule applies in
+`continue_to_episode_cap` mode; `abort_after_limit` remains an explicit
+uncertainty-ablation setting.
 
 Input consists of three named RGB cameras, commanded robot state, public predicate
 results when available, recent command history and remaining budgets. Commanded

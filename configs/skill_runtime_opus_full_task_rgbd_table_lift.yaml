@@ -6,6 +6,7 @@ perception:
   rgbd_enabled: true
   opus_rack_grounding: true
   opus_mug_lift_grounding: true
+  mug_lift_first_check_after_actions: 64
   rack_grounding_camera: right_camera
   rack_prompt_profile: explore_mug_rack
 recipe:
@@ -13,7 +14,7 @@ recipe:
   max_retries: 2
   vla:
     max_chunks: 32
-    chunk_size: 8
+    chunk_size: 16
     max_policy_actions: 768
 budget:
   max_skill_calls: 100
@@ -26,9 +27,13 @@ anthropic:
   max_tokens: 4096
   timeout_seconds: 45.0
   max_calls: 100
-  # VLA-first right pickup and rack approach, with feedback after each chunk.
+  # VLA-first right pickup and rack approach, with phase-scheduled feedback.
   planner_feedback_chunks: 1
+  # Phase-local initial windows, then Opus checks at 16-action boundaries.
+  grasp_initial_feedback_after_actions: 64
+  handoff_initial_feedback_after_actions: 128
+  hang_initial_feedback_after_actions: 64
   vla:
     max_chunks: 32
-    chunk_size: 8
+    chunk_size: 16
     max_policy_actions: 768

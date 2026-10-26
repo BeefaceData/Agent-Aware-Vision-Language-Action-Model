@@ -101,6 +101,65 @@ class AnthropicTests(unittest.TestCase):
                      for tool in provider.requests[0]["tools"] if tool["name"] == "vla_act")
         self.assertEqual(stops, ["chunk_budget_exhausted"])
 
+    def test_grasp_feedback_waits_for_history_window_then_returns_to_chunk_cadence(self):
+        from dataclasses import replace
+
+        public = replace(context(), predicates=(PredicateResult(
+            name="mug_lifted", value=False, source="perception",
+            observation_sequence=0, reason="public visual evidence"),),
+            remaining_budget={"policy_actions": 800})
+        first = response(parameters={"max_chunks": 8, "chunk_size": 8,
+                                     "max_policy_actions": 64})
+        following = response(parameters={"max_chunks": 1, "chunk_size": 8,
+                                         "max_policy_actions": 8})
+        planner, provider = self.planner([first, following], task_scope="full_task",
+            planner_feedback_chunks=1, grasp_initial_feedback_after_actions=64,
+            vla={"max_chunks": 32, "chunk_size": 8, "max_policy_actions": 768})
+
+        initial = planner.select(public)
+        self.assertEqual(initial.command.parameters.max_chunks, 8)
+        self.assertEqual(initial.metadata["planner_feedback_horizon_actions"], 64)
+
+        after_window = replace(public, turn=2, remaining_budget={"policy_actions": 736})
+        next_turn = planner.select(after_window)
+        self.assertEqual(next_turn.command.parameters.max_chunks, 1)
+        self.assertEqual(next_turn.metadata["planner_feedback_horizon_actions"], 8)
+
+    def test_each_full_task_phase_uses_its_own_initial_feedback_window(self):
+        from dataclasses import replace
+
+        base = context()
+        planner, _ = self.planner([
+            response(parameters={"max_chunks": 1, "chunk_size": 8,
+                                 "max_policy_actions": 8}),
+            response(task_phase="handoff", parameters={"max_chunks": 1,
+                "chunk_size": 8, "max_policy_actions": 8}),
+            response(task_phase="hang", parameters={"max_chunks": 1,
+                "chunk_size": 8, "max_policy_actions": 8}),
+        ], task_scope="full_task", planner_feedback_chunks=1,
+            grasp_initial_feedback_after_actions=64,
+            handoff_initial_feedback_after_actions=128,
+            hang_initial_feedback_after_actions=64,
+            vla={"max_chunks": 32, "chunk_size": 8, "max_policy_actions": 768})
+
+        grasp = replace(base, predicates=(PredicateResult(name="mug_lifted", value=False,
+            source="perception", observation_sequence=0, reason="supported"),),
+            remaining_budget={"policy_actions": 800})
+        self.assertEqual(planner.select(grasp).command.parameters.max_chunks, 8)
+
+        handoff = replace(base, turn=2, predicates=(PredicateResult(name="mug_lifted", value=True,
+            source="perception", observation_sequence=1, reason="lifted"),),
+            remaining_budget={"policy_actions": 688})
+        self.assertEqual(planner.select(handoff).command.parameters.max_chunks, 16)
+
+        hang = replace(base, turn=3, predicates=(
+            PredicateResult(name="mug_lifted", value=True, source="perception",
+                observation_sequence=2, reason="lifted"),
+            PredicateResult(name="right_mug_lifted", value=True, source="perception",
+                observation_sequence=2, reason="right gripper association confirmed"),),
+            remaining_budget={"policy_actions": 488})
+        self.assertEqual(planner.select(hang).command.parameters.max_chunks, 8)
+
     def test_planner_accepts_only_pre_motion_move_plan_failure_for_reselection(self):
         from harness.skills.schemas import SkillResult, is_recoverable_executed_motion_failure
 
@@ -407,8 +466,8 @@ class AnthropicTests(unittest.TestCase):
 
         from dataclasses import replace
         transferred = replace(context(2), predicates=(
-            PredicateResult(name="left_transfer_complete", value=True, source="perception",
-                observation_sequence=2, reason="public visual evidence"),))
+            PredicateResult(name="right_mug_lifted", value=True, source="perception",
+                observation_sequence=2, reason="right gripper association confirmed"),))
         second = planner.select(transferred)
         self.assertEqual(second.phase, "HANG")
         self.assertEqual(second.command.stop, "task_success")
@@ -447,7 +506,7 @@ class AnthropicTests(unittest.TestCase):
         from dataclasses import replace
         visual = {"source": "public_rgbd", "status": {"mug": "grounded", "rack": "grounded",
                     "table": "not_detected"}}
-        transferred = (PredicateResult(name="left_transfer_complete", value=True,
+        transferred = (PredicateResult(name="right_mug_lifted", value=True,
             source="perception", observation_sequence=1, reason="public transfer evidence"),)
         grounded_context = replace(context(), visual_context=visual, predicates=transferred)
         payload = json.loads(user_content(grounded_context,
@@ -478,13 +537,13 @@ class AnthropicTests(unittest.TestCase):
         self.assertTrue(planner._target_available("rack_seat", cached_context,
                                                    arm="right", phase="hang"))
 
-    def test_handoff_is_bimanual_and_staging_alone_advances_to_hang(self):
+    def test_handoff_is_bimanual_and_staging_alone_does_not_advance_to_hang(self):
         from dataclasses import replace
 
         for is_staged, claimed_phase, expected_phase in (
                 (False, "handoff", "HANDOFF"),
                 (False, "hang", "HANDOFF"),
-                (True, "hang", "HANG")):
+                (True, "hang", "HANDOFF")):
             planner, _ = self.planner([response(task_phase="hang", stop="task_success",
                 phase_evidence="The mug is staged and the VLA coordinates both arms.")],
                 task_scope="full_task")
@@ -499,14 +558,158 @@ class AnthropicTests(unittest.TestCase):
             self.assertEqual(selected.phase, expected_phase)
             self.assertIsNone(selected.command.parameters.lock_arm)
 
-    def test_public_staged_mug_alone_advances_phase_without_oracle(self):
+    def test_public_staged_mug_keeps_planner_in_handoff_until_right_pickup(self):
         from dataclasses import replace
         predicates = (PredicateResult(name="mug_staged_on_table", value=True,
             source="perception", observation_sequence=1,
             reason="public lift then table support"),)
         ctx = replace(context(), predicates=predicates)
-        self.assertEqual(AnthropicPlanner._public_phase_floor(ctx, "full_task"), "hang")
-        self.assertTrue(AnthropicPlanner._handoff_complete_confirmed(ctx))
+        self.assertEqual(AnthropicPlanner._public_phase_floor(ctx, "full_task"), "handoff")
+        self.assertFalse(AnthropicPlanner._handoff_complete_confirmed(ctx))
+
+    def test_public_right_lift_advances_and_latches_hang_phase(self):
+        from dataclasses import replace
+
+        right_lifted = PredicateResult(name="right_mug_lifted", value=True,
+            source="perception", observation_sequence=1,
+            reason="mug raised in right gripper")
+        first_context = replace(context(), predicates=(right_lifted,))
+        planner, _ = self.planner([
+            response(task_phase="hang", phase_evidence=
+                "The right arm has lifted the mug; proceed to the rack.")],
+            task_scope="full_task")
+        planner.active_phase = "handoff"
+        selected = planner.select(first_context)
+        self.assertEqual(selected.phase, "HANG")
+        self.assertEqual(selected.metadata["task_phase"], "hang")
+        self.assertEqual(AnthropicPlanner._public_phase_floor(first_context, "full_task"), "hang")
+        self.assertTrue(AnthropicPlanner._handoff_complete_confirmed(first_context))
+
+        # The milestone can disappear from the current image after occlusion;
+        # the orchestrator's monotonic phase state must retain HANG.
+        previous = SimpleNamespace(
+            episode_terminal=False, execution_uncertain=False, completed=True,
+            call_id=1, skill=SimpleNamespace(value="vla_act"),
+            executed_policy_actions=16, vla_chunks_requested=1,
+            executed_physics_ticks=0, discarded_actions=0,
+            controlled_arms="both", policy_history_reset=False,
+            information_source="public", stop_reason="chunk_budget_exhausted",
+            objective_satisfied=False, position_error_m=None,
+            orientation_error_rad=None, tracking_error=None, predicate=None)
+        occluded_context = replace(context(2, previous=previous), predicates=())
+        occluded_planner, _ = self.planner([
+            response(task_phase="hang", phase_evidence=
+                "The phase remains hanging after the mug was lifted by the right arm.")],
+            task_scope="full_task")
+        occluded_planner.active_phase = "hang"
+        retained = occluded_planner.select(occluded_context)
+        self.assertEqual(retained.phase, "HANG")
+        self.assertEqual(retained.metadata["task_phase"], "hang")
+
+    def test_perception_blackout_forces_one_bounded_vla_chunk_in_hang(self):
+        from dataclasses import replace
+        from harness.skills.schemas import VLAParameters
+
+        previous = SimpleNamespace(
+            episode_terminal=False, execution_uncertain=False, completed=True,
+            call_id=1, skill=SimpleNamespace(value="vla_act"),
+            executed_policy_actions=16, vla_chunks_requested=1,
+            executed_physics_ticks=0, discarded_actions=0,
+            controlled_arms="both", policy_history_reset=False,
+            information_source="public", stop_reason="chunk_budget_exhausted",
+            objective_satisfied=False, position_error_m=None,
+            orientation_error_rad=None, tracking_error=None, predicate=None,
+            arm_overlap_detected=False)
+        blackout = replace(context(2, previous=previous),
+            visual_context={"status": {"mug": "not_detected",
+                                        "table": "not_detected",
+                                        "rack": "not_detected"}},
+            remaining_budget={"planner_turns": 10, "policy_actions": 100,
+                              "vla_chunks": 10})
+        planner, _ = self.planner([
+            response("abort", arm="auto", parameters={}, reason="Perception was lost",
+                task_phase="hang", phase_evidence="The mug and rack are unavailable.")],
+            task_scope="full_task", unknown_milestone_policy="continue_to_episode_cap",
+            vla=VLAParameters(max_chunks=4, chunk_size=16, max_policy_actions=64))
+        planner.active_phase = "hang"
+
+        selected = planner.select(blackout)
+
+        self.assertEqual(selected.command.action.value, "vla_act")
+        self.assertEqual(selected.command.stop, "chunk_budget_exhausted")
+        self.assertEqual(selected.command.parameters.max_chunks, 1)
+        self.assertEqual(selected.command.parameters.chunk_size, 16)
+        self.assertEqual(selected.command.parameters.max_policy_actions, 16)
+        self.assertTrue(selected.metadata["perception_gap_vla_continuation_applied"])
+
+    def test_perception_blackout_continuation_covers_grasp_and_handoff(self):
+        from dataclasses import replace
+        from harness.skills.schemas import VLAParameters
+
+        previous = SimpleNamespace(
+            episode_terminal=False, execution_uncertain=False, completed=True,
+            call_id=1, skill=SimpleNamespace(value="vla_act"),
+            executed_policy_actions=16, vla_chunks_requested=1,
+            executed_physics_ticks=0, discarded_actions=0,
+            controlled_arms="both", policy_history_reset=False,
+            information_source="public", stop_reason="chunk_budget_exhausted",
+            objective_satisfied=False, position_error_m=None,
+            orientation_error_rad=None, tracking_error=None, predicate=None,
+            arm_overlap_detected=False)
+        for phase, scope in (("grasp", "acquisition"), ("handoff", "full_task")):
+            with self.subTest(phase=phase, scope=scope):
+                blackout = replace(context(2, previous=previous),
+                    visual_context={"status": {"mug": "unknown",
+                                                "table": "not_detected",
+                                                "rack": "visible"}},
+                    remaining_budget={"planner_turns": 10, "policy_actions": 100,
+                                      "vla_chunks": 10})
+                planner, _ = self.planner([
+                    response("abort", arm="auto", parameters={}, reason="Perception was lost",
+                        task_phase=phase, phase_evidence="The mug and table are unavailable.")],
+                    task_scope=scope, unknown_milestone_policy="continue_to_episode_cap",
+                    vla=VLAParameters(max_chunks=4, chunk_size=16, max_policy_actions=64))
+                planner.active_phase = phase
+
+                selected = planner.select(blackout)
+
+                self.assertEqual(selected.command.action.value, "vla_act")
+                self.assertEqual(selected.command.stop, "chunk_budget_exhausted")
+                self.assertEqual(selected.command.parameters.max_chunks, 1)
+                self.assertEqual(selected.command.parameters.max_policy_actions, 16)
+                self.assertTrue(selected.metadata["perception_gap_vla_continuation_applied"])
+
+    def test_perception_blackout_does_not_override_inter_arm_safety_recovery(self):
+        from dataclasses import replace
+        from harness.skills.schemas import VLAParameters
+
+        previous = SimpleNamespace(
+            episode_terminal=False, execution_uncertain=False, completed=True,
+            call_id=1, skill=SimpleNamespace(value="vla_act"),
+            executed_policy_actions=16, vla_chunks_requested=1,
+            executed_physics_ticks=0, discarded_actions=0,
+            controlled_arms="both", policy_history_reset=False,
+            information_source="public", stop_reason="arm_overlap_detected",
+            objective_satisfied=False, position_error_m=None,
+            orientation_error_rad=None, tracking_error=None, predicate=None,
+            arm_overlap_detected=None)
+        blackout = replace(context(2, previous=previous),
+            visual_context={"status": {"mug": "not_detected",
+                                        "table": "not_detected",
+                                        "rack": "not_detected"}},
+            remaining_budget={"planner_turns": 10, "policy_actions": 100,
+                              "vla_chunks": 10})
+        retreat = response("abort", arm="auto", parameters={}, reason="Safety stop",
+            task_phase="hang", phase_evidence="Arm contact needs recovery.")
+        planner, _ = self.planner([retreat], task_scope="full_task",
+            unknown_milestone_policy="continue_to_episode_cap",
+            vla=VLAParameters(max_chunks=4, chunk_size=16, max_policy_actions=64))
+        planner.active_phase = "hang"
+
+        selected = planner.select(blackout)
+
+        self.assertEqual(selected.command.action.value, "abort")
+        self.assertFalse(selected.metadata.get("perception_gap_vla_continuation_applied", False))
 
     def test_planner_payload_contains_public_transfer_evidence_but_no_oracle_predicates(self):
         from dataclasses import replace
@@ -571,9 +774,9 @@ class AnthropicTests(unittest.TestCase):
 
     def test_hang_starts_with_vla_but_recovery_skills_are_available(self):
         from dataclasses import replace
-        staged = (PredicateResult(name="mug_staged_on_table", value=True,
+        staged = (PredicateResult(name="right_mug_lifted", value=True,
             source="perception", observation_sequence=1,
-            reason="public lift then table support"),)
+            reason="right gripper association confirmed"),)
         first_reply = response(task_phase="hang", stop="chunk_budget_exhausted",
             phase_evidence="The right arm begins pickup and rack approach.")
         move = response("move_to", arm="right", parameters={"target": "rack_approach"},
@@ -609,8 +812,8 @@ class AnthropicTests(unittest.TestCase):
         planner, _ = self.planner([invalid], task_scope="full_task")
         from dataclasses import replace
         completed_transfer = replace(context(), predicates=(
-            PredicateResult(name="left_transfer_complete", value=True, source="perception",
-                observation_sequence=1, reason="visually verified transfer"),))
+            PredicateResult(name="right_mug_lifted", value=True, source="perception",
+                observation_sequence=1, reason="right gripper association confirmed"),))
         selected = planner.select(completed_transfer)
         self.assertEqual(selected.command.action.value, "abort")
         self.assertEqual(selected.metadata["validation_error"],
@@ -646,7 +849,7 @@ class AnthropicTests(unittest.TestCase):
         planner, _ = self.planner([selected], task_scope="full_task",
                                   require_pixel_grounding=True)
         transferred = __import__("dataclasses").replace(context(), predicates=(
-            PredicateResult(name="left_transfer_complete", value=True,
+            PredicateResult(name="right_mug_lifted", value=True,
                 source="perception", observation_sequence=1,
                 reason="public transfer evidence"),))
         result = planner.select(transferred)
@@ -668,8 +871,8 @@ class AnthropicTests(unittest.TestCase):
                   "rack_static_reference": {"initialized": True,
                       "world_anchor_available": True, "current_visibility": "not_detected"}}
         transferred = replace(context(), visual_context=visual, predicates=(
-            PredicateResult(name="left_transfer_complete", value=True, source="perception",
-                observation_sequence=1, reason="public transfer evidence"),))
+            PredicateResult(name="right_mug_lifted", value=True, source="perception",
+                observation_sequence=1, reason="right gripper association confirmed"),))
         stage = response("move_to", arm="right", parameters={"target": "rack_approach"},
             task_phase="hang", phase_evidence="The transfer is complete; stage for hanging.",
             reason="Move to the runtime cached rack staging reference.")
@@ -917,7 +1120,7 @@ class AnthropicTests(unittest.TestCase):
                 observation_sequence=1, reason="visually verified transfer"),))
         selected = planner.select(handoff)
         self.assertEqual(selected.command.action.value, "vla_act")
-        self.assertEqual(selected.metadata["task_phase"], "hang")
+        self.assertEqual(selected.metadata["task_phase"], "handoff")
         self.assertEqual(selected.metadata["phase_basis"], "public_milestone")
         self.assertTrue(selected.metadata["phase_claim_corrected"])
 
@@ -1095,5 +1298,5 @@ class AnthropicTests(unittest.TestCase):
         self.assertEqual(summary["outcome"], "End test episode")
         self.assertFalse(summary["task_success"])
         self.assertEqual((len(provider.requests), worker.chunks), (2, 1))
-        self.assertEqual(summary["policy_actions"], 4)
+        self.assertEqual(summary["policy_actions"], 8)
         self.assertNotIn("development_oracle", json.dumps(provider.requests))

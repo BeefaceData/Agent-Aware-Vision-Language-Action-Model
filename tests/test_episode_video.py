@@ -6,10 +6,10 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from development.episode_video import EpisodeVideo, RecordingEnvironment
+from development.demos.episode_video import EpisodeVideo, RecordingEnvironment
 from harness.environment.local import LocalEnvironmentClient
 from harness.environment.base import Observation
-from harness.trace import CAMERAS
+from harness.environment.base import CAMERAS
 
 
 def observation(sequence):

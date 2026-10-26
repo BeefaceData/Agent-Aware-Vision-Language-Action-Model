@@ -22,152 +22,21 @@ import argparse
 import csv
 import io
 import json
-import os
 import statistics
-import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
 
-CAMERAS = ("head_camera", "left_camera", "right_camera")
-ACTION_DIM = 14
+# Shared with the supervised runtime; the baseline loop below is unchanged.
+from harness.environment.robotwin import CAMERAS, build_task, call_sim, observation_of
+from harness.vla.modal_client import ModalPolicyClient
+
 HOST, PORT = "127.0.0.1", 8110
 
 
 # ─────────────────────────── simulator side ────────────────────────────
-
-
-def build_task(robotwin_root: str, task_name: str):
-    root = os.path.abspath(robotwin_root)
-    if not os.path.isdir(os.path.join(root, "envs")):
-        sys.exit(f"no RoboTwin checkout at {root}")
-
-    sys.path.insert(0, root)
-    os.chdir(root)
-
-    import importlib
-    import yaml
-    from envs import CONFIGS_PATH
-
-    with open(
-        os.path.join(CONFIGS_PATH, "demo_clean.yml"),
-        encoding="utf-8",
-    ) as f:
-        args = yaml.safe_load(f)
-
-    with open(
-        os.path.join(CONFIGS_PATH, "_embodiment_config.yml"),
-        encoding="utf-8",
-    ) as f:
-        embodiments = yaml.safe_load(f)
-
-    robot = embodiments[
-        args.get("embodiment", ["aloha-agilex"])[0]
-    ]["file_path"]
-
-    args["left_robot_file"] = robot
-    args["right_robot_file"] = robot
-    args["dual_arm_embodied"] = True
-
-    for side in ("left", "right"):
-        with open(
-            os.path.join(
-                args[f"{side}_robot_file"],
-                "config.yml",
-            ),
-            encoding="utf-8",
-        ) as f:
-            args[f"{side}_embodiment_config"] = (
-                yaml.safe_load(f)
-            )
-
-    with open(
-        os.path.join(CONFIGS_PATH, "_camera_config.yml"),
-        encoding="utf-8",
-    ) as f:
-        cameras = yaml.safe_load(f)
-
-    head = args["camera"]["head_camera_type"]
-    args["head_camera_h"] = cameras[head]["h"]
-    args["head_camera_w"] = cameras[head]["w"]
-    args["render_freq"] = 0
-    args["task_name"] = task_name
-    args["task_config"] = "demo_clean"
-
-    module = importlib.import_module(
-        f"envs.{task_name}"
-    )
-
-    return getattr(module, task_name)(), args
-
-
-def observation_of(task, blank, success):
-    raw = task.get_obs()
-    cameras = raw.get("observation", {})
-    out = {}
-
-    for camera in CAMERAS:
-        camera_data = cameras.get(camera) or {}
-        image = camera_data.get("rgb")
-
-        if image is None:
-            out[camera] = blank
-            continue
-
-        image = np.asarray(
-            image,
-            dtype=np.uint8,
-        )
-
-        if image.ndim == 2:
-            image = np.stack(
-                [image] * 3,
-                axis=-1,
-            )
-
-        out[camera] = np.ascontiguousarray(
-            image[..., :3]
-        )
-
-        # Optional perception-only RGB-D channel. The Modal Neotix client still
-        # packs only the three RGB keys and the unchanged 14-DoF state.
-        depth = camera_data.get("depth")
-        intrinsic = camera_data.get("intrinsic_cv")
-        extrinsic = camera_data.get("extrinsic_cv")
-        if depth is not None:
-            if intrinsic is None or extrinsic is None:
-                raise ValueError("rgbd_camera_calibration_missing")
-            depth = np.asarray(depth)
-            if depth.shape != image.shape[:2]:
-                raise ValueError("rgbd_depth_rgb_shape_mismatch")
-            out[f"{camera}__depth_mm"] = np.ascontiguousarray(depth, dtype=np.float32)
-            out[f"{camera}__intrinsic_cv"] = np.asarray(intrinsic, dtype=np.float64)
-            out[f"{camera}__extrinsic_cv"] = np.asarray(extrinsic, dtype=np.float64)
-
-    vector = (
-        raw.get("joint_action") or {}
-    ).get("vector")
-
-    joints = np.zeros(
-        ACTION_DIM,
-        dtype=np.float32,
-    )
-
-    if vector is not None:
-        flat = np.asarray(
-            vector,
-            dtype=np.float32,
-        ).ravel()
-
-        if flat.size >= ACTION_DIM:
-            joints = flat[:ACTION_DIM]
-
-    out["state"] = joints
-    out["success"] = np.bool_(success)
-
-    return out
 
 
 def serve_simulator(
@@ -326,207 +195,6 @@ def serve_simulator(
         (host, port),
         Handler,
     ).serve_forever()
-
-
-# ───────────────────────── communication helpers ───────────────────────
-
-
-def call_sim(
-    host: str,
-    port: int,
-    path: str,
-    payload: dict,
-):
-    import requests
-
-    t0 = time.perf_counter()
-
-    reply = requests.post(
-        f"http://{host}:{port}{path}",
-        json=payload,
-        timeout=600,
-    )
-
-    http_ms = (
-        time.perf_counter() - t0
-    ) * 1000.0
-
-    reply.raise_for_status()
-
-    with np.load(
-        io.BytesIO(reply.content)
-    ) as data:
-        observation = {
-            key: data[key]
-            for key in data.files
-        }
-
-    timing = {
-        "sim_http_ms": http_ms,
-        "sim_action_ms": float(
-            reply.headers.get(
-                "X-Sim-Action-Ms",
-                "nan",
-            )
-        ),
-        "sim_observation_ms": float(
-            reply.headers.get(
-                "X-Sim-Observation-Ms",
-                "nan",
-            )
-        ),
-        "sim_encode_ms": float(
-            reply.headers.get(
-                "X-Sim-Encode-Ms",
-                "nan",
-            )
-        ),
-    }
-
-    return observation, timing
-
-
-def pack_observation(images, state):
-    t0 = time.perf_counter()
-
-    buffer = io.BytesIO()
-
-    np.savez_compressed(
-        buffer,
-        head_camera=np.asarray(
-            images["head_camera"],
-            dtype=np.uint8,
-        ),
-        left_camera=np.asarray(
-            images["left_camera"],
-            dtype=np.uint8,
-        ),
-        right_camera=np.asarray(
-            images["right_camera"],
-            dtype=np.uint8,
-        ),
-        state=np.asarray(
-            state,
-            dtype=np.float32,
-        ),
-    )
-
-    payload = buffer.getvalue()
-
-    return (
-        payload,
-        (time.perf_counter() - t0) * 1000.0,
-        len(payload) / 1024.0,
-    )
-
-
-class ModalPolicyClient:
-    def __init__(
-        self,
-        app_name: str,
-        class_name: str,
-    ):
-        import modal
-
-        cls = modal.Cls.from_name(
-            app_name,
-            class_name,
-        )
-
-        self.worker = cls()
-
-    def reset(self):
-        t0 = time.perf_counter()
-        info = self.worker.reset_episode.remote()
-
-        return info, (
-            time.perf_counter() - t0
-        ) * 1000.0
-
-    def act_chunk(
-        self,
-        images,
-        state,
-        chunk_size,
-    ):
-        (
-            packed,
-            pack_ms,
-            payload_kb,
-        ) = pack_observation(
-            images,
-            state,
-        )
-
-        t0 = time.perf_counter()
-
-        result = self.worker.act_chunk.remote(
-            packed,
-            requested_actions=chunk_size,
-        )
-
-        rpc_ms = (
-            time.perf_counter() - t0
-        ) * 1000.0
-
-        actions = np.asarray(
-            result["actions"],
-            dtype=np.float32,
-        )
-
-        if (
-            actions.ndim != 2
-            or actions.shape[1] != ACTION_DIM
-        ):
-            raise RuntimeError(
-                "Modal returned invalid chunk shape "
-                f"{actions.shape}; expected [T, {ACTION_DIM}]"
-            )
-
-        modal_compute_ms = float(
-            result.get(
-                "modal_compute_ms",
-                float("nan"),
-            )
-        )
-
-        timing = {
-            "pack_ms": pack_ms,
-            "payload_kb": payload_kb,
-            "modal_rpc_ms": rpc_ms,
-            "modal_compute_ms": modal_compute_ms,
-            "modal_overhead_ms": (
-                rpc_ms - modal_compute_ms
-                if np.isfinite(modal_compute_ms)
-                else float("nan")
-            ),
-            "cloud_preprocess_ms": float(
-                result.get(
-                    "preprocess_ms",
-                    float("nan"),
-                )
-            ),
-            "cloud_inference_ms": float(
-                result.get(
-                    "inference_ms",
-                    float("nan"),
-                )
-            ),
-            "cloud_postprocess_ms": float(
-                result.get(
-                    "postprocess_ms",
-                    float("nan"),
-                )
-            ),
-            "returned_actions": int(
-                result["num_actions"]
-            ),
-            "chunk_limit": int(
-                result["chunk_limit"]
-            ),
-        }
-
-        return actions, timing
 
 
 def supervise(
@@ -1110,12 +778,12 @@ def main():
     harness = None
     if args.harness_config:
         try:
-            from harness.config import load_config
-            from harness.orchestrator import PassThroughHarness
+            from harness.legacy.config import load_config
+            from harness.legacy.pass_through import PassThroughHarness
 
             config = load_config(args.harness_config)
         except ImportError:
-            parser.error("install requirements-harness.txt to use --harness-config")
+            parser.error("install requirements/harness.txt to use --harness-config")
         except (OSError, ValueError):
             parser.error("invalid or unreadable harness config; check the documented schema")
         if args.task != config.task:

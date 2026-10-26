@@ -1,6 +1,6 @@
 import unittest
 
-from modal_sam3 import MUG_SCORE_THRESHOLD, RACK_PROFILES, confidence_meets_threshold
+from modal_apps.sam3 import MUG_SCORE_THRESHOLD, RACK_PROFILES, confidence_meets_threshold
 
 
 class ModalSam3ServiceTests(unittest.TestCase):

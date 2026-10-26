@@ -1,11 +1,11 @@
-"""CPU tests for the run_skills public detector integration seam."""
+"""CPU tests for the public detector integration seam used by run_skills."""
 
 import unittest
 import sys
 
 from harness.perception.anchors import AnchorRegistry
 from harness.perception.grounding import RGBDPerceptionProvider
-from run_skills import load_perception_provider
+from harness.runtime.assembly import load_perception_provider
 
 
 class FakeDetector:

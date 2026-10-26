@@ -7,7 +7,7 @@ observation endpoint. External mutation is unsupported by this R1 adapter.
 
 import numpy as np
 
-from harness.trace import CAMERAS, copy_images, vector14
+from harness.environment.base import CAMERAS, copy_images, vector14
 from harness.perception.rgbd import camera_frames_from_payload
 from .base import Observation
 
@@ -15,7 +15,7 @@ from .base import Observation
 class EnvironmentClient:
     def __init__(self, transport=None, *, host="127.0.0.1", port=8110):
         if transport is None:
-            from run_inference_chunked import call_sim
+            from harness.environment.robotwin import call_sim
             transport = call_sim
         self._transport, self.host, self.port = transport, host, port
         self._observation = None

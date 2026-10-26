@@ -5,9 +5,9 @@ import unittest
 
 from pydantic import StrictFloat, ValidationError
 
-from harness.config import load_config
+from harness.legacy.config import load_config
 from harness.schemas import Model
-from harness.skill_registry import SkillMetadata, SkillRejected, VerifiedSkillRegistry
+from harness.legacy.skill_registry import SkillMetadata, SkillRejected, VerifiedSkillRegistry
 from harness.legacy.recovery_skills import candidate_skills
 from harness.legacy.recovery_skills.retry_grasp import RetryGrasp
 from tests.skill_fixtures import TestSkill, registry_with_verified_skill, verified_metadata

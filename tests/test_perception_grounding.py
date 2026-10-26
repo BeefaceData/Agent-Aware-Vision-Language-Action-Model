@@ -144,7 +144,6 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertFalse(detector.static_rack_reference)
 
     def test_static_rack_anchor_invalidates_when_camera_calibration_changes(self):
-        from harness.perception.preparation import PerceptionAnchorPreparer
         initial, reference, batch = self._large_observation(0)
         detector = FakeDetector(lambda seq: batch if seq == 0 else
             DetectionBatch(seq, "head_camera", ()))
@@ -460,7 +459,7 @@ class PerceptionGroundingTests(unittest.TestCase):
         from harness.planner.base import PlannerContext
         from harness.planner.prompt_builder import user_content
         from harness.predicates.registry import PredicateRegistry
-        from harness.skill_orchestrator import SkillOrchestrator
+        from harness.runtime.orchestrator import SkillOrchestrator
 
         detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
             Detection("mug", .99, mask()), Detection("rack", .99, mask()))))

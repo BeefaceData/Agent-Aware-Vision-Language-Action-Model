@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 
-from development.appearance_replay import replay
+from development.replays.appearance import replay
 from harness.environment.base import Observation
 from harness.perception.observations import ObservationStore
 from harness.perception.rgbd import RGBDCamera

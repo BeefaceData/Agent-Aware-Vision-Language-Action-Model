@@ -5,14 +5,12 @@ table mask; later Opus support pixels are unprojected with their same-frame
 depth and camera calibration.
 """
 
-from hashlib import sha256
-import base64
-from io import BytesIO
-from pathlib import Path
-
 import numpy as np
 
-from .rgbd import RGBDCamera
+from harness.prompts import read_prompt
+from .rgbd import RGBDCamera, calibration_sha256
+from .vision_request import (bounded_text, image_block, png_bytes, request_tool_input,
+                             require_messages_client, rgb_view, unit_interval)
 
 
 class StaticTablePlaneCache:
@@ -72,8 +70,7 @@ class StaticTablePlaneCache:
             "camera": camera,
             "sequence": observation.sequence,
             "image_shape": shape,
-            "intrinsic_sha256": _array_hash(frame.intrinsic),
-            "extrinsic_sha256": _array_hash(frame.world_to_camera),
+            "calibration_sha256": calibration_sha256(frame),
             "valid_points": int(len(points)),
             "inliers": int(inliers.sum()),
             "p95_residual_m": p95,
@@ -89,8 +86,7 @@ class StaticTablePlaneCache:
             raise ValueError("table_plane_camera_unavailable")
         if tuple(np.asarray(image).shape[:2]) != reference["image_shape"]:
             raise ValueError("table_plane_image_shape_changed")
-        if (_array_hash(frame.intrinsic) != reference["intrinsic_sha256"]
-                or _array_hash(frame.world_to_camera) != reference["extrinsic_sha256"]):
+        if calibration_sha256(frame) != reference["calibration_sha256"]:
             raise ValueError("table_plane_camera_calibration_changed")
         if (not isinstance(pixel, (tuple, list, np.ndarray)) or len(pixel) != 2
                 or not np.isfinite(np.asarray(pixel, dtype=float)).all()):
@@ -110,9 +106,7 @@ class StaticTablePlaneCache:
                 "valid_depth_points": self._reference["valid_points"],
                 "plane_inliers": self._reference["inliers"],
                 "p95_residual_m": self._reference["p95_residual_m"],
-                "camera_calibration_sha256": _combined_hash(
-                    self._reference["intrinsic_sha256"],
-                    self._reference["extrinsic_sha256"])}
+                "camera_calibration_sha256": self._reference["calibration_sha256"]}
 
     def _require_reference(self):
         if self._reference is None:
@@ -141,28 +135,15 @@ def _robust_plane(points, tolerance):
     return normal, offset, residuals, active
 
 
-def _array_hash(value):
-    return sha256(np.asarray(value).tobytes()).hexdigest()
-
-
-def _combined_hash(first, second):
-    return sha256((first + second).encode("ascii")).hexdigest()
-
-
 class OpusMugSupportGrounder:
     """Request one visible mug-base/support pixel from a single RGB frame."""
 
     def __init__(self, client, model, *, camera="head_camera"):
-        if not callable(getattr(getattr(client, "messages", None), "create", None)):
-            raise ValueError("anthropic_messages_client_required")
-        if not isinstance(model, str) or not model:
-            raise ValueError("anthropic_model_required")
+        require_messages_client(client, model)
         if camera != "head_camera":
             raise ValueError("mug_support_requires_head_camera")
         self.client, self.model, self.camera = client, model, camera
-        prompt_path = (Path(__file__).resolve().parents[1] / "prompts"
-                       / "mug_support_grounding.md")
-        self.system_prompt = prompt_path.read_text(encoding="utf-8")
+        self.system_prompt = read_prompt("mug_support_grounding.md")
 
     @staticmethod
     def _tool_schema():
@@ -179,41 +160,25 @@ class OpusMugSupportGrounder:
                 "additionalProperties": False}}
 
     def locate(self, observation):
-        from PIL import Image
-
-        image = observation.images.get(self.camera)
-        if image is None:
-            raise ValueError("mug_support_camera_unavailable")
-        image = np.asarray(image)
-        if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
-            raise ValueError("mug_support_requires_uint8_rgb")
+        image = rgb_view(observation, self.camera,
+                         missing_error="mug_support_camera_unavailable",
+                         format_error="mug_support_requires_uint8_rgb")
         height, width = image.shape[:2]
-        stream = BytesIO()
-        Image.fromarray(image).save(stream, format="PNG", optimize=True)
-        png = stream.getvalue()
-        tool = self._tool_schema()
-        response = self.client.messages.create(model=self.model, max_tokens=250,
-            system=self.system_prompt, tools=[tool],
-            tool_choice={"type": "tool", "name": tool["name"]},
-            messages=[{"role": "user", "content": [
+        result = request_tool_input(
+            self.client, model=self.model, max_tokens=250, system=self.system_prompt,
+            tool=self._tool_schema(), content=[
                 {"type": "text", "text": (
                     f"Camera={self.camera}; observation={observation.sequence}; "
                     f"image={width}x{height} pixels.")},
-                {"type": "image", "source": {"type": "base64",
-                    "media_type": "image/png",
-                    "data": base64.b64encode(png).decode("ascii")}}]}])
-        result = next((item.input for item in response.content
-                       if getattr(item, "type", None) == "tool_use"
-                       and getattr(item, "name", None) == tool["name"]), None)
+                image_block(png_bytes(image))])
         if not isinstance(result, dict) or type(result.get("visible")) is not bool:
             raise ValueError("mug_support_structured_result_invalid")
-        confidence = _number(result.get("confidence"), "mug_support_confidence_invalid")
-        if not 0 <= confidence <= 1:
-            raise ValueError("mug_support_confidence_invalid")
+        confidence = unit_interval(result.get("confidence"), "mug_support_confidence_invalid")
         report = {"status": "grounded" if result["visible"] else "not_detected",
             "camera": self.camera, "observation_sequence": observation.sequence,
             "image_shape_px": [height, width], "confidence": confidence,
-            "description": _description(result.get("description"))}
+            "description": bounded_text(result.get("description"), 400,
+                                        "mug_support_description_invalid")}
         pixel = result.get("support_pixel")
         if not result["visible"]:
             if pixel is not None:
@@ -299,21 +264,3 @@ class MugLiftEvidenceTracker:
     def _store(self, result):
         self._last_result = result
         return dict(result)
-
-
-def _number(value, error):
-    if isinstance(value, (bool, np.bool_)):
-        raise ValueError(error)
-    try:
-        result = float(value)
-    except (TypeError, ValueError, OverflowError):
-        raise ValueError(error) from None
-    if not np.isfinite(result):
-        raise ValueError(error)
-    return result
-
-
-def _description(value):
-    if not isinstance(value, str):
-        raise ValueError("mug_support_description_invalid")
-    return value[:400]

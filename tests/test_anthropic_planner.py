@@ -11,7 +11,7 @@ from harness.planner.base import PlannerContext
 from harness.planner.prompt_builder import user_content, public_result
 from harness.planner.response_parser import parse_response, InvalidPlannerResponse
 from harness.predicates.base import PredicateResult
-from harness.skill_orchestrator import SkillOrchestrator
+from harness.runtime.orchestrator import SkillOrchestrator
 from harness.skills.schemas import TrackingError
 from tests.helpers import images
 from tests.test_skills import setup_runtime, COMMAND

@@ -8,7 +8,7 @@ import numpy as np
 from harness.perception.anchors import Anchor
 from harness.perception.observations import ObservationStore
 from harness.planner.scripted import GraspRetryPlanner, GraspRetrySettings
-from harness.skill_orchestrator import SkillOrchestrator
+from harness.runtime.orchestrator import SkillOrchestrator
 from harness.predicates.hanging_mug import HangingMugPredicates
 from harness.predicates.registry import PredicateRegistry
 from tests.test_analytic_skills import (AnalyticEnvironment, EndpointLagEnvironment,
@@ -581,7 +581,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual((run.calls, worker.chunks), (1, 0))
 
     def test_rack_pixel_reselection_feedback_is_rack_specific(self):
-        from harness.skill_orchestrator import grounding_reselection_feedback
+        from harness.runtime.orchestrator import grounding_reselection_feedback
         message = grounding_reselection_feedback("rack_approach")
         self.assertIn("hanger or support bar", message)
         self.assertIn("background", message)

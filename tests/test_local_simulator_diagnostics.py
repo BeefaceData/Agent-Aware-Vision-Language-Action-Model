@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from development.local_simulator import LocalSimulator
+from development.simulator.local_simulator import LocalSimulator
 from harness.environment.local import LocalEnvironmentClient
 
 
@@ -56,7 +56,7 @@ class LocalSimulatorDiagnosticsTests(unittest.TestCase):
     def test_step_logs_action_and_observation_boundaries_with_durations(self):
         events = []
         instance = simulator(Task(), events.append)
-        with patch("run_inference_chunked.observation_of", return_value={"rgb": True}):
+        with patch("harness.environment.robotwin.observation_of", return_value={"rgb": True}):
             observation, timings = instance("local", 0, "/step", {"action": [0.0] * 14})
 
         self.assertEqual(observation, {"rgb": True})
@@ -77,7 +77,7 @@ class LocalSimulatorDiagnosticsTests(unittest.TestCase):
     def test_action_exception_is_logged_without_sensitive_exception_text(self):
         events = []
         instance = simulator(Task(RuntimeError("private diagnostic detail")), events.append)
-        with patch("run_inference_chunked.observation_of") as observe:
+        with patch("harness.environment.robotwin.observation_of") as observe:
             with self.assertRaisesRegex(RuntimeError, "private diagnostic detail"):
                 instance("local", 0, "/step", {"action": [0.0] * 14})
         observe.assert_not_called()
@@ -92,7 +92,7 @@ class LocalSimulatorDiagnosticsTests(unittest.TestCase):
             raise OSError("disk detail")
 
         instance = simulator(Task(), broken_sink)
-        with patch("run_inference_chunked.observation_of", return_value={"rgb": True}):
+        with patch("harness.environment.robotwin.observation_of", return_value={"rgb": True}):
             instance("local", 0, "/step", {"action": [0.0] * 14})
         self.assertEqual(len(instance.task.actions), 1)
 

@@ -6,14 +6,14 @@ import unittest
 
 import numpy as np
 
-from development.acquisition_entry import AcquisitionEntry, replay_entry, HistoryPrimedVLA
+from development.checkpoints.acquisition_entry import AcquisitionEntry, replay_entry, HistoryPrimedVLA
 from harness.evaluation.manifest import runtime_identity
 from harness.planner.scripted import GraspRetryPlanner, GraspRetrySettings
 from harness.predicates.hanging_mug import HangingMugPredicates
 from harness.predicates.registry import PredicateRegistry
 from harness.perception.observations import ObservationStore
-from harness.skill_orchestrator import SkillOrchestrator
-from tests.test_analytic_skills import executor, evidence
+from harness.runtime.orchestrator import SkillOrchestrator
+from tests.test_analytic_skills import executor
 from tests.test_skill_orchestrator import AcquisitionEnvironment
 
 

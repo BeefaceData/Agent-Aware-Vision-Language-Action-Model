@@ -3,7 +3,7 @@
 import numpy as np
 
 from harness.perception.geometry import bounded_pose_waypoints, pose7, pose_error
-from harness.skill_executor import SkillStopped, TickExecutor, validate_trajectory
+from harness.skills.motion import SkillStopped, TickExecutor, validate_trajectory
 from .schemas import TrackingError
 
 

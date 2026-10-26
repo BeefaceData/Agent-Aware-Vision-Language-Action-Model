@@ -5,7 +5,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from harness.assessment_log import AssessmentLogger
+from harness.legacy.assessment_log import AssessmentLogger
 from tests.helpers import assessment
 
 

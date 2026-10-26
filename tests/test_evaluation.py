@@ -119,7 +119,7 @@ class EvaluationTests(unittest.TestCase):
     def test_invariant_check_blocks_motion_after_planner_returns(self):
         from harness.planner.base import PlannerSelection
         from harness.skills.schemas import SkillCommand
-        from harness.skill_orchestrator import SkillOrchestrator
+        from harness.runtime.orchestrator import SkillOrchestrator
         from tests.test_skills import setup_runtime, COMMAND
         class Planner:
             def select(self, context):

@@ -13,7 +13,7 @@ import numpy as np
 
 from .anchors import Anchor, AnchorRegistry
 from .geometry import pose7
-from .rgbd import RGBDCamera
+from .rgbd import RGBDCamera, calibration_sha256
 from harness.predicates.base import PredicateResult
 
 
@@ -407,11 +407,7 @@ class RGBDPerceptionProvider:
         frame = (observation.camera_frames or {}).get("head_camera")
         if expected is None or frame is None:
             return False
-        from hashlib import sha256
-        digest = sha256()
-        digest.update(np.asarray(frame.intrinsic, dtype=np.float64).tobytes())
-        digest.update(np.asarray(frame.world_to_camera, dtype=np.float64).tobytes())
-        return digest.hexdigest() == expected
+        return calibration_sha256(frame) == expected
 
     def _set_detector_rack_reference(self, initialized):
         configure = getattr(self.detector, "set_static_rack_reference", None)
@@ -583,16 +579,10 @@ class RGBDPerceptionProvider:
             shape_matches = (image is not None
                              and list(np.asarray(image).shape[:2]) == reference["image_shape_px"])
             frame = (observation.camera_frames or {}).get("head_camera")
-            calibration_matches = True
             expected_calibration = reference.get("camera_calibration_sha256")
-            if expected_calibration is not None and frame is not None:
-                from hashlib import sha256
-                digest = sha256()
-                digest.update(np.asarray(frame.intrinsic, dtype=np.float64).tobytes())
-                digest.update(np.asarray(frame.world_to_camera, dtype=np.float64).tobytes())
-                calibration_matches = digest.hexdigest() == expected_calibration
-            elif expected_calibration is not None:
-                calibration_matches = False
+            calibration_matches = (expected_calibration is None
+                                   or (frame is not None
+                                       and calibration_sha256(frame) == expected_calibration))
             valid = bool(shape_matches and calibration_matches)
             if not valid:
                 self._set_detector_rack_reference(False)

@@ -4,7 +4,7 @@ from typing import Annotated
 from pydantic import Field, StrictBool, StrictInt, model_validator
 from harness.schemas import Model
 from harness.memory.base import Name
-from harness.skill_config import RunSettings
+from harness.runtime.settings import RunSettings
 
 
 class Variant(Model):

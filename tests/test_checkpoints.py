@@ -13,12 +13,12 @@ from unittest.mock import patch
 import numpy as np
 from pydantic import ValidationError
 
-from development.capture_failures import capture_episode
-from development.checkpoint_bank import CheckpointBank, sha256
-from development.provenance import local_provenance
-from development.replay import ReplayEnvironment, load_prefix
-from development.schemas import FailureCheckpoint, ReplayOptions
-from harness.schemas import FailureType, TaskPhase
+from development.capture.failures import capture_episode
+from development.checkpoints.bank import CheckpointBank, sha256
+from development.checkpoints.provenance import local_provenance
+from development.checkpoints.replay import ReplayEnvironment, load_prefix
+from development.checkpoints.schemas import FailureCheckpoint, ReplayOptions
+from harness.legacy.schemas import FailureType, TaskPhase
 from tests.test_baseline_compatibility import FakeRuntime, run_fake
 
 
@@ -138,7 +138,7 @@ class CheckpointTests(unittest.TestCase):
     def test_restore_uses_complete_prefix_without_policy_calls(self):
         cp, _, original = self.capture()
         fresh = FakeRuntime()
-        with patch("run_inference_chunked.ModalPolicyClient", side_effect=AssertionError("must not query policy")):
+        with patch("harness.vla.modal_client.ModalPolicyClient", side_effect=AssertionError("must not query policy")):
             report = cp.restore(ReplayEnvironment(self.bank, fresh.sim))
         self.assertEqual(report.status, "matched")
         self.assertEqual(report.executed_steps, 5)
@@ -175,7 +175,7 @@ class CheckpointTests(unittest.TestCase):
     def test_provenance_mismatch_blocks_before_reset(self):
         cp, _, _ = self.capture()
         fresh = FakeRuntime()
-        with patch("development.replay.local_provenance", return_value={"different": True}):
+        with patch("development.checkpoints.replay.local_provenance", return_value={"different": True}):
             report = cp.restore(ReplayEnvironment(self.bank, fresh.sim))
         self.assertEqual(report.status, "unavailable")
         self.assertEqual(report.local_provenance, "mismatch")
@@ -203,13 +203,14 @@ class CheckpointTests(unittest.TestCase):
     def test_source_provenance_includes_real_simulator_config(self):
         # CPU tests must also run in a fresh clone without downloaded simulator assets.
         source_root = self.root / "source"
-        files = ("run_inference_chunked.py", "RoboTwin/env_cfg/task_config/demo_clean.yml",
+        files = ("run_inference_chunked.py", "harness/environment/robotwin.py",
+                 "RoboTwin/env_cfg/task_config/demo_clean.yml",
                  "RoboTwin/envs/_base_task.py", "RoboTwin/assets/embodiments/aloha-agilex/config.yml")
         for relative in files:
             path = source_root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(relative)
-        with patch("development.provenance.ROOT", source_root):
+        with patch("development.checkpoints.provenance.ROOT", source_root):
             paths = local_provenance()["source_hashes"]
         self.assertEqual(paths, {relative: sha256(source_root / relative) for relative in files})
 
@@ -251,7 +252,7 @@ class CheckpointTests(unittest.TestCase):
     def test_bank_cli_list_show_verify_label_and_help_without_services(self):
         cp, _, _ = self.capture()
         for command in ("list", "show", "verify", "label"):
-            args = [sys.executable, "-m", "development.checkpoint_bank", command]
+            args = [sys.executable, "-m", "development.checkpoints.bank", command]
             if command != "list":
                 args.append(cp.checkpoint_id)
             args += ["--path", str(self.bank.path)]
@@ -260,7 +261,7 @@ class CheckpointTests(unittest.TestCase):
             result = subprocess.run(args, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(json.loads(result.stdout))
-        for module in ("capture_failures", "replay"):
+        for module in ("capture.failures", "checkpoints.replay"):
             result = subprocess.run([sys.executable, "-m", f"development.{module}", "--help"], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 

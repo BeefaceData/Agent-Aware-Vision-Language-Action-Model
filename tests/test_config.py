@@ -3,8 +3,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from harness.config import load_config
-from harness.skill_config import RunSettings
+from harness.legacy.config import load_config
+from harness.runtime.settings import RunSettings
 
 
 class ConfigTests(unittest.TestCase):

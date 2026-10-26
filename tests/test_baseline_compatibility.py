@@ -5,6 +5,8 @@ import csv
 import io
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -12,7 +14,7 @@ from unittest.mock import patch
 import numpy as np
 
 import run_inference_chunked as runner
-from harness.orchestrator import PassThroughHarness
+from harness.legacy.pass_through import PassThroughHarness
 from tests.helpers import config, images
 
 
@@ -158,6 +160,13 @@ class BaselineCompatibilityTests(unittest.TestCase):
             self.assertEqual(len(list(harness.trace_dir.glob("episode_*/trace.jsonl"))), 2)
             other = PassThroughHarness(config(td))
             self.assertNotEqual(other.run_id, harness.run_id)
+
+    def test_baseline_runner_does_not_load_runtime_validation_stack(self):
+        # The frozen baseline shares RoboTwin/Modal helpers with the harness but
+        # must stay runnable with only the simulator/policy dependencies.
+        code = "import sys, run_inference_chunked; sys.exit('pydantic' in sys.modules)"
+        result = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1])
+        self.assertEqual(result.returncode, 0)
 
     def test_original_identity_hook_still_works(self):
         action = np.arange(14, dtype=np.float32)

@@ -3,9 +3,9 @@ import unittest
 
 from pydantic import ValidationError
 
-from harness.config import SafetyOptions
-from harness.safety import SafetyValidator
-from harness.schemas import DecisionType, SkillResult, TaskPhase
+from harness.legacy.config import SafetyOptions
+from harness.legacy.safety import SafetyValidator
+from harness.legacy.schemas import DecisionType, SkillResult, TaskPhase
 from harness.legacy.recovery_skills.retry_grasp import RetryGrasp
 from tests.helpers import decision
 from tests.skill_fixtures import registry_with_verified_skill, skill_decision

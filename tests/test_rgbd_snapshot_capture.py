@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from development.capture_rgbd_snapshot import capture
+from development.capture.rgbd_snapshot import capture
 from tests.helpers import images
 
 
@@ -24,7 +24,7 @@ class RGBDSnapshotCaptureTests(unittest.TestCase):
         })
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "capture"
-            with patch("development.local_simulator.LocalSimulator") as simulator_type:
+            with patch("development.simulator.local_simulator.LocalSimulator") as simulator_type:
                 simulator = simulator_type.return_value
                 simulator.return_value = (payload, {})
                 manifest = capture("RoboTwin", output, 3)

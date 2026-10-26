@@ -7,7 +7,8 @@ import json
 import math
 from pathlib import Path
 
-from harness.schemas import FailureType, Model, SkillResult, TaskPhase
+from harness.legacy.schemas import FailureType, SkillResult, TaskPhase
+from harness.schemas import Model
 
 
 class RecoverySkill(ABC):

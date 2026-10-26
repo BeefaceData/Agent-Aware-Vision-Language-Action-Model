@@ -21,13 +21,18 @@ RoboTwin's simulator assets. Run these commands from the repository:
 ```bash
 conda create -n robotwin python=3.10 -y
 conda activate robotwin
-python -m pip install -r requirements-sim.txt -r requirements-planner.txt 'modal>=1,<2'
+python -m pip install -r requirements/sim.txt -r requirements/planner.txt 'modal>=1,<2'
 git clone https://github.com/RoboTwin-Platform/RoboTwin.git RoboTwin
 git -C RoboTwin checkout ea8b21121ebb3cd201ff5b3fe361944ac94eda3f
 git -C RoboTwin apply ../patches/robotwin-renderer.patch
 (cd RoboTwin && bash scripts/_download_assets.sh)
 git clone --branch v0.7.8 https://github.com/NVlabs/curobo.git RoboTwin/envs/curobo
 git -C RoboTwin/envs/curobo checkout d64c4b005459db10c5dd867d8b30a87d5bda9bdb
+# CUDA 12.1 nvcc rejects gcc > 12. Pin the env's build tools once (needs g++-12);
+# set TORCH_CUDA_ARCH_LIST to your GPU's compute capability.
+conda env config vars set CUDA_HOME="$CONDA_PREFIX" CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 \
+  CUDAHOSTCXX=/usr/bin/g++-12 NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++-12" TORCH_CUDA_ARCH_LIST=8.6
+conda activate robotwin
 python -m pip install -e RoboTwin/envs/curobo --no-build-isolation
 python -m pip install warp-lang==1.12.0
 ```
@@ -40,13 +45,13 @@ Deploy the frozen policy worker:
 
 ```bash
 modal setup
-modal deploy modal_policy_chunked.py
+modal deploy modal_apps/policy.py
 ```
 
 For Anthropic planning, export `ANTHROPIC_API_KEY` in your environment. Never
 commit it. For optional SAM 3 perception, request gated Hugging Face model
 access, configure a Modal secret named `huggingface` with `HF_TOKEN`, then run
-`modal deploy modal_sam3.py`. SAM 3 dependencies and weights stay on the Modal
+`modal deploy modal_apps/sam3.py`. SAM 3 dependencies and weights stay on the Modal
 T4 worker, separate from the local simulator.
 
 ## Run and test
@@ -61,7 +66,7 @@ One bounded scripted exploration episode:
 
 ```bash
 python run_exploration.py --config configs/explore_natural_acquisition.yaml \
-  --output data/runs/acquisition_01
+  --development-oracle --output data/runs/acquisition_01
 ```
 
 One Anthropic development episode with public RGB-D perception:

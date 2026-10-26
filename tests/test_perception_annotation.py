@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from development.annotate_rgbd import encode_mask_rle, polygon_mask
+from development.capture.annotate_rgbd import encode_mask_rle, polygon_mask
 from harness.perception.replay import decode_mask_rle
 
 

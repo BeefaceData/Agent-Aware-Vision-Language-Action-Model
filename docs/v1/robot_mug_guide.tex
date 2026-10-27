@@ -540,7 +540,7 @@ picks it up and hangs it on the rack. You can only go forward to the next chapte
   \draw[flow,line width=1.3pt] (g) -- (h);
   \draw[flow,line width=1.3pt] (h) -- (k);
   \node[pill=sun,font=\scriptsize] (m1) at ($(g.south)!0.5!(h.south)+(0,-0.75)$) {\code{mug_lifted} = true};
-  \node[pill=sun,font=\scriptsize,align=center] (m2) at ($(h.south)!0.5!(k.south)+(0,-0.95)$) {\code{mug_staged_on_table} or\\\code{left_transfer_complete} = true};
+  \node[pill=sun,font=\scriptsize,align=center] (m2) at ($(h.south)!0.5!(k.south)+(0,-0.95)$) {\code{handoff_confirmed} or\\\code{right_mug_lifted} = true};
   \draw[sun,thick,dotted] (m1.north) -- ($(g.east)!0.5!(h.west)$);
   \draw[sun,thick,dotted] (m2.north) -- ($(h.east)!0.5!(k.west)$);
   \node[pill=leaf,right=7mm of k,font=\scriptsize] (ts) {\code{task_success}};
@@ -552,8 +552,10 @@ picks it up and hangs it on the rack. You can only go forward to the next chapte
 \begin{keyidea}
 A \textbf{true public milestone} sets the minimum phase. When the cameras cannot tell (the
 answer is \code{null}), Opus may move the phase forward by its own visual judgement, but only
-\textbf{one step per turn}. The hang phase additionally needs the staged-mug milestone.
-See \srcref{harness/planner/anthropic.py:294} (\code{_public_phase_floor}) and \code{_resolve_phase}.
+\textbf{one step per turn}. Handoff starts once the mug is lifted (or already staged or
+transferred). Hang needs proof that the \emph{right} arm actually has the mug
+(\code{handoff_confirmed} or \code{right_mug_lifted}); a mug merely placed on the table is not enough.
+See \srcref{harness/planner/anthropic.py:372} (\code{_public_phase_floor}) and \code{_resolve_phase}.
 \end{keyidea}
 
 % ================================================================ 5
@@ -580,7 +582,7 @@ Every episode is a loop of \textbf{turns}. One turn = look, decide, check, do, r
   \draw[flow] (f) to[bend left=15] (a);
   \node[align=center,font=\small] at (0,0) {\textbf{one turn}\\[2pt]\scriptsize repeat until\\\scriptsize success, abort\\\scriptsize or budget ends};
 \end{tikzpicture}
-\caption{The turn loop, implemented in \code{SkillOrchestrator.run} (\srcref{harness/runtime/orchestrator.py:219}).}
+\caption{The turn loop, implemented in \code{SkillOrchestrator.run} (\srcref{harness/runtime/orchestrator.py:224}).}
 \end{figure}
 
 \subsection{A concrete example: one turn in plain English}
@@ -638,7 +640,7 @@ then receives another snapshot. This is why the guide calls the system a \textbf
   \draw[flow] (q4) -- node[lbl,above]{yes} (done);
   \draw[flow] (q4) -- node[lbl,right]{no} (next);
 \end{tikzpicture}
-\caption{Turn outcome decisions. ``Recoverable'' failures are a short, explicit list in \code{recovery_flags} (\srcref{harness/runtime/orchestrator.py:143}).}
+\caption{Turn outcome decisions. ``Recoverable'' failures are a short, explicit list in \code{recovery_flags} (\srcref{harness/runtime/orchestrator.py:144}).}
 \end{figure}
 
 The recoverable failures are: a move that was rejected \emph{before} moving, a move that moved but
@@ -703,14 +705,17 @@ Skill & What it does & Arms & Limits \\
   \draw[decorate,decoration={brace,amplitude=5pt,mirror},thick] (1.1,-0.8) -- (5.9,-0.8) node[midway,below=6pt,font=\scriptsize] {executed one by one, checked after each};
   \draw[decorate,decoration={brace,amplitude=5pt,mirror},thick,stone] (6.1,-0.8) -- (8.9,-0.8) node[midway,below=6pt,font=\scriptsize,text=stone] {stale tail discarded};
 \end{tikzpicture}
-\caption{One chunk. After every action the code checks the stop predicate, arm-to-arm contact and
-the task checker. Unused actions are thrown away, never executed later (\srcref{harness/skills/vla_act.py:159}).}
+\caption{One chunk. After every action the code checks arm-to-arm contact, the task checker and
+cheap stop predicates. Camera-based checks (SAM~3, Opus) run once, when the call hands control back
+to the planner. Unused actions are thrown away, never executed later (\srcref{harness/skills/vla_act.py:165}).}
 \end{figure}
 
 \begin{keyidea}
-\textbf{Feedback boundary.} In Opus mode each \code{vla_act} call ends after
-\code{planner_feedback_chunks} chunks (normally 1). The coach then sees new pictures and decides
-again. When RoboTwin's checker first reports success, the policy may finish a fixed 16-action
+\textbf{Feedback boundary.} In Opus mode the policy first gets an uninterrupted window at the start
+of each phase (full-task config: 64 actions for grasp, 128 for handoff, 64 for hang, set by
+\code{anthropic.*_initial_feedback_after_actions}). After that, each \code{vla_act} call ends after
+\code{planner_feedback_chunks} chunks (normally 1 chunk of 16 actions). The coach then sees new
+pictures and decides again. When RoboTwin's checker first reports success, the policy may finish a fixed 16-action
 follow-through so the gripper can let go cleanly (\code{NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS}).
 \end{keyidea}
 
@@ -758,7 +763,7 @@ follow-through so the gripper can let go cleanly (\code{NATIVE_SUCCESS_FOLLOW_TH
   \node[zone=rose,minimum width=5.0cm,minimum height=4.5cm,label={[font=\small\bfseries,text=rose]above:Private (simulator only)}] (pri) at (7.9,0) {};
   \node[box=leaf,text width=2.9cm] at (-1.8,1.25) {camera pictures};
   \node[box=leaf,text width=2.9cm] at (1.8,1.25) {depth and\\calibration};
-  \node[box=leaf,text width=2.9cm] at (-1.8,0.1) {arm joint readings};
+  \node[box=leaf,text width=2.9cm] at (-1.8,0.1) {arm joint readings,\\gripper (TCP) poses};
   \node[box=leaf,text width=2.9cm] at (1.8,0.1) {perception\\predicates};
   \node[box=sky] (op) at (0,-1.4) {\faBrain\ Opus sees only this side};
   \node[box=rose,text width=3.6cm] at (7.9,1.25) {exact mug pose};
@@ -778,7 +783,7 @@ that \code{rack_seat_aligned} is \code{true}.
 The planner enforces this before anything moves:
 
 \needspace{13\baselineskip}
-\begin{lstlisting}[firstnumber=181,caption={\srcref{harness/planner/anthropic.py:181}}]
+\begin{lstlisting}[firstnumber=236,caption={\srcref{harness/planner/anthropic.py:236}}]
 release_authorized = self._public_predicate_true(context, "release_ready")
 rack_seat_authorized = (vla_phase == "hang" and
     self._public_predicate_true(context, "rack_seat_aligned"))
@@ -798,6 +803,7 @@ if (not release_allowed and
   \item \textbf{Anchors expire.} A target is valid only for the observation it was computed from.
   \item \textbf{Arm contact recovery is narrow}: right hand moves 3--10\,cm away, at most 2 retreats and 3 incidents.
   \item \textbf{Grounding retries are limited}: a rejected pixel can be re-chosen at most twice, the second time from a different camera.
+  \item \textbf{Losing sight is not a reason to stop}: if the cameras lose the mug and table (or mug and rack while hanging) during a policy phase, the runtime itself continues the policy for one bounded chunk and looks again, instead of letting Opus abort (\code{_perception_gap_vla_continuation} in \code{planner/anthropic.py}).
   \item \textbf{Logs never contain secrets} or raw provider text; only short error codes.
 \end{itemize}
 
@@ -860,7 +866,7 @@ return tuple(float(value) for value in world[:3] / world[3])
 
 \begin{itemize}
   \item \textbf{SAM 3} (\code{harness/perception/modal_sam3.py}) draws masks. Mask confidence floors: mug 0.40, rack 0.60 (0.18 with the exploration prompt ``mug rack''), table 0.60.
-  \item \textbf{Opus keypoints} (\code{opus_frame.py}) give three ordered points on the rack peg or the mug handle; three points define a little 3D coordinate frame.
+  \item \textbf{Opus keypoints} (\code{opus_frame.py}) give three ordered points on the rack peg or the mug handle; three points define a little 3D coordinate frame. The points are turned into 3D with depth alone (each must sit on a smooth depth surface); no SAM mask is needed (\texttt{ground\_public\_\allowbreak object\_frame\_rgbd}).
   \item \textbf{Opus support pixel} (\code{table_plane.py}) marks the bottom of the mug, used to measure lift height.
 \end{itemize}
 
@@ -907,7 +913,9 @@ return tuple(float(value) for value in world[:3] / world[3])
 \begin{changeit}
 Lift thresholds are constructor arguments: \code{lifted_distance_m=0.04},
 \code{table_distance_m=0.025}, \code{consecutive_observations=2} in
-\code{harness/perception/table_plane.py}. Mask confidence floors are
+\code{harness/perception/table_plane.py}. The first lift check waits until the policy has run
+\code{perception.mug_lift_first_check_after_actions} actions (64 in the full-task config); before
+that the answer is \code{null}. Mask confidence floors are
 \code{MUG_MASK_MIN_CONFIDENCE} and \code{EXPLORE_RACK_MASK_MIN_CONFIDENCE} in
 \code{harness/runtime/assembly.py}. Prompts for Opus perception live in \code{harness/prompts/}.
 \end{changeit}
@@ -1062,7 +1070,8 @@ planner = assembly.build_planner(args.planner, settings, planner_settings=planne
                                  pixel_grounding=args.planner_pixel_grounding)
 simulator = LocalSimulator(args.robotwin_root.resolve(), rgbd_enabled=...)
 environment = open_environment(simulator, video=video, frozen=frozen)
-environment.reset(args.seed)  # Exactly one reset, owned by this runner.
+initial_observation = environment.reset(args.seed)  # Exactly one reset, owned by this runner.
+require_camera_frames(initial_observation, required_cameras)  # RGB-D runs: needed cameras present
 
 if settings.perception.opus_rack_grounding:          # optional: ground the rack once
     rack_frame_cache, rack_grounding = assembly.initialize_rack_frame(...)
@@ -1125,7 +1134,7 @@ the executor. Unknown fields are rejected (\code{extra="forbid"}).
 
 \subsection{The heart of the turn loop}
 \needspace{12\baselineskip}
-\begin{lstlisting}[numbers=none,caption={\srcref{harness/runtime/orchestrator.py:259} (abridged)}]
+\begin{lstlisting}[numbers=none,caption={\srcref{harness/runtime/orchestrator.py:268} (abridged)}]
 selection = self.planner.select(PlannerContext(turn, observation.copy(), predicates, ...))
 command = SkillCommand.model_validate(selection.command.model_dump())
 self.log({**base, "event_type": "planner_selection", ...})   # intent logged before motion
@@ -1142,7 +1151,7 @@ flags = recovery_flags(previous)        # known, recoverable failure types
 
 \subsection{Playing a policy chunk}
 \needspace{12\baselineskip}
-\begin{lstlisting}[numbers=none,caption={\srcref{harness/skills/vla_act.py:62} (abridged)}]
+\begin{lstlisting}[numbers=none,caption={\srcref{harness/skills/vla_act.py:68} (abridged)}]
 while context.chunks < (success_chunk_limit or configured_chunk_limit):
     observation = env.observe()
     context.chunks += 1                          # failed requests also count
@@ -1168,7 +1177,7 @@ I want to\ldots & Do this \\
 \midrule
 change what Opus is told & Edit \code{harness/prompts/common.md} or \code{full_task.md}. The prompt hash in \code{manifest.json} changes, so old and new runs stay distinguishable. \\
 change budgets or chunk sizes & Edit the YAML in \code{configs/} (\code{budget:}, \code{anthropic.vla:}). No code change. \\
-get feedback after more chunks & \code{anthropic.planner_feedback_chunks} (1--4) in the config. \\
+get feedback after more chunks & \code{anthropic.planner_feedback_chunks} (1--4) in the config; the first window of each phase is \code{anthropic.<phase>_initial_feedback_after_actions}. \\
 use another segmentation model & Write a factory returning an object with \code{detect(images, *, observation_sequence)} and pass \opt{perception-factory pkg.module:factory}. \\
 add a new planner & Implement \code{select}, register it in \code{assembly.build_planner}, add a CLI choice in \code{run_skills.build_parser}. \\
 use another policy backend & Implement \code{reset_history()} and \code{infer(observation, n)} (\code{harness/vla/base.py}). \\
@@ -1200,6 +1209,7 @@ perception:
   rgbd_enabled: true            # capture depth + calibration
   opus_rack_grounding: true     # ground the rack once at reset
   opus_mug_lift_grounding: true # table-plane lift evidence
+  mug_lift_first_check_after_actions: 64  # no lift check before this
   rack_grounding_camera: right_camera
   rack_prompt_profile: explore_mug_rack
 budget:
@@ -1210,8 +1220,11 @@ budget:
 anthropic:
   model: claude-opus-5          # explicit; there is no fallback model
   task_scope: full_task         # grasp -> handoff -> hang
-  planner_feedback_chunks: 1    # Opus looks again after every chunk
-  vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 768}
+  planner_feedback_chunks: 1    # after the first window, Opus looks after every chunk
+  grasp_initial_feedback_after_actions: 64     # uninterrupted policy actions
+  handoff_initial_feedback_after_actions: 128  #   at the start of each phase
+  hang_initial_feedback_after_actions: 64
+  vla: {max_chunks: 32, chunk_size: 16, max_policy_actions: 768}
 \end{lstlisting}
 
 \begin{center}

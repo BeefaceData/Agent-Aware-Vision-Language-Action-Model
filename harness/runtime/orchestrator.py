@@ -134,8 +134,9 @@ def turn_failure(command, result, post):
 
 def stop_confirmed(command, result, post):
     """Whether the requested VLA stop condition holds after the call."""
+    # A bounded VLA segment that ends at its chunk boundary returns control
+    # to the planner even when the selected stop predicate is still unknown.
     budget_stop = (command.action == SkillType.VLA_ACT
-                   and command.stop == "chunk_budget_exhausted"
                    and result.stop_reason == "chunk_budget_exhausted")
     return budget_stop or predicate_true(post, command.stop)
 
@@ -173,6 +174,10 @@ class SkillOrchestrator:
 
     def _predicates(self, observation):
         executor = self.executor
+        update_action_count = getattr(
+            getattr(executor.predicates, "perception", None), "set_policy_action_count", None)
+        if callable(update_action_count):
+            update_action_count(getattr(executor, "executed_policy_actions", 0))
         # Acquisition accepts either arm because Neotix drives both. Opening
         # permission is checked by the skill again for its selected arm.
         names = BASE_PREDICATES
@@ -227,6 +232,7 @@ class SkillOrchestrator:
         grounding_feedback = None
         grounding_camera_to_avoid = None
         grounding_reselections = 0
+        next_observation = None
         phase, outcome, error_type = "APPROACH_MUG", "planner_turn_budget_exhausted", None
         success = None
         milestone = False
@@ -235,7 +241,10 @@ class SkillOrchestrator:
         try:
             for turn in range(1, self.max_turns + 1):
                 self.invariant_check()
-                observation = executor.environment.observe()
+                # Reuse the last feedback frame until motion occurs; this keeps
+                # boundary-only perception from being repeated in the same state.
+                observation = next_observation or executor.environment.observe()
+                next_observation = None
                 success = executor.environment.native_success
                 perception = getattr(executor.predicates, "perception", None)
                 configure_phase = getattr(perception, "set_task_phase", None)
@@ -295,6 +304,7 @@ class SkillOrchestrator:
                         "grounding_reselections": grounding_reselections,
                         "task_success": success, "milestone_reached": False})
                     if can_reselect:
+                        next_observation = observation
                         grounding_feedback, grounding_camera_to_avoid = reselection_feedback(
                             command, grounding_reselections)
                         continue
@@ -313,6 +323,7 @@ class SkillOrchestrator:
                 if not previous.execution_uncertain:
                     after = executor.environment.observe()
                     after_ref, post = self.save_observation(after), self._predicates(after)
+                    next_observation = after
                 confirmed = previous.completed and not previous.execution_uncertain
                 acquired |= confirmed and predicate_true(post, "mug_lifted")
                 milestone = confirmed and predicate_true(post, self.completion_predicate)

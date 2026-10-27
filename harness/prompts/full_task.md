@@ -9,8 +9,14 @@ Declare `task_phase=grasp` while the left arm is acquiring and lifting the cup.
 Declare `task_phase=handoff` while the VLA places the cup on the table and
 coordinates the left-arm withdrawal with the right-arm approach. A true public
 `mug_lifted` result sets the minimum phase to handoff. A true public
-`mug_staged_on_table`, `left_transfer_complete`, or `task_success` sets the
-minimum phase to hang. Do not wait for a separate left-arm-clear predicate; the
+`mug_staged_on_table` or `left_transfer_complete` result confirms left-arm
+transfer progress but keeps the planner in HANDOFF. Only `right_mug_lifted`,
+`handoff_confirmed`, or `task_success` sets the minimum phase to hang. The
+`right_mug_lifted` predicate must associate the raised mug with the measured
+right TCP; height above the table alone is insufficient. If arm attribution is
+ambiguous, remain in HANDOFF and let the VLA continue with bounded feedback.
+Once a public milestone advances the phase, retain that phase through later camera occlusion. Do not wait for a
+separate left-arm-clear predicate; the
 VLA owns the complete bimanual handoff and transition into right-arm pickup. If
 a public predicate is unknown, use current images and prior public results to
 assess progress. Advance at most one phase per planner turn unless a true public
@@ -65,8 +71,13 @@ The sole cached-rack exception is RELEASE with
 measured alignment with the grounded target, not physical contact. Do not infer
 an empty hand or support from commanded gripper value.
 Use the fixed tool set only. Stop when the public runtime reports
-`task_success`; if the images remain ambiguous or the task cannot be completed
-within the remaining budgets, choose ABORT.
+`task_success`. If the mug and table are both undetected during handoff, or the
+mug and rack are both undetected during hang, continue with one bounded VLA_ACT
+chunk at each feedback boundary while budgets remain and no hard safety
+condition is active. The runtime enforces this continuation. Do not switch to
+analytic motion without grounded targets, and do not treat continuation as
+success. Abort only for a hard safety condition or when the action/chunk budget
+is exhausted without confirmed task success.
 
 When `pixel_grounding_required` is true, MOVE_TO `mug_pregrasp` still needs a
 planner-selected normalized pixel from the current RGB view. A MOVE_TO

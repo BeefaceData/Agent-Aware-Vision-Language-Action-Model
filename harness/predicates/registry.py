@@ -15,6 +15,17 @@ class PredicateRegistry:
         self.perception = perception
         self.rack_seat_gate = rack_seat_gate
 
+    def feedback_boundary_predicates(self):
+        """Public image predicates are evaluated when control returns to planner.
+
+        Runtime safety predicates and the development-only temporal oracle stay
+        independently available; expensive RGB/RGB-D providers are never polled
+        after every policy action inside a chunk.
+        """
+        if self.perception is None:
+            return frozenset()
+        return PREDICATE_NAMES - {"task_success", "chunk_budget_exhausted"}
+
     def prime(self, observation, *, allow_oracle=False):
         """Capture the episode's lift reference before any skill moves."""
         if self.perception is not None or self.hanging_mug is not None:

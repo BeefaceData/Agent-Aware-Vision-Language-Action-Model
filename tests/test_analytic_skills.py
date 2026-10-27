@@ -492,3 +492,30 @@ class PredicateTests(unittest.TestCase):
         result = run.execute({"action": "vla_act", "stop": "mug_lifted"})
         self.assertEqual(result.stop_reason, "predicate_unavailable")
         self.assertEqual(worker.chunks, 0)
+
+    def test_public_perception_stop_is_not_polled_inside_a_vla_chunk(self):
+        from harness.predicates.base import PredicateResult
+
+        class PublicProvider:
+            source = "perception"
+
+            def __init__(self):
+                self.calls = 0
+
+            def evaluate(self, name, observation, *, arm="auto"):
+                self.calls += 1
+                return PredicateResult(name=name, value=False, source="perception",
+                    observation_sequence=observation.sequence, reason="test_public_frame")
+
+        provider = PublicProvider()
+        gates = PredicateRegistry(perception=provider)
+        run, worker, _ = executor(AnalyticEnvironment(), predicates=gates)
+        # Executor construction primes one reset observation. The VLA chunk
+        # must not issue another public perception query per action.
+        self.assertEqual(provider.calls, 1)
+        result = run.execute({"action": "vla_act", "stop": "mug_lifted",
+            "parameters": {"max_chunks": 1, "chunk_size": 4,
+                           "max_policy_actions": 4}})
+        self.assertEqual(result.executed_policy_actions, 4)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(worker.chunks, 1)

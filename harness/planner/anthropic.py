@@ -37,6 +37,11 @@ class AnthropicSettings(Model):
     # makes grasp assessment planner-driven rather than dependent on the
     # development-only temporal grasp oracle.
     planner_feedback_chunks: Annotated[StrictInt, Field(ge=1, le=4)] = 1
+    # Historical phase traces bound each initial uninterrupted policy window;
+    # after it, the configured planner-feedback chunk cadence applies.
+    grasp_initial_feedback_after_actions: Annotated[StrictInt, Field(ge=0, le=256)] = 0
+    handoff_initial_feedback_after_actions: Annotated[StrictInt, Field(ge=0, le=512)] = 0
+    hang_initial_feedback_after_actions: Annotated[StrictInt, Field(ge=0, le=256)] = 0
     # Compatibility with older oracle-gated configs; this no longer controls
     # the Opus planner's per-chunk feedback path.
     early_failure_arm: Literal["left", "right"] = "left"
@@ -51,6 +56,9 @@ class AnthropicPlanner:
         self.require_pixel_grounding = require_pixel_grounding
         self.prompt, self.prompt_hash = prompt_bundle(self.settings.task_scope)
         self.calls = self.attempts = 0
+        self._initial_policy_action_budget = None
+        self._feedback_phase = None
+        self._feedback_phase_start_action = 0
         self.inter_arm_recovery_active = False
         self.inter_arm_recovery_moves = 0
         self.inter_arm_contact_events = 0
@@ -120,6 +128,32 @@ class AnthropicPlanner:
         if (self.settings.unknown_milestone_policy == "abort_after_limit"
                 and self.unknown_vla_feedback >= self.settings.max_consecutive_unknown_vla_feedback):
             return self._abort("public_milestone_unknown_limit", metadata)
+        policy_budget_now = context.remaining_budget.get("policy_actions")
+        if self._initial_policy_action_budget is None and type(policy_budget_now) is int:
+            self._initial_policy_action_budget = policy_budget_now
+        executed_policy_actions = (max(0, self._initial_policy_action_budget-policy_budget_now)
+            if self._initial_policy_action_budget is not None and type(policy_budget_now) is int else 0)
+        if self._feedback_phase != vla_phase:
+            self._feedback_phase = vla_phase
+            self._feedback_phase_start_action = executed_policy_actions
+        phase_policy_actions = max(0, executed_policy_actions-self._feedback_phase_start_action)
+        initial_feedback_actions = getattr(
+            self.settings, f"{vla_phase}_initial_feedback_after_actions")
+        feedback_actions = vla_limits.max_chunks * vla_limits.chunk_size
+        if (self.settings.task_scope == "full_task"
+                and initial_feedback_actions > phase_policy_actions):
+            until_first_feedback = initial_feedback_actions-phase_policy_actions
+            vla_limits = vla_limits.model_copy(update={"max_chunks": min(
+                self.settings.vla.max_chunks,
+                max(vla_limits.max_chunks, (until_first_feedback + vla_limits.chunk_size-1)
+                    // vla_limits.chunk_size))})
+        feedback_actions = vla_limits.max_chunks * vla_limits.chunk_size
+        vla_limits = vla_limits.model_copy(update={"max_policy_actions": min(
+            vla_limits.max_policy_actions, feedback_actions)})
+        feedback_actions = vla_limits.max_policy_actions
+        metadata.update(executed_policy_actions=executed_policy_actions,
+                        phase_policy_actions=phase_policy_actions,
+                        planner_feedback_horizon_actions=feedback_actions)
         phase_stops = self._vla_stop_options(
             vla_phase, self.settings.task_scope, self._public_predicate_names(context))
         vla_available = (context.remaining_budget.get("vla_chunks", 1) > 0
@@ -142,6 +176,9 @@ class AnthropicPlanner:
         limits["recovery_basis"] = recovery_basis
         limits["inter_arm_recovery_active"] = self.inter_arm_recovery_active
         limits["inter_arm_recovery_moves_remaining"] = max(0, 2-self.inter_arm_recovery_moves)
+        perception_gap_vla_continuation = self._perception_gap_vla_continuation(
+            context, vla_phase, vla_available)
+        limits["perception_gap_vla_continuation"] = perception_gap_vla_continuation
         self.calls += 1  # Failed requests also consume a call.
         tick = time.perf_counter()
         try:
@@ -175,6 +212,24 @@ class AnthropicPlanner:
                                      if type(usage.get(key)) is int and usage[key] >= 0}
             parsed = parse_planner_response(response)
             command = parsed.command
+            if perception_gap_vla_continuation:
+                # When public perception loses the scene during a VLA-owned
+                # grasp/transfer/hang phase, continue the frozen policy one bounded
+                # chunk at a time. Do not let an ungrounded analytic action or
+                # an Opus abort turn perception loss into an early stop.
+                remaining_actions = context.remaining_budget.get("policy_actions")
+                chunk_actions = min(vla_limits.chunk_size, vla_limits.max_policy_actions)
+                if type(remaining_actions) is int:
+                    chunk_actions = min(chunk_actions, remaining_actions)
+                forced_limits = vla_limits.model_copy(update={
+                    "max_chunks": 1,
+                    "max_policy_actions": chunk_actions,
+                })
+                command = SkillCommand(action="vla_act", arm="both",
+                    parameters=forced_limits, stop="chunk_budget_exhausted",
+                    reason="Public scene perception is unavailable during a VLA-owned phase; continue one bounded chunk and reassess.")
+                metadata["perception_gap_vla_continuation_applied"] = True
+                metadata["perception_gap_chunk_actions"] = chunk_actions
             if (not analytic_skills_available
                     and command.action.value not in {"vla_act", "abort"}):
                 raise InvalidPlannerResponse("analytic_skill_not_recovery_eligible")
@@ -213,9 +268,10 @@ class AnthropicPlanner:
                               if context.previous is None else
                               self._resolve_phase(phase_before, public_phase, claimed_phase))
             if (self.settings.task_scope == "full_task" and selected_phase == "hang"
+                    and phase_before != "hang"
                     and not self._handoff_complete_confirmed(context)):
-                # A public staged-mug/transfer result remains the phase gate;
-                # only the extra arm-clearance predicate has been removed.
+                # Require public transfer evidence for the first transition,
+                # then retain the monotonic phase through later occlusion.
                 selected_phase = "handoff"
             phase_correction = selected_phase != claimed_phase
             self.active_phase = selected_phase
@@ -250,6 +306,8 @@ class AnthropicPlanner:
                 # a retryable miss, or a reason to use bounded analytic skills.
                 # No simulator-only grasp-failure predicate is injected here.
                 runtime_fields = {"max_chunks": vla_limits.max_chunks,
+                                  "chunk_size": vla_limits.chunk_size,
+                                  "max_policy_actions": vla_limits.max_policy_actions,
                                   "failure_arm": "left"}
                 if self.settings.task_scope == "full_task" and vla_phase == "grasp":
                     # Preserve the task sequence during initial left-arm pickup.
@@ -290,6 +348,26 @@ class AnthropicPlanner:
         return PlannerSelection(SkillCommand(action="abort", reason=reason),
                                 "FAILED", max(0, self.attempts-1), metadata)
 
+    def _perception_gap_vla_continuation(self, context, phase, vla_available):
+        """Continue one VLA chunk when perception is fully lost in a VLA phase."""
+        if (self.settings.unknown_milestone_policy != "continue_to_episode_cap"
+                or phase not in ("grasp", "handoff", "hang")
+                or (self.settings.task_scope == "acquisition" and phase != "grasp")
+                or not vla_available
+                or self.inter_arm_recovery_active
+                or self._public_predicate_true(context, "task_success")):
+            return False
+        previous = context.previous
+        if previous is not None and previous.skill.value != "vla_act":
+            # A non-VLA motion failure needs its own recovery assessment.
+            return False
+        visual_context = context.visual_context
+        status = visual_context.get("status") if isinstance(visual_context, dict) else None
+        if not isinstance(status, dict):
+            return False
+        required = ("mug", "rack") if phase == "hang" else ("mug", "table")
+        return all(status.get(name) in ("not_detected", "unknown") for name in required)
+
     @staticmethod
     def _public_phase_floor(context, task_scope="acquisition"):
         """Return the minimum phase proven by public milestones; ignore oracle values."""
@@ -297,11 +375,11 @@ class AnthropicPlanner:
             return "grasp"
         public = {item.name: item.value for item in context.predicates
                   if item.source in ("perception", "runtime") and item.value is True}
-        if (public.get("handoff_confirmed") or public.get("left_transfer_complete")
-                or public.get("task_success")
-                or public.get("mug_staged_on_table") is True):
+        if (public.get("handoff_confirmed") or public.get("right_mug_lifted")
+                or public.get("task_success")):
             return "hang"
-        if public.get("mug_lifted"):
+        if (public.get("mug_lifted") or public.get("mug_staged_on_table")
+                or public.get("left_transfer_complete")):
             return "handoff"
         return "grasp"
 
@@ -358,17 +436,20 @@ class AnthropicPlanner:
             return (("mug_lifted",) if cls._public_predicate_value(context, "mug_lifted") is None
                     else ())
         if phase == "handoff":
-            staged = cls._public_predicate_value(context, "mug_staged_on_table")
-            if staged is None:
-                return ("mug_staged_on_table",)
+            if (cls._public_predicate_true(context, "handoff_confirmed")
+                    or cls._public_predicate_true(context, "right_mug_lifted")):
+                return ()
+            return tuple(name for name in ("handoff_confirmed", "right_mug_lifted")
+                         if cls._public_predicate_value(context, name) is None)
         return ()
 
     @classmethod
     def _handoff_complete_confirmed(cls, context):
-        # The VLA coordinates withdrawal and the right-arm approach. The public
-        # staged-mug predicate is the phase boundary; arm-clearance is not a gate.
-        return (cls._public_predicate_true(context, "left_transfer_complete")
-                or cls._public_predicate_true(context, "mug_staged_on_table"))
+        # Table staging and left-arm transfer only prove that the cup reached
+        # the handoff point. HANG requires public evidence that the right arm
+        # actually acquired it.
+        return (cls._public_predicate_true(context, "handoff_confirmed")
+                or cls._public_predicate_true(context, "right_mug_lifted"))
 
     def _recovery_basis(self, context, phase):
         """Offer analytic skills after a failure, or as an optional hang fallback."""

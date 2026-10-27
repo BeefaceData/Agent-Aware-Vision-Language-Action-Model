@@ -2,8 +2,9 @@
 
 The detector is injected and sees only RGB camera images. This module combines
 its masks with the matching public depth/calibration frame; it never imports or
-queries RoboTwin simulator state. Missing or ambiguous visual evidence stays
-unknown and cannot create an anchor.
+queries RoboTwin object state. Optional measured robot TCP poses are used only
+for arm attribution; they are not planner-facing object or contact oracles.
+Missing or ambiguous evidence stays unknown and cannot create an anchor.
 """
 
 from dataclasses import dataclass
@@ -107,6 +108,9 @@ class RGBDPerceptionProvider:
     """
 
     source = "perception"
+    RIGHT_ARM_ASSOCIATION_MAX_M = 0.16
+    RIGHT_ARM_ASSOCIATION_MARGIN_M = 0.06
+    RIGHT_LIFT_STABLE_OBSERVATIONS = 2
 
     def __init__(self, detector: SemanticDetector, anchors: AnchorRegistry | None = None,
                  *, camera_order=("head_camera", "left_camera", "right_camera"),
@@ -147,6 +151,9 @@ class RGBDPerceptionProvider:
         self._last_result = None
         self._initial_mug_height = None
         self._mug_lift_seen = False
+        self._right_lift_confirmed = False
+        self._right_lift_candidate_count = 0
+        self._right_lift_last_sequence = None
         self._static_rack_reference = None
         self._static_rack_frame_cache = None
         self._mug_lift_tracker = None
@@ -160,13 +167,18 @@ class RGBDPerceptionProvider:
         self._mug_lift_tracker = tracker
         self._mug_lift_tracker_enabled = True
 
+    def set_policy_action_count(self, count):
+        """Share confirmed VLA progress with action-scheduled public checks."""
+        if self._mug_lift_tracker is not None:
+            self._mug_lift_tracker.set_policy_action_count(count)
+
     def set_static_rack_reference(self, reference, *, observation=None):
         """Cache a one-shot RGB rack reference and, when possible, a 3D anchor.
 
-        The 3D anchor comes only from the head-camera SAM rack mask and matched
-        public depth/calibration at the initialization observation. Coordinates
-        remain inside this provider; planner summaries expose availability and
-        quality metadata, not world coordinates.
+        The 3D anchor comes from the Opus-selected rack peg pixel and matched
+        public depth/calibration. Coordinates remain inside this provider;
+        planner summaries expose availability and quality metadata, not world
+        coordinates.
         """
         if reference is None:
             self._static_rack_reference = None
@@ -225,23 +237,25 @@ class RGBDPerceptionProvider:
             "world_anchor_available": False,
         }
         quality = {"world_anchor_available": False,
-                   "world_anchor_reason": "initial_sam_rack_depth_not_available"}
+                   "world_anchor_reason": "initial_rgbd_not_available"}
         if observation is not None:
             if observation.sequence != sequence:
                 raise ValueError("static_rack_observation_sequence_mismatch")
-            if self._last_result is None or self._last_sequence != sequence:
-                self.observe(observation)
-            quality = self._estimate_static_rack_point(self._static_rack_reference,
-                                                       observation)
+            minimum = self.min_confidence_by_label.get("rack", self.min_confidence)
+            if confidence < minimum:
+                quality = {"world_anchor_available": False,
+                           "world_anchor_reason": "rack_keypoint_confidence_too_low"}
+            else:
+                quality = self._estimate_static_rack_point(self._static_rack_reference,
+                                                           observation)
             self._static_rack_reference.update(quality)
-        # Continue live rack detection when initialization cannot produce a
-        # quality-gated 3D point; stop repeating the rack model only once the
-        # static anchor is actually usable.
+        # Continue live rack inference only when the one-shot RGB-D reference
+        # is unusable; otherwise the fixed world anchor survives occlusion.
         self._set_detector_rack_reference(bool(quality.get("world_anchor_available")))
         return {key: value for key, value in quality.items() if key != "world_position_xyz"}
 
     def _estimate_static_rack_point(self, reference, observation):
-        """Estimate a peg-local 3D point from nearby mask-supported depth."""
+        """Estimate one Opus-selected rack peg pixel from local RGB-D only."""
         sequence = reference["observation_sequence"]
         frame = (observation.camera_frames or {}).get("head_camera")
         image = observation.images.get("head_camera")
@@ -249,79 +263,40 @@ class RGBDPerceptionProvider:
                 or frame.depth_m.shape != np.asarray(image).shape[:2]):
             return {"world_anchor_available": False,
                     "world_anchor_reason": "head_rgbd_unavailable"}
-        if self._last_sequence != sequence or self._last_result is None:
-            return {"world_anchor_available": False,
-                    "world_anchor_reason": "initial_sam_detection_unavailable"}
-
         height, width = frame.depth_m.shape
         peg_norm = np.asarray(reference["peg_uv_normalized"], dtype=float)
         peg_u, peg_v = peg_norm * np.asarray((width - 1, height - 1), dtype=float)
-        bbox = np.asarray(reference["bbox_normalized"], dtype=float)
-        x1, y1 = bbox[:2] * np.asarray((width, height), dtype=float)
-        x2, y2 = bbox[2:] * np.asarray((width, height), dtype=float)
-        minimum_confidence = self.min_confidence_by_label.get("rack", self.min_confidence)
-        candidates = []
-        for batch in self._last_batches:
-            if batch.camera != "head_camera" or batch.observation_sequence != sequence:
-                continue
-            for detection in batch.detections:
-                if (detection.label != "rack" or detection.confidence < minimum_confidence
-                        or detection.mask.shape != (height, width)):
-                    continue
-                ys, xs = np.nonzero(detection.mask)
-                in_box = ((xs >= x1) & (xs <= x2) & (ys >= y1) & (ys <= y2))
-                distance = np.hypot(xs - peg_u, ys - peg_v)
-                local = in_box & (distance <= 8.0)
-                if not local.any():
-                    continue
-                local_x, local_y = xs[local], ys[local]
-                local_depth = frame.depth_m[local_y, local_x]
-                valid = np.isfinite(local_depth) & (local_depth > 0)
-                if int(valid.sum()) < 12:
-                    continue
-                local_x, local_y, local_depth = local_x[valid], local_y[valid], local_depth[valid]
-                median_depth = float(np.median(local_depth))
-                mad_depth = float(np.median(np.abs(local_depth - median_depth)))
-                nearest_px = float(np.min(distance[local][valid]))
-                if mad_depth > 0.03:
-                    continue
-                inliers = np.abs(local_depth - median_depth) <= max(0.02, 3.0 * 1.4826 * mad_depth)
-                if int(inliers.sum()) < 8:
-                    continue
-                candidates.append((detection.confidence, nearest_px, local_x[inliers],
-                                   local_y[inliers], local_depth[inliers], mad_depth))
-        if not candidates:
+        if not (0 <= peg_u < width and 0 <= peg_v < height):
             return {"world_anchor_available": False,
-                    "world_anchor_reason": "rack_mask_depth_support_not_found"}
-        confidence, nearest_px, xs, ys, depths, mad_depth = max(
-            candidates, key=lambda item: (item[0], -item[1], len(item[3])))
-        if len(xs) > self.sample_limit:
-            indices = np.linspace(0, len(xs) - 1, self.sample_limit, dtype=int)
-            xs, ys, depths = xs[indices], ys[indices], depths[indices]
-        points = []
-        for x, y, depth in zip(xs, ys, depths):
-            pixel = np.asarray([float(x), float(y), 1.0])
-            camera_xyz = np.linalg.solve(frame.intrinsic, pixel) * float(depth)
-            world = np.linalg.solve(frame.world_to_camera,
-                                    np.append(camera_xyz, 1.0))
-            if np.isfinite(world).all() and abs(world[3]) > 1e-9:
-                points.append(world[:3] / world[3])
-        if len(points) < 8:
+                    "world_anchor_reason": "rack_keypoint_out_of_bounds"}
+        try:
+            depth_gap = frame.local_depth_gap(peg_u, peg_v, search_radius=8,
+                                              point_radius=2)
+            if depth_gap > 0.06:
+                return {"world_anchor_available": False,
+                        "world_anchor_reason": "rack_keypoint_depth_discontinuity"}
+            point = np.asarray(frame.unproject(peg_u, peg_v, radius=2), dtype=float)
+            x, y = int(round(peg_u)), int(round(peg_v))
+            local = frame.depth_m[max(0, y-2):min(height, y+3),
+                                  max(0, x-2):min(width, x+3)]
+            depths = local[np.isfinite(local) & (local > 0)]
+        except ValueError as exc:
             return {"world_anchor_available": False,
-                    "world_anchor_reason": "rack_mask_world_projection_failed"}
-        point = np.median(np.asarray(points, dtype=float), axis=0)
-        if not np.isfinite(point).all():
+                    "world_anchor_reason": str(exc)}
+        if len(depths) < 8 or not np.isfinite(point).all():
             return {"world_anchor_available": False,
-                    "world_anchor_reason": "rack_mask_world_projection_failed"}
+                    "world_anchor_reason": "rack_keypoint_depth_support_not_found"}
+        median_depth = float(np.median(depths))
+        mad_depth = float(np.median(np.abs(depths - median_depth)))
         return {
             "world_anchor_available": True,
-            "world_anchor_reason": "head_sam_mask_local_depth",
+            "world_anchor_reason": "opus_keypoint_local_depth",
             "world_position_xyz": [float(value) for value in point],
-            "world_anchor_depth_m": float(np.median(depths)),
+            "world_anchor_depth_m": median_depth,
             "world_anchor_depth_mad_m": float(mad_depth),
             "world_anchor_valid_depth_samples": int(len(depths)),
-            "world_anchor_mask_confidence": float(confidence),
-            "world_anchor_peg_to_mask_px": float(nearest_px),
+            "world_anchor_keypoint_confidence": float(reference["confidence"]),
+            "world_anchor_depth_gap_m": float(depth_gap),
         }
 
     def bind_static_rack_approach(self, name, arm, observation, *, measured_tcp_pose,
@@ -554,12 +529,12 @@ class RGBDPerceptionProvider:
             summary["rack_static_reference"] = {
                 "initialized": valid,
                 "world_anchor_available": bool(valid and metadata.get("available")),
-                "source": "opus_keypoints_sam3_rgbd",
+                "source": "opus_keypoints_rgbd",
                 "camera": metadata.get("camera"),
                 "source_observation_sequence": metadata.get("observation_sequence"),
                 "confidence": metadata.get("confidence"),
                 "current_visibility": result.status.get("rack", "unknown"),
-                "world_anchor_reason": ("mask_supported_rack_frame" if valid else validity_reason),
+                "world_anchor_reason": ("opus_keypoints_rgbd_frame" if valid else validity_reason),
                 "validity_reason": validity_reason,
             }
             return summary
@@ -601,7 +576,7 @@ class RGBDPerceptionProvider:
                 "world_anchor_depth_mad_m": reference.get("world_anchor_depth_mad_m"),
                 "world_anchor_valid_depth_samples": reference.get(
                     "world_anchor_valid_depth_samples"),
-                "world_anchor_peg_to_mask_px": reference.get("world_anchor_peg_to_mask_px"),
+                "world_anchor_depth_gap_m": reference.get("world_anchor_depth_gap_m"),
                 "current_visibility": result.status.get("rack", "unknown"),
                 "validity_reason": ("same_static_camera_frame" if valid else
                                     "camera_shape_or_calibration_changed"),
@@ -676,11 +651,51 @@ class RGBDPerceptionProvider:
             value, reason = result.mug_staged_on_table, result.mug_staged_reason
         elif name == "right_mug_lifted":
             mug = result.objects.get("mug")
-            value = None if mug is None else bool(
-                self._initial_mug_height is not None
-                and mug.position[2] >= self._initial_mug_height + lift_delta_m)
-            reason = ("post_transfer_rgbd_height" if mug is not None
-                      else "mug_geometry_unavailable")
+            if self._right_lift_confirmed:
+                value, reason = True, "right_gripper_lift_association_latched"
+            elif mug is None:
+                self._right_lift_candidate_count = 0
+                value, reason = None, "mug_geometry_unavailable"
+            elif self._initial_mug_height is None:
+                value, reason = None, "initial_mug_height_unavailable"
+            elif mug.position[2] < self._initial_mug_height + lift_delta_m:
+                self._right_lift_candidate_count = 0
+                value, reason = False, "mug_not_lifted"
+            elif result.release_ready is True:
+                self._right_lift_candidate_count = 0
+                value, reason = False, "mug_still_supported_by_table"
+            else:
+                poses = observation.measured_tcp_poses
+                if poses is None:
+                    self._right_lift_candidate_count = 0
+                    value, reason = None, "measured_arm_tcp_poses_unavailable"
+                else:
+                    mug_xyz = np.asarray(mug.position, dtype=float)
+                    distances = {arm: float(np.linalg.norm(
+                        mug_xyz - np.asarray(poses[arm][:3], dtype=float)))
+                        for arm in ("left", "right")}
+                    right_is_nearest = (
+                        distances["right"] <= self.RIGHT_ARM_ASSOCIATION_MAX_M
+                        and distances["left"] - distances["right"]
+                        >= self.RIGHT_ARM_ASSOCIATION_MARGIN_M)
+                    left_is_nearest = (
+                        distances["left"] <= self.RIGHT_ARM_ASSOCIATION_MAX_M
+                        and distances["right"] - distances["left"]
+                        >= self.RIGHT_ARM_ASSOCIATION_MARGIN_M)
+                    if self._right_lift_last_sequence != observation.sequence:
+                        self._right_lift_last_sequence = observation.sequence
+                        self._right_lift_candidate_count = (
+                            self._right_lift_candidate_count + 1
+                            if right_is_nearest else 0)
+                    if left_is_nearest:
+                        value, reason = False, "mug_associated_with_left_gripper"
+                    elif not right_is_nearest:
+                        value, reason = None, "mug_gripper_association_ambiguous"
+                    elif self._right_lift_candidate_count < self.RIGHT_LIFT_STABLE_OBSERVATIONS:
+                        value, reason = None, "right_gripper_lift_candidate_not_stable"
+                    else:
+                        self._right_lift_confirmed = True
+                        value, reason = True, "stable_right_gripper_lift_association"
         elif name in {"mug_grasp_confirmed", "handoff_confirmed", "rack_contact_detected",
                       "rack_seat_aligned", "mug_released", "mug_placed_on_table",
                       "left_transfer_complete",
@@ -700,6 +715,17 @@ class RGBDPerceptionProvider:
         planner turn and the execution stop gate cannot see different detector
         results for the same observation.
         """
+        # Mug-lift evidence uses an Opus-selected public support pixel and its
+        # same-frame depth against the reset-cached table plane. It does not
+        # need SAM masks on every observation; retain SAM for semantic masks
+        # used by other predicates and metric anchor preparation.
+        if name == "mug_lifted" and self._mug_lift_tracker_enabled:
+            evidence = (self._mug_lift_tracker.evaluate(observation)
+                        if self._mug_lift_tracker is not None else
+                        {"value": None, "reason": "table_plane_initialization_unavailable"})
+            return PredicateResult(name=name, value=evidence.get("value"),
+                source="perception", observation_sequence=observation.sequence,
+                reason=evidence.get("reason", "unknown"))
         if self._last_result is None or observation.sequence > self._last_sequence:
             self.observe(observation)
         evidence = self.predicate_evidence(name, observation)

@@ -109,15 +109,13 @@ def initialize_rack_frame(environment, perception, planner, *, camera, log):
     started = time.perf_counter()
     try:
         observation = environment.observe()
-        perception.observe(observation)
         report = dict(OpusObjectFrameGrounder(
             planner.client, planner.settings.model, target="rack_peg", camera=camera,
         ).locate(observation))
         cache = StaticRackFrameCache()
-        mask = perception.detection_mask("rack", observation, camera=camera)
-        report["frame_cache"] = cache.cache(observation, report, mask)
+        report["frame_cache"] = cache.cache(observation, report)
         report["world_anchor_available"] = True
-        report["world_anchor_reason"] = "mask_supported_rack_frame"
+        report["world_anchor_reason"] = "opus_keypoints_rgbd_frame"
         perception.set_static_rack_frame_cache(cache)
         report["latency_seconds"] = time.perf_counter() - started
         log({"event_type": "rack_grounding_initialized",
@@ -130,7 +128,7 @@ def initialize_rack_frame(environment, perception, planner, *, camera, log):
              "world_anchor_reason": report.get("world_anchor_reason"),
              "world_anchor_depth_mad_m": report.get("world_anchor_depth_mad_m"),
              "world_anchor_valid_depth_samples": report.get("world_anchor_valid_depth_samples"),
-             "world_anchor_peg_to_mask_px": report.get("world_anchor_peg_to_mask_px"),
+             "world_anchor_depth_gap_m": report.get("world_anchor_depth_gap_m"),
              "camera_calibration_sha256": report.get("camera_calibration_sha256"),
              "latency_seconds": report["latency_seconds"],
              "model": planner.settings.model})
@@ -143,7 +141,8 @@ def initialize_rack_frame(environment, perception, planner, *, camera, log):
         return None, report
 
 
-def initialize_mug_lift_evidence(environment, perception, planner, *, log):
+def initialize_mug_lift_evidence(environment, perception, planner, *, log,
+                                 minimum_policy_actions=0):
     """Cache the reset table plane and enable table-relative mug-lift evidence."""
     started = time.perf_counter()
     try:
@@ -156,7 +155,8 @@ def initialize_mug_lift_evidence(environment, perception, planner, *, log):
                           **table_plane.cache(observation, table_mask, camera=TABLE_PLANE_CAMERA)}
         grounder = OpusMugSupportGrounder(planner.client, planner.settings.model,
                                           camera=TABLE_PLANE_CAMERA)
-        perception.set_mug_lift_evidence_tracker(MugLiftEvidenceTracker(table_plane, grounder))
+        perception.set_mug_lift_evidence_tracker(MugLiftEvidenceTracker(
+            table_plane, grounder, minimum_policy_actions=minimum_policy_actions))
     except Exception as exc:
         # Do not fall back to SAM mug-centroid lift evidence when this
         # explicitly selected public table-plane path cannot initialize.

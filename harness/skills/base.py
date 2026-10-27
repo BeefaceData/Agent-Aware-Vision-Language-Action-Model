@@ -28,6 +28,7 @@ class ExecutionContext:
     motion_started: bool = False
     predicate_check: Callable | None = None
     predicate_attempt_start: Callable | None = None
+    feedback_boundary_predicates: frozenset[str] = frozenset()
     last_predicate: object = None
     anchors: object = None
     allow_oracle: bool = False

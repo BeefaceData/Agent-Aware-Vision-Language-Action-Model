@@ -145,6 +145,37 @@ def ground_public_object_frame(observation, report, mask, *, minimum_confidence=
                                       max_depth_gap_m=max_depth_gap_m)
 
 
+def ground_public_object_frame_rgbd(observation, report, *, minimum_confidence=0.55,
+                                    max_depth_gap_m=0.06):
+    """Ground Opus keypoints directly with RGB-D, without a segmentation mask.
+
+    The report remains a 2D semantic proposal. Each selected pixel must have a
+    locally continuous depth surface, and the resulting 3D frame must pass the
+    same baseline and handedness checks as mask-supported grounding.
+    """
+    if not isinstance(report, dict) or report.get("status") != "grounded":
+        raise ValueError("grounded_frame_report_required")
+    camera_name = report.get("camera")
+    if (camera_name not in observation.images
+            or report.get("observation_sequence") != observation.sequence):
+        raise ValueError("grounding_report_stale_or_wrong_camera")
+    image = np.asarray(observation.images[camera_name])
+    if list(image.shape[:2]) != report.get("image_shape_px"):
+        raise ValueError("grounding_image_shape_changed")
+    confidence = _confidence(report.get("confidence"))
+    if (not np.isfinite(minimum_confidence) or not 0 <= minimum_confidence <= 1
+            or confidence < minimum_confidence):
+        raise ValueError("grounding_confidence_too_low")
+    if not np.isfinite(max_depth_gap_m) or max_depth_gap_m < 0:
+        raise ValueError("invalid_frame_limits")
+    camera = (observation.camera_frames or {}).get(camera_name)
+    if camera is None:
+        raise ValueError("grounding_rgbd_camera_unavailable")
+    points = _keypoints(report.get("keypoints_px"))
+    return grounded_frame_from_pixels(camera, points,
+                                      max_depth_gap_m=max_depth_gap_m)
+
+
 def _keypoints(value):
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise ValueError("frame_grounding_requires_three_keypoints")

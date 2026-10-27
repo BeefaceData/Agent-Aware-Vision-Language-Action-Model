@@ -4,6 +4,8 @@ No object poses or contacts are exported. Create/reset/close from the episode
 owner. Use in a dedicated process because RoboTwin changes its working directory.
 """
 
+from dataclasses import replace
+
 import numpy as np
 
 from harness.perception.geometry import pose7
@@ -20,8 +22,16 @@ class LocalEnvironmentClient(EnvironmentClient):
 
     def _accept(self, raw, sequence):
         result = super()._accept(raw, sequence)
+        # These are measured robot TCP poses, available from arm encoders and
+        # forward kinematics on a physical robot as well. They help local
+        # predicates attribute a camera-grounded mug to an arm; object pose and
+        # contact state remain unavailable to the perception provider.
+        measured_tcp_poses = {
+            arm: tuple(self.arm_state(arm)["pose"]) for arm in ("left", "right")}
+        result = replace(result, measured_tcp_poses=measured_tcp_poses)
+        self._observation = result
         self._sequence = sequence
-        return result
+        return result.copy()
 
     def observe(self):
         if self._observation is None or self._uncertain:

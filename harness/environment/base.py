@@ -36,20 +36,36 @@ class Observation:
     images: dict[str, np.ndarray]
     command_state: tuple[float, ...]
     camera_frames: dict[str, RGBDCamera] | None = None
+    # Optional measured robot FK poses; used locally for arm attribution and
+    # deliberately omitted from planner-facing prompt payloads.
+    measured_tcp_poses: dict[str, tuple[float, ...]] | None = None
 
     def __post_init__(self):
-        if self.camera_frames is None:
-            return
-        if (not isinstance(self.camera_frames, dict)
+        if self.camera_frames is not None and (not isinstance(self.camera_frames, dict)
                 or any(name not in self.images or not isinstance(frame, RGBDCamera)
                        or frame.depth_m.shape != np.asarray(self.images[name]).shape[:2]
                        for name, frame in self.camera_frames.items())):
             raise ValueError("invalid_observation_camera_frames")
+        if self.measured_tcp_poses is not None:
+            if (not isinstance(self.measured_tcp_poses, dict)
+                    or set(self.measured_tcp_poses) != {"left", "right"}):
+                raise ValueError("invalid_measured_tcp_poses")
+            poses = {}
+            for arm, value in self.measured_tcp_poses.items():
+                pose = np.asarray(value, dtype=float)
+                if (pose.shape != (7,) or not np.isfinite(pose).all()
+                        or abs(np.linalg.norm(pose[3:]) - 1.0) > 0.01):
+                    raise ValueError("invalid_measured_tcp_poses")
+                poses[arm] = tuple(float(x) for x in pose)
+            object.__setattr__(self, "measured_tcp_poses", poses)
 
     def copy(self):
         frames = None if self.camera_frames is None else {
             name: frame.copy() for name, frame in self.camera_frames.items()}
-        return Observation(self.sequence, copy_images(self.images), vector14(self.command_state), frames)
+        poses = None if self.measured_tcp_poses is None else {
+            arm: tuple(pose) for arm, pose in self.measured_tcp_poses.items()}
+        return Observation(self.sequence, copy_images(self.images),
+                           vector14(self.command_state), frames, poses)
 
 
 class Environment(Protocol):

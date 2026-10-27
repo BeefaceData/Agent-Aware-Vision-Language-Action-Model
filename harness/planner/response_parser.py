@@ -36,7 +36,7 @@ DESCRIPTIONS = {
     "rotate_wrist": "Rotate one wrist by bounded world-Z yaw while preserving EE position. Requires clearance for the swept hand and any held object.",
     "set_gripper": "Ramp one gripper to value 0 (closed) through 1 (open), holding measured arm positions. Opening requires public release_ready=true; closing is not grasp verification.",
     "release": "Guarded full opening of one gripper. Use authorization=observed_support only with public release_ready=true. Use authorization=rack_seat_alignment only when the runtime reports rack_seat_aligned=true after a completed grounded rack-seat move. Alignment is not proof of contact or task success.",
-    "vla_act": "Invoke frozen Modal Neotix for a bounded segment controlling both arms. The runtime returns after at most the configured feedback chunks with fresh images; inspect them and choose one bounded next skill. Stop on the named objective or budget and discard the unused chunk tail. No custom joint actions or language.",
+    "vla_act": "Invoke frozen Modal Neotix for a bounded segment controlling both arms. The runtime returns after the configured feedback horizon with fresh images; public visual stop predicates are assessed at that boundary, while local safety guards remain active during actions. Inspect the result and choose one bounded next skill. No custom joint actions or language.",
     "abort": "End the episode without issuing robot motion. Use for uncertainty, unsupported operations, exhausted retries or unsafe next steps.",
 }
 

@@ -79,14 +79,11 @@ class PerceptionAnchorPreparer:
         from .hang_targets import bind_hang_targets
 
         self.hang_target_cache.resolve(observation)
-        result = self.provider.observe(observation)
-        if result.observation_sequence != observation.sequence:
-            raise ValueError("grounding_missing_or_stale")
         report = self.mug_frame_grounder.locate(observation)
-        mask = self.provider.detection_mask("mug", observation,
-                                            camera=self.mug_frame_camera)
         measured = self.environment.arm_state(arm)["pose"]
-        targets = bind_hang_targets(self.hang_target_cache, observation, report, mask,
+        if report.get("camera") != self.mug_frame_camera:
+            raise ValueError("mug_frame_camera_mismatch")
+        targets = bind_hang_targets(self.hang_target_cache, observation, report,
             tcp_pose=measured, anchors=self.anchors, arm=arm)
         return targets[requested_target]
 

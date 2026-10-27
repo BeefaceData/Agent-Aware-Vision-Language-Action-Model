@@ -48,7 +48,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small\color{stone}\faRobot\ \ How Our Robot Learns to Hang a Mug}
-\fancyhead[R]{\small\color{stone}v1.1}
+\fancyhead[R]{\small\color{stone}v1.2}
 \fancyfoot[C]{\small\color{stone}\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \setlist{itemsep=2pt,topsep=4pt}
@@ -138,7 +138,7 @@
 \vspace{0.4cm}
 {\Large\color{stone} A friendly guide to the Agent-Aware VLA harness\par}
 \vspace{0.2cm}
-{\large\color{stone} Version 1.1 \,\textbullet\, October 2026\par}
+{\large\color{stone} Version 1.2 \,\textbullet\, October 2026\par}
 \vspace{1.2cm}
 \begin{tikzpicture}[scale=1.15]
   \robotscene
@@ -150,10 +150,10 @@
 \begin{tcolorbox}[enhanced,colback=skylight,colframe=sky,arc=3mm,width=0.86\textwidth,boxrule=0.8pt]
 \centering\small
 This guide explains the project from zero: what the robot does, who the ``team'' inside the
-software is, how one episode runs, how the code is organised, how to change things, and how to
-set it up and run it, on your own computer or on rented cloud GPUs (Modal). New in 1.1: the
-three big pieces and where Opus comes in (Section~\ref{sec:pieces}), the development ladder
-(Section~\ref{sec:ladder}) and running on Modal. Coloured boxes help you find your way:\\[6pt]
+software is, what information moves between the parts, how one episode runs, how the code is
+organised, how to change things, and how to set it up and run it, on your own computer or on
+rented cloud GPUs (Modal). Version 1.2 adds a beginner's map, a concrete turn-by-turn example,
+and explanations of what each setup command is doing. Coloured boxes help you find your way:\\[6pt]
 \colorbox{sunlight}{\faChild\ simple explanation}\quad
 \colorbox{skylight}{\faLightbulb\ key idea}\quad
 \colorbox{leaflight}{\faWrench\ where to change it}\quad
@@ -165,6 +165,47 @@ three big pieces and where Opus comes in (Section~\ref{sec:pieces}), the develop
 
 {\small\tableofcontents}
 \newpage
+
+% ================================================================ 0
+\section*{Start here: the five things to remember}
+\addcontentsline{toc}{section}{Start here: the five things to remember}
+
+\begin{eli5}
+You do not need to understand robotics before reading this guide. Read the project as a
+\textbf{conversation between programs}. One program takes a picture, another program describes
+what the picture seems to show, a coach chooses one move from a small menu, and ordinary Python
+code carries out that move safely. Then the programs look again. This repeats until the mug is
+hanging, something goes wrong, or a limit is reached.
+\end{eli5}
+
+\begin{enumerate}[leftmargin=*,itemsep=6pt]
+  \item \textbf{The simulator is the pretend physical world.} RoboTwin contains the table, mug,
+        rack and robot. SAPIEN makes the objects obey gravity and draws the camera pictures.
+  \item \textbf{The policy is learned muscle memory.} The frozen Neotix VLA receives pictures and
+        robot numbers and returns low-level actions. This project uses it; it does not retrain it.
+  \item \textbf{The planner is a coach, not a robot driver.} Opus or a scripted planner chooses
+        one named skill such as \code{vla_act} or \code{move_to}. It cannot send arbitrary joint
+        commands.
+  \item \textbf{The harness is the safety and translation layer.} It turns the chosen skill into
+        simulator operations, checks limits and evidence, records what happened, and asks for a
+        fresh observation.
+  \item \textbf{A run is one episode.} The episode starts with one seed and one reset. It ends
+        with a summary such as \code{task_success}, \code{abort}, \code{step_budget}, or another
+        recorded outcome. A new experiment normally means a new output directory.
+\end{enumerate}
+
+\begin{keyidea}
+\textbf{The most important boundary:} the coach chooses \emph{what kind of move} should happen;
+the executor decides \emph{how to perform that move}. If you remember only one sentence, remember
+this one. It explains why the planner can be changed without rewriting the robot motion code.
+\end{keyidea}
+
+\subsection*{How to read the arrows in this guide}
+An arrow labelled \textbf{observation} means ``information going into a decision.'' An arrow
+labelled \textbf{action} or \textbf{move} means ``a request to change the simulated robot.'' A
+\textbf{dashed arrow} usually crosses a machine boundary: the data is sent to Modal or an API.
+The same blue harness boxes can run on your laptop or inside the Modal episode container; only
+the computer providing the GPU changes.
 
 % ================================================================ 1
 \section{The story in one page}
@@ -541,6 +582,36 @@ Every episode is a loop of \textbf{turns}. One turn = look, decide, check, do, r
 \end{tikzpicture}
 \caption{The turn loop, implemented in \code{SkillOrchestrator.run} (\srcref{harness/runtime/orchestrator.py:219}).}
 \end{figure}
+
+\subsection{A concrete example: one turn in plain English}
+\begin{eli5}
+Imagine that the last turn already closed the left gripper around the mug. The next turn does
+not blindly continue from memory. It starts by looking again. This is important because the mug
+may have moved, the fingers may have slipped, or the camera may be uncertain.
+\end{eli5}
+
+\begin{enumerate}[leftmargin=*,itemsep=4pt]
+  \item \textbf{Observe:} RoboTwin returns three RGB pictures and the current 14-number robot
+        state. This is the new ``what is happening now?'' snapshot.
+  \item \textbf{Checklist:} the evidence code answers questions such as
+        \code{mug_grasped} and \code{mug_lifted}. Each answer is \code{true}, \code{false}, or
+        \code{null}; \code{null} means ``we do not have enough evidence,'' not ``false.''
+  \item \textbf{Decide:} the planner sees the allowed pictures and facts and returns one card,
+        for example \code{move_to(target="mug_lift")} or \code{vla_act}.
+  \item \textbf{Prepare:} if the card names a 3D target, perception converts a camera pixel and
+        its depth into a fresh world-space anchor. The code does not trust an old remembered
+        position.
+  \item \textbf{Execute:} the executor validates the card, applies its limits, and either asks
+        the frozen policy for a short action chunk or lets CuRobo plan a careful analytic move.
+  \item \textbf{Record:} the result, checks, timing and any failure flag are written to the run
+        files. The next turn starts with a new observation, not with an automatic replay.
+\end{enumerate}
+
+\begin{keyidea}
+The planner does not receive a live video stream and it does not continuously steer the robot.
+It receives a snapshot, makes one bounded decision, waits for the executor to finish or stop, and
+then receives another snapshot. This is why the guide calls the system a \textbf{turn loop}.
+\end{keyidea}
 
 \subsection{What happens after a skill finishes?}
 
@@ -1246,6 +1317,12 @@ Good for & debugging with the simulator in reach & long or many runs, small lapt
 \end{center}
 
 \subsection{Common steps (both paths)}
+\begin{eli5}
+The commands below prepare three separate helpers. The Python environment holds the project's
+code and libraries. The policy and SAM~3 deployments put the learned model and object detector on
+Modal. The Anthropic variable gives the coach permission to answer. None of these commands runs
+an episode yet; they only prepare the pieces needed by a later episode command.
+\end{eli5}
 \begin{cmd}
 git clone <this repository> \&\& cd Agent-Aware-Vision-Language-Action-Model\\
 conda create -n robotwin python=3.10 -y \&\& conda activate robotwin\\
@@ -1260,8 +1337,21 @@ modal run modal\_apps/sam3.py \ \ \ \ \ \ \ \ \ \ \ \ \ \ \# smoke test: prints 
 conda env config vars set ANTHROPIC\_API\_KEY=sk-ant-...\\
 conda deactivate \&\& conda activate robotwin
 \end{cmd}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{First three lines:} download the repository, create an isolated Python 3.10
+        environment, and install the simulator/planner/Modal client libraries.
+  \item \textbf{\code{modal setup}:} authenticate the Modal command-line tool. This is not the
+        Anthropic login and does not upload the repository by itself.
+  \item \textbf{\code{modal deploy ...policy.py}:} start or update the persistent remote policy
+        helper. The episode runner later calls this helper with an observation.
+  \item \textbf{SAM~3 lines:} store the Hugging Face token as a Modal secret, deploy the detector,
+        and run its small readiness check. The token must not be pasted into a committed file.
+  \item \textbf{Anthropic lines:} store the coach's API key in the local conda environment.
+        \code{run\_skills.py} reads it when the planner is \code{anthropic}.
+\end{itemize}
 Path B only needs the Python packages (no simulator, no GPU) on your machine; the \code{robotwin}
-environment above works for both.
+environment above works for both. Path A additionally needs the RoboTwin assets, CuRobo and a
+working NVIDIA Vulkan driver because the simulator and renderer run locally.
 
 \subsection{Path A: run on your own GPU}
 \label{sec:runlocal}
@@ -1398,6 +1488,15 @@ modal volume rm -r robotwin-runs <run\_id> \ \ \ \ \ \ \ \ \ \ \ \ \# delete an 
 \end{careful}
 
 \subsection{Running cheaply}
+\begin{keyidea}
+\textbf{What is local and what is remote?} Your terminal first parses and validates the command.
+Then \code{modal\_apps/simulator.py} packages the request and starts a fresh L4 container. That
+container owns RoboTwin, SAPIEN, CuRobo and the episode loop. It calls the separate T4 policy and
+SAM~3 helpers, while the Anthropic request goes to the API. At the end, the container copies the
+run artifacts back to your local \code{data/runs/} directory. The remote container is temporary;
+the output directory is the durable record.
+\end{keyidea}
+
 \begin{center}
 \small
 \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{5.0cm}X}

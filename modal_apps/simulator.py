@@ -1,19 +1,24 @@
-"""RoboTwin simulator on Modal (migration phase 0: feasibility spike).
+"""RoboTwin simulator and supervised episodes on Modal.
 
 Builds the simulator image (RoboTwin + CuRobo at the README's pinned commits),
-fills the asset Volume once, and measures whether a Modal GPU can render
-RoboTwin's ray-traced RGB-D cameras and plan with CuRobo.
+fills the asset Volume once, measures a GPU (spike), and runs whole
+``run_skills.py`` episodes remotely with the same arguments as locally.
 
     modal run modal_apps/simulator.py::download_assets   # once; CPU only
     modal run modal_apps/simulator.py::spike             # default GPU: L4
     SIM_GPU=T4 modal run modal_apps/simulator.py::spike
+    modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
 
+Episode-only options: ``--time-limit-minutes N`` (default 90) and
+``--skip-observations`` (leave observations on the Volume, not downloaded).
+Every ``modal run`` of this file needs the ``anthropic`` Modal secret to exist.
 Spike reports and one head-camera frame per GPU are saved to data/modal_spike/.
 """
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import signal
 import subprocess
 import sys
 import time
@@ -31,6 +36,13 @@ ASSETS = "/robotwin-assets"
 ASSET_REPO = "TianxingChen/RoboTwin2.0"
 # demo_clean disables random backgrounds, so background_texture (11 GB) is not needed.
 ASSET_DIRS = ("embodiments", "objects")
+
+RUNS = "/runs"
+EPISODE_INPUTS = "/tmp/episode-inputs"
+# After the time limit, SIGINT lets run_skills write summary.json and close the video.
+SHUTDOWN_GRACE_SECONDS = 5 * 60
+# Covers episode_request.MAX_TIME_LIMIT_MINUTES (210) plus shutdown and Volume commit.
+EPISODE_FUNCTION_TIMEOUT_SECONDS = 4 * 60 * 60
 
 # T4, A100, A10G, L4. Compiling CuRobo for all of them lets one image serve any GPU.
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
@@ -66,6 +78,7 @@ def _configure_image():
 
 app = modal.App(APP_NAME)
 assets_volume = modal.Volume.from_name("robotwin-assets", create_if_missing=True)
+runs_volume = modal.Volume.from_name("robotwin-runs", create_if_missing=True)
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.10")
@@ -103,6 +116,8 @@ image = (
     # Project code last, so code edits do not rebuild the layers above.
     .add_local_dir(REPO / "harness", "/root/harness", ignore=["**/__pycache__"])
     .add_local_dir(REPO / "development", "/root/development", ignore=["**/__pycache__"])
+    .add_local_dir(REPO / "configs", "/root/configs")
+    .add_local_file(REPO / "run_skills.py", "/root/run_skills.py")
 )
 
 
@@ -203,3 +218,89 @@ def spike(seed: int = 3):
         (output / f"{GPU}_head_camera.png").write_bytes(head_png)
     print(json.dumps({key: value for key, value in report.items() if key != "vulkan"}, indent=2))
     print("vulkan summary saved in", output / f"{GPU}.json")
+
+
+@app.function(image=image, gpu=GPU, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              secrets=[modal.Secret.from_name("anthropic")],
+              timeout=EPISODE_FUNCTION_TIMEOUT_SECONDS, single_use_containers=True)
+def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: int) -> dict:
+    """Run one run_skills.py episode and keep its artifacts on the runs Volume.
+
+    A single-use container replaces the fresh process each local attempt gets, so
+    no CUDA, renderer or planner state survives between episodes.
+    """
+    inputs = Path(EPISODE_INPUTS)
+    inputs.mkdir(parents=True, exist_ok=True)
+    for name, content in uploads.items():
+        (inputs / name).write_bytes(content)
+
+    process = subprocess.Popen([sys.executable, "/root/run_skills.py", *argv], cwd="/root")
+    timed_out = False
+    try:
+        exit_code = process.wait(timeout=time_limit_minutes * 60)
+    except subprocess.TimeoutExpired:
+        # Same as `timeout -s INT` locally: the runner records an interrupted outcome.
+        timed_out = True
+        process.send_signal(signal.SIGINT)
+        try:
+            exit_code = process.wait(timeout=SHUTDOWN_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            exit_code = process.wait()
+    runs_volume.commit()
+
+    summary_path = Path(argv[argv.index("--output") + 1]) / "summary.json"
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else None
+    return {"exit_code": exit_code, "timed_out": timed_out, "summary": summary}
+
+
+def _download_run(run_id, destination, *, skip_observations):
+    """Copy one run directory from the runs Volume into ``destination``; return the file count."""
+    from modal.volume import FileEntryType
+
+    count = 0
+    for entry in runs_volume.listdir(run_id, recursive=True):
+        if entry.type != FileEntryType.FILE:
+            continue
+        relative = PurePosixPath(entry.path.lstrip("/")).relative_to(run_id)
+        if skip_observations and relative.parts[0] == "observations":
+            continue
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as stream:
+            runs_volume.read_file_into_fileobj(entry.path, stream)
+        count += 1
+    return count
+
+
+@app.local_entrypoint()
+def episode(*argv):
+    """Run one supervised episode on Modal with run_skills.py's own arguments."""
+    sys.path.insert(0, str(REPO))
+    import run_skills
+    from modal_apps.episode_request import build_request
+
+    try:
+        request = build_request(argv, stamp=time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
+                                input_dir=EPISODE_INPUTS, runs_dir=RUNS, robotwin_root=ROBOTWIN)
+    except ValueError as exc:
+        raise SystemExit(f"episode: {exc}") from None
+    # The same checks run_skills.main makes, before any GPU is allocated.
+    run_skills.parse_arguments(run_skills.build_parser(REPO), list(request.local_argv))
+    output = request.local_output.resolve()
+    if output.exists():
+        raise SystemExit(f"episode: {output} already exists; choose a new --output")
+    uploads = {name: path.read_bytes() for name, path in request.uploads.items()}
+
+    print(f"Running {request.run_id} on {GPU} (limit {request.time_limit_minutes} min)")
+    result = None
+    try:
+        result = run_episode.remote(list(request.remote_argv), uploads, request.time_limit_minutes)
+    finally:
+        # Partial artifacts are still worth having after a failed or interrupted run.
+        try:
+            count = _download_run(request.run_id, output, skip_observations=request.skip_observations)
+            print(f"Downloaded {count} files to {output}")
+        except Exception as exc:
+            print(f"No artifacts downloaded for {request.run_id}: {type(exc).__name__}: {exc}")
+    print(json.dumps(result, indent=2))

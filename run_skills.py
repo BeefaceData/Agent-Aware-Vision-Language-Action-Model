@@ -87,9 +87,11 @@ def build_parser(root):
     return parser
 
 
-def main(argv=None):
-    root = Path(__file__).resolve().parent
-    parser = build_parser(root)
+def parse_arguments(parser, argv=None):
+    """Parse the CLI and load its config; exit through ``parser.error`` on any conflict.
+
+    Has no side effects, so remote launchers can validate before allocating a GPU.
+    """
     args = parser.parse_args(argv)
     try:
         validate_evidence_mode(development_oracle=args.development_oracle,
@@ -102,7 +104,14 @@ def main(argv=None):
     error = option_error(args, settings)
     if error:
         parser.error(error)
-    memory = (MemorySnapshot.load(args.memory_snapshot.resolve(), expected_sha256=args.memory_sha256)
+    return args, settings
+
+
+def main(argv=None):
+    root = Path(__file__).resolve().parent
+    parser = build_parser(root)
+    args, settings = parse_arguments(parser, argv)
+    memory =(MemorySnapshot.load(args.memory_snapshot.resolve(), expected_sha256=args.memory_sha256)
               if args.memory_snapshot else None)
     planner_settings = (assembly.anthropic_settings(settings, args.anthropic_model)
                         if args.planner == "anthropic" else None)

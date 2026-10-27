@@ -173,8 +173,8 @@ def measure(seed: int = 3, observations: int = 20, physics_steps: int = 200):
     from PIL import Image
 
     sys.path.insert(0, "/root")
-    report = {"nvidia_smi":_command_output(["nvidia-smi", "--query-gpu=name,driver_version,memory.total",
-                                             "--format=csv,noheader"]),
+    report = {"nvidia_smi": _command_output(["nvidia-smi", "--query-gpu=name,driver_version,memory.total",
+                                              "--format=csv,noheader"]),
               "vulkan": _command_output(["vulkaninfo", "--summary"])}
     head_png = None
     try:

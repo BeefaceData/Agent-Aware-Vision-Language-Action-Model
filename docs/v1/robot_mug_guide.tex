@@ -48,7 +48,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small\color{stone}\faRobot\ \ How Our Robot Learns to Hang a Mug}
-\fancyhead[R]{\small\color{stone}v1}
+\fancyhead[R]{\small\color{stone}v1.2}
 \fancyfoot[C]{\small\color{stone}\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \setlist{itemsep=2pt,topsep=4pt}
@@ -138,7 +138,7 @@
 \vspace{0.4cm}
 {\Large\color{stone} A friendly guide to the Agent-Aware VLA harness\par}
 \vspace{0.2cm}
-{\large\color{stone} Version 1 \,\textbullet\, October 2026\par}
+{\large\color{stone} Version 1.2 \,\textbullet\, October 2026\par}
 \vspace{1.2cm}
 \begin{tikzpicture}[scale=1.15]
   \robotscene
@@ -150,19 +150,62 @@
 \begin{tcolorbox}[enhanced,colback=skylight,colframe=sky,arc=3mm,width=0.86\textwidth,boxrule=0.8pt]
 \centering\small
 This guide explains the project from zero: what the robot does, who the ``team'' inside the
-software is, how one episode runs, how the code is organised, how to change things, and how to
-set it up and run it. Coloured boxes help you find your way:\\[6pt]
+software is, what information moves between the parts, how one episode runs, how the code is
+organised, how to change things, and how to set it up and run it, on your own computer or on
+rented cloud GPUs (Modal). Version 1.2 adds a beginner's map, a concrete turn-by-turn example,
+and explanations of what each setup command is doing. Coloured boxes help you find your way:\\[6pt]
 \colorbox{sunlight}{\faChild\ simple explanation}\quad
 \colorbox{skylight}{\faLightbulb\ key idea}\quad
 \colorbox{leaflight}{\faWrench\ where to change it}\quad
 \colorbox{roselight}{\faExclamationTriangle\ careful}
 \end{tcolorbox}
 \vfill
-{\small\color{stone} Covers branch \texttt{refactor}. File and line references point to that code.}
+{\small\color{stone} Covers branch \texttt{modal-simulator}. File and line references point to that code.}
 \end{titlepage}
 
 {\small\tableofcontents}
 \newpage
+
+% ================================================================ 0
+\section*{Start here: the five things to remember}
+\addcontentsline{toc}{section}{Start here: the five things to remember}
+
+\begin{eli5}
+You do not need to understand robotics before reading this guide. Read the project as a
+\textbf{conversation between programs}. One program takes a picture, another program describes
+what the picture seems to show, a coach chooses one move from a small menu, and ordinary Python
+code carries out that move safely. Then the programs look again. This repeats until the mug is
+hanging, something goes wrong, or a limit is reached.
+\end{eli5}
+
+\begin{enumerate}[leftmargin=*,itemsep=6pt]
+  \item \textbf{The simulator is the pretend physical world.} RoboTwin contains the table, mug,
+        rack and robot. SAPIEN makes the objects obey gravity and draws the camera pictures.
+  \item \textbf{The policy is learned muscle memory.} The frozen Neotix VLA receives pictures and
+        robot numbers and returns low-level actions. This project uses it; it does not retrain it.
+  \item \textbf{The planner is a coach, not a robot driver.} Opus or a scripted planner chooses
+        one named skill such as \code{vla_act} or \code{move_to}. It cannot send arbitrary joint
+        commands.
+  \item \textbf{The harness is the safety and translation layer.} It turns the chosen skill into
+        simulator operations, checks limits and evidence, records what happened, and asks for a
+        fresh observation.
+  \item \textbf{A run is one episode.} The episode starts with one seed and one reset. It ends
+        with a summary such as \code{task_success}, \code{abort}, \code{step_budget}, or another
+        recorded outcome. A new experiment normally means a new output directory.
+\end{enumerate}
+
+\begin{keyidea}
+\textbf{The most important boundary:} the coach chooses \emph{what kind of move} should happen;
+the executor decides \emph{how to perform that move}. If you remember only one sentence, remember
+this one. It explains why the planner can be changed without rewriting the robot motion code.
+\end{keyidea}
+
+\subsection*{How to read the arrows in this guide}
+An arrow labelled \textbf{observation} means ``information going into a decision.'' An arrow
+labelled \textbf{action} or \textbf{move} means ``a request to change the simulated robot.'' A
+\textbf{dashed arrow} usually crosses a machine boundary: the data is sent to Modal or an API.
+The same blue harness boxes can run on your laptop or inside the Modal episode container; only
+the computer providing the GPU changes.
 
 % ================================================================ 1
 \section{The story in one page}
@@ -241,10 +284,201 @@ Skill & One of the six move cards (Section~\ref{sec:skills}). \\
 Predicate & A checklist question like ``is the mug lifted?'' Answer: \code{true}, \code{false} or \code{null} (unknown). \\
 Anchor & A named 3D target such as \code{mug_pregrasp} or \code{rack_seat}, freshly computed each time. \\
 Oracle & ``Cheating'' simulator knowledge (exact mug position). Only for debugging, never shown to the coach. \\
-Modal & A cloud service that runs our GPU models (the policy and SAM 3). \\
+Harness & Our code around the frozen policy: the coach, the checklist, the move cards and the safety rules. \\
+RoboTwin & The simulator task suite. Our task is \code{hanging_mug}. \\
+SAPIEN & The physics engine and picture-drawing (rendering) engine under RoboTwin. \\
+CuRobo & A GPU motion planner: turns ``put the hand there'' into a safe joint path. \\
+Vulkan & The graphics driver language SAPIEN uses to draw pictures on an NVIDIA GPU. \\
+Modal & A cloud service that rents GPUs by the second. Runs the policy, SAM 3 and, optionally, whole episodes. \\
+Container & A fresh, clean rented computer that Modal starts for one job and throws away afterwards. \\
+Volume & A cloud folder on Modal that keeps files between containers (assets, run results). \\
+Secret & A password (API key or token) stored on Modal, never written in the code. \\
 \bottomrule
 \end{tabularx}
 \end{center}
+
+% ================================================================ 3 (new)
+\section{The three big pieces}
+\label{sec:pieces}
+
+\begin{eli5}
+Think of a \textbf{puppet show}. The \textbf{stage} is the simulator: a pretend world where the
+table, the mug, the rack and the robot live, and where things fall and bump like in real life.
+The \textbf{team behind the stage} is the harness: our own code, which decides what the robot may
+do next and makes sure it is safe. Some team members are so big that they live far away on
+\textbf{rented computers in the cloud}: the policy (muscle memory), SAM~3 (the eyes that cut out
+objects) and Opus (the coach who talks).
+\end{eli5}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small}]
+  \node[box=sun,minimum width=3.8cm,minimum height=2.6cm,text width=3.5cm] (stage) at (0,0)
+    {\Large\faTheaterMasks\\[2pt]\textbf{1. The stage}\\\scriptsize simulator\\\scriptsize RoboTwin + SAPIEN + CuRobo};
+  \node[box=sky,minimum width=3.8cm,minimum height=2.6cm,text width=3.5cm] (team) at (5.6,0)
+    {\Large\faUsers\\[2pt]\textbf{2. The team}\\\scriptsize the harness (our code)\\\scriptsize \code{harness/}, \code{run_skills.py}};
+  \node[box=leaf,minimum width=3.8cm,minimum height=2.6cm,text width=3.5cm] (cloud) at (11.2,0)
+    {\Large\faCloud\\[2pt]\textbf{3. Cloud helpers}\\\scriptsize policy + SAM 3 on Modal\\\scriptsize Opus on Anthropic};
+  \draw[<->,thick] (stage) -- node[lbl,above]{pictures,}node[lbl,below]{moves} (team);
+  \draw[<->,thick,dashed] (team) -- node[lbl,above]{questions,}node[lbl,below]{answers} (cloud);
+\end{tikzpicture}
+\caption{The whole project is these three pieces talking to each other.}
+\end{figure}
+
+\subsection{Piece 1: the simulator (the stage)}
+
+\begin{eli5}
+The simulator is a \textbf{video game with real physics}. Nothing breaks, nothing costs money if it
+falls, and you can start again with a fresh table. The \textbf{seed} is like the dice roll that
+decides where the mug starts. Seed 3 always gives the same starting table.
+\end{eli5}
+
+It is made of layers, like a cake:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small},
+    layer/.style={box=#1,minimum width=12.6cm,minimum height=0.9cm,text width=12.2cm,align=left}]
+  \node[layer=sun] (l1) at (0,0) {\textbf{RoboTwin} \code{hanging_mug} task \hfill \scriptsize places mug, rack and robot; says ``success'' when the mug hangs};
+  \node[layer=sun,below=1.5mm of l1] (l2) {\textbf{SAPIEN} physics + renderer \hfill \scriptsize gravity and contacts; draws camera pictures by \emph{ray tracing} on the GPU (Vulkan)};
+  \node[layer=sun,below=1.5mm of l2] (l3) {\textbf{CuRobo} motion planner \hfill \scriptsize ``put the hand there'' $\rightarrow$ a smooth joint path that avoids collisions};
+  \node[layer=stone,below=1.5mm of l3] (l4) {\textbf{NVIDIA GPU} with a Vulkan driver \hfill \scriptsize your laptop, or a rented Modal GPU};
+\end{tikzpicture}
+\caption{The simulator stack. The pinned versions are in the README; our renderer tweak is \code{patches/robotwin-renderer.patch}.}
+\end{figure}
+
+Our code talks to the simulator through three small files:
+\begin{itemize}
+  \item \code{harness/environment/robotwin.py} builds the task (\code{build_task}) and packs one
+        observation: three pictures, optional depth, the 14 numbers and the success flag (\code{observation_of}).
+  \item \code{development/simulator/local_simulator.py} (\code{LocalSimulator}) owns \textbf{one}
+        RoboTwin task in this process: reset with a seed, then step.
+  \item \code{harness/environment/local.py} (\code{LocalEnvironmentClient}) is what the skills use:
+        \code{observe}, \code{step}, and for careful moves \code{plan} (CuRobo) and \code{tick} (one physics step).
+\end{itemize}
+
+\begin{keyidea}
+\textbf{Pictures are the slow part.} We measured each piece (Section~\ref{sec:speed}): one physics
+step takes about 0.1\,ms, a CuRobo plan about 0.3\,s, but \textbf{drawing three camera pictures
+with depth takes about 0.8\,s} on a laptop GPU. An episode draws hundreds of pictures, so a faster
+GPU (for example on Modal) helps the most.
+\end{keyidea}
+
+\begin{careful}
+RoboTwin changes the program's working folder when it starts, so run \textbf{one simulator per
+process}. Its renderer needs a working NVIDIA Vulkan driver; on laptops with two GPUs, tell Vulkan
+to use only NVIDIA (Section~\ref{sec:trouble}).
+\end{careful}
+
+\subsection{Piece 2: the harness (the team)}
+
+\begin{eli5}
+The harness is the \textbf{rulebook plus the team} that stands between the coach and the robot.
+The coach may only hand in a move card. The team checks the card, does the exact maths, plays the
+move in small safe pieces, and writes everything down. The harness never teaches the robot
+anything new: the policy stays exactly as it was trained.
+\end{eli5}
+
+How it is set up today, in the order things happen:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 7mm,every node/.style={font=\small}]
+  \node[box=sky,text width=2.4cm] (cli) {\code{run_skills.py}\\\scriptsize checks options\\\scriptsize (\code{parse_arguments})};
+  \node[box=grape,text width=3.3cm,right=of cli] (asm) {{\footnotesize\code{runtime/assembly.py}}\\\scriptsize builds planner,\\\scriptsize eyes, evidence};
+  \node[box=sky,text width=3.8cm,right=of asm] (orc) {{\footnotesize\code{runtime/orchestrator.py}}\\\scriptsize the turn loop};
+  \node[box=rose,text width=2.4cm,right=of orc] (exe) {\code{skills/}\\\scriptsize executor + six\\\scriptsize move cards};
+  \draw[flow] (cli) -- (asm); \draw[flow] (asm) -- (orc); \draw[flow] (orc) -- (exe);
+  \node[box=leaf,text width=2.4cm,below=8mm of asm] (pl) {\code{planner/}\\\scriptsize Opus or script};
+  \node[box=leaf,text width=2.4cm,below=8mm of orc] (pe) {\code{perception/}\\\scriptsize eyes};
+  \node[box=sun,text width=2.4cm,below=8mm of exe] (pr) {\code{predicates/}\\\scriptsize checklist};
+  \draw[dflow] (orc) -- (pl); \draw[dflow] (orc) -- (pe); \draw[dflow] (exe) -- (pr);
+\end{tikzpicture}
+\caption{The harness in one picture. Section~\ref{sec:loop} explains the turn loop in detail.}
+\end{figure}
+
+Three switches decide \emph{where the evidence comes from}. Pick exactly one of the first two
+(the third can be added to the second):
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\footnotesize\raggedright\arraybackslash}p{4.8cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{3.2cm}}
+\toprule
+Evidence mode & What it means & Use it for \\
+\midrule
+\opt{development-oracle} & The simulator secretly tells the checklist the true mug position. Opus never sees it. & debugging skills; cheapest runs \\
+\opt{perception-factory}\newline{\footnotesize\code{...modal_sam3:create_detector}} & Real ``eyes'': SAM~3 masks + depth + Opus keypoints. What a real robot could know. & honest full-task runs \\
+\opt{planner-pixel-grounding} & Opus also points at pixels for targets inside its move card. & extra fallback for anchors \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Piece 3: the cloud helpers}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}p{4.1cm}>{\raggedright\arraybackslash}p{2.0cm}X}
+\toprule
+Helper & Code & Runs on & What it does \\
+\midrule
+Neotix policy & {\footnotesize\code{modal_apps/policy.py}} & Modal T4 & pictures + 14 numbers in, a chunk of actions out. Frozen. \\
+SAM 3 & {\footnotesize\code{modal_apps/sam3.py}} & Modal T4 & cuts out mug, rack and table in one RGB picture. \\
+Claude Opus & {\footnotesize\code{harness/planner/}\newline\code{anthropic.py}} & Anthropic API & the coach; see the next subsection. \\
+Episode runner \emph{(new)} & {\footnotesize\code{modal_apps/simulator.py}} & Modal L4 & runs a \emph{whole} episode (simulator + harness) in the cloud. Optional. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Idle helpers switch themselves off (policy after 10 minutes, SAM~3 after 2), so they only cost money while used.
+
+\subsection{Where Opus comes in}
+\label{sec:opus}
+
+\begin{eli5}
+Opus is the coach who \textbf{looks and talks} but never touches the robot. It has up to five
+jobs. The first is always on when you choose \opt{planner anthropic}; the others are switched on by
+the config or a flag. Every job sends Opus only public pictures and facts, and every answer is
+checked by code before it is used.
+\end{eli5}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.3cm}>{\raggedright\arraybackslash}p{2.1cm}>{\footnotesize\raggedright\arraybackslash}X>{\footnotesize\raggedright\arraybackslash}p{3.3cm}}
+\toprule
+Opus job & When & Code & Switched on by \\
+\midrule
+\textbf{1. Pick the next move card} & every turn & \code{AnthropicPlanner.select}\newline(\code{planner/anthropic.py}) & \opt{planner anthropic} \\
+\textbf{2. Find the rack peg} (three keypoints) & once, after reset & \code{assembly.}\newline\code{initialize_rack_frame},\newline\code{perception/opus_frame.py} & \code{perception.}\newline\code{opus_rack_grounding} \\
+\textbf{3. Find the mug handle} (three keypoints) & when a hang target is needed & \code{OpusObjectFrameGrounder} (\code{opus_frame.py}) & needs job 2 \\
+\textbf{4. Point at the mug's bottom} for lift height & when lift is checked & \code{OpusMugSupportGrounder}\newline(\code{perception/table_plane.py}) & \code{perception.}\newline\code{opus_mug_lift_}\newline\code{grounding} \\
+\textbf{5. Choose target pixels} inside its card & when a move needs a target & \code{PlannerPixelAnchorPreparer}\newline(\code{perception/preparation.py}) & \opt{planner-}\newline\texttt{pixel-grounding} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=4mm and 4mm,every node/.style={font=\scriptsize}]
+  \node[box=sun,text width=1.6cm] (r) {reset\\seed 3};
+  \node[box=grape,text width=1.9cm,right=of r] (j2) {\faBrain\ job 2\\rack peg frame};
+  \node[box=grape,text width=2.0cm,right=of j2] (j4) {table plane +\\\faBrain\ job 4 ready};
+  \node[box=grape,text width=2.0cm,right=10mm of j4] (j1) {\faBrain\ job 1\\pick a card\\(+ job 5 pixels)};
+  \node[box=rose,text width=2.0cm,right=of j1] (ex) {executor:\\policy \faCloud\ or\\CuRobo};
+  \node[box=leaf,text width=2.2cm,below=7mm of ex] (see) {\faCloud\ SAM 3 masks\\+ \faBrain\ jobs 3, 4};
+  \node[box=sun,text width=2.0cm,left=of see] (chk) {checklist\\(predicates)};
+  \draw[flow] (r) -- (j2); \draw[flow] (j2) -- (j4); \draw[flow] (j4) -- (j1);
+  \draw[flow] (j1) -- (ex); \draw[flow] (ex) -- (see); \draw[flow] (see) -- (chk); \draw[flow] (chk) -| (j1);
+  \begin{scope}[on background layer]
+    \node[zone=sky,fit=(j1)(ex)(see)(chk),label={[font=\scriptsize\bfseries,text=sky]above:repeat every turn}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{One full-task episode in time. Purple boxes are moments when Opus is asked something.}
+\end{figure}
+
+\begin{careful}
+Opus calls cost money and take seconds (about 12\,s per planner turn in our runs). The config
+limits them (\code{anthropic.max_calls}) and names the model explicitly (\code{claude-opus-5});
+there is no fallback model. Simulator-only facts are filtered out before anything reaches Opus.
+\end{careful}
 
 % ================================================================ 3
 \section{The world the robot lives in}
@@ -306,7 +540,7 @@ picks it up and hangs it on the rack. You can only go forward to the next chapte
   \draw[flow,line width=1.3pt] (g) -- (h);
   \draw[flow,line width=1.3pt] (h) -- (k);
   \node[pill=sun,font=\scriptsize] (m1) at ($(g.south)!0.5!(h.south)+(0,-0.75)$) {\code{mug_lifted} = true};
-  \node[pill=sun,font=\scriptsize,align=center] (m2) at ($(h.south)!0.5!(k.south)+(0,-0.95)$) {\code{mug_staged_on_table} or\\\code{left_transfer_complete} = true};
+  \node[pill=sun,font=\scriptsize,align=center] (m2) at ($(h.south)!0.5!(k.south)+(0,-0.95)$) {\code{handoff_confirmed} or\\\code{right_mug_lifted} = true};
   \draw[sun,thick,dotted] (m1.north) -- ($(g.east)!0.5!(h.west)$);
   \draw[sun,thick,dotted] (m2.north) -- ($(h.east)!0.5!(k.west)$);
   \node[pill=leaf,right=7mm of k,font=\scriptsize] (ts) {\code{task_success}};
@@ -318,8 +552,10 @@ picks it up and hangs it on the rack. You can only go forward to the next chapte
 \begin{keyidea}
 A \textbf{true public milestone} sets the minimum phase. When the cameras cannot tell (the
 answer is \code{null}), Opus may move the phase forward by its own visual judgement, but only
-\textbf{one step per turn}. The hang phase additionally needs the staged-mug milestone.
-See \srcref{harness/planner/anthropic.py:294} (\code{_public_phase_floor}) and \code{_resolve_phase}.
+\textbf{one step per turn}. Handoff starts once the mug is lifted (or already staged or
+transferred). Hang needs proof that the \emph{right} arm actually has the mug
+(\code{handoff_confirmed} or \code{right_mug_lifted}); a mug merely placed on the table is not enough.
+See \srcref{harness/planner/anthropic.py:372} (\code{_public_phase_floor}) and \code{_resolve_phase}.
 \end{keyidea}
 
 % ================================================================ 5
@@ -346,8 +582,38 @@ Every episode is a loop of \textbf{turns}. One turn = look, decide, check, do, r
   \draw[flow] (f) to[bend left=15] (a);
   \node[align=center,font=\small] at (0,0) {\textbf{one turn}\\[2pt]\scriptsize repeat until\\\scriptsize success, abort\\\scriptsize or budget ends};
 \end{tikzpicture}
-\caption{The turn loop, implemented in \code{SkillOrchestrator.run} (\srcref{harness/runtime/orchestrator.py:219}).}
+\caption{The turn loop, implemented in \code{SkillOrchestrator.run} (\srcref{harness/runtime/orchestrator.py:224}).}
 \end{figure}
+
+\subsection{A concrete example: one turn in plain English}
+\begin{eli5}
+Imagine that the last turn already closed the left gripper around the mug. The next turn does
+not blindly continue from memory. It starts by looking again. This is important because the mug
+may have moved, the fingers may have slipped, or the camera may be uncertain.
+\end{eli5}
+
+\begin{enumerate}[leftmargin=*,itemsep=4pt]
+  \item \textbf{Observe:} RoboTwin returns three RGB pictures and the current 14-number robot
+        state. This is the new ``what is happening now?'' snapshot.
+  \item \textbf{Checklist:} the evidence code answers questions such as
+        \code{mug_grasped} and \code{mug_lifted}. Each answer is \code{true}, \code{false}, or
+        \code{null}; \code{null} means ``we do not have enough evidence,'' not ``false.''
+  \item \textbf{Decide:} the planner sees the allowed pictures and facts and returns one card,
+        for example \code{move_to(target="mug_lift")} or \code{vla_act}.
+  \item \textbf{Prepare:} if the card names a 3D target, perception converts a camera pixel and
+        its depth into a fresh world-space anchor. The code does not trust an old remembered
+        position.
+  \item \textbf{Execute:} the executor validates the card, applies its limits, and either asks
+        the frozen policy for a short action chunk or lets CuRobo plan a careful analytic move.
+  \item \textbf{Record:} the result, checks, timing and any failure flag are written to the run
+        files. The next turn starts with a new observation, not with an automatic replay.
+\end{enumerate}
+
+\begin{keyidea}
+The planner does not receive a live video stream and it does not continuously steer the robot.
+It receives a snapshot, makes one bounded decision, waits for the executor to finish or stop, and
+then receives another snapshot. This is why the guide calls the system a \textbf{turn loop}.
+\end{keyidea}
 
 \subsection{What happens after a skill finishes?}
 
@@ -374,7 +640,7 @@ Every episode is a loop of \textbf{turns}. One turn = look, decide, check, do, r
   \draw[flow] (q4) -- node[lbl,above]{yes} (done);
   \draw[flow] (q4) -- node[lbl,right]{no} (next);
 \end{tikzpicture}
-\caption{Turn outcome decisions. ``Recoverable'' failures are a short, explicit list in \code{recovery_flags} (\srcref{harness/runtime/orchestrator.py:143}).}
+\caption{Turn outcome decisions. ``Recoverable'' failures are a short, explicit list in \code{recovery_flags} (\srcref{harness/runtime/orchestrator.py:144}).}
 \end{figure}
 
 The recoverable failures are: a move that was rejected \emph{before} moving, a move that moved but
@@ -439,14 +705,17 @@ Skill & What it does & Arms & Limits \\
   \draw[decorate,decoration={brace,amplitude=5pt,mirror},thick] (1.1,-0.8) -- (5.9,-0.8) node[midway,below=6pt,font=\scriptsize] {executed one by one, checked after each};
   \draw[decorate,decoration={brace,amplitude=5pt,mirror},thick,stone] (6.1,-0.8) -- (8.9,-0.8) node[midway,below=6pt,font=\scriptsize,text=stone] {stale tail discarded};
 \end{tikzpicture}
-\caption{One chunk. After every action the code checks the stop predicate, arm-to-arm contact and
-the task checker. Unused actions are thrown away, never executed later (\srcref{harness/skills/vla_act.py:159}).}
+\caption{One chunk. After every action the code checks arm-to-arm contact, the task checker and
+cheap stop predicates. Camera-based checks (SAM~3, Opus) run once, when the call hands control back
+to the planner. Unused actions are thrown away, never executed later (\srcref{harness/skills/vla_act.py:165}).}
 \end{figure}
 
 \begin{keyidea}
-\textbf{Feedback boundary.} In Opus mode each \code{vla_act} call ends after
-\code{planner_feedback_chunks} chunks (normally 1). The coach then sees new pictures and decides
-again. When RoboTwin's checker first reports success, the policy may finish a fixed 16-action
+\textbf{Feedback boundary.} In Opus mode the policy first gets an uninterrupted window at the start
+of each phase (full-task config: 64 actions for grasp, 128 for handoff, 64 for hang, set by
+\code{anthropic.*_initial_feedback_after_actions}). After that, each \code{vla_act} call ends after
+\code{planner_feedback_chunks} chunks (normally 1 chunk of 16 actions). The coach then sees new
+pictures and decides again. When RoboTwin's checker first reports success, the policy may finish a fixed 16-action
 follow-through so the gripper can let go cleanly (\code{NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS}).
 \end{keyidea}
 
@@ -494,7 +763,7 @@ follow-through so the gripper can let go cleanly (\code{NATIVE_SUCCESS_FOLLOW_TH
   \node[zone=rose,minimum width=5.0cm,minimum height=4.5cm,label={[font=\small\bfseries,text=rose]above:Private (simulator only)}] (pri) at (7.9,0) {};
   \node[box=leaf,text width=2.9cm] at (-1.8,1.25) {camera pictures};
   \node[box=leaf,text width=2.9cm] at (1.8,1.25) {depth and\\calibration};
-  \node[box=leaf,text width=2.9cm] at (-1.8,0.1) {arm joint readings};
+  \node[box=leaf,text width=2.9cm] at (-1.8,0.1) {arm joint readings,\\gripper (TCP) poses};
   \node[box=leaf,text width=2.9cm] at (1.8,0.1) {perception\\predicates};
   \node[box=sky] (op) at (0,-1.4) {\faBrain\ Opus sees only this side};
   \node[box=rose,text width=3.6cm] at (7.9,1.25) {exact mug pose};
@@ -514,7 +783,7 @@ that \code{rack_seat_aligned} is \code{true}.
 The planner enforces this before anything moves:
 
 \needspace{13\baselineskip}
-\begin{lstlisting}[firstnumber=181,caption={\srcref{harness/planner/anthropic.py:181}}]
+\begin{lstlisting}[firstnumber=236,caption={\srcref{harness/planner/anthropic.py:236}}]
 release_authorized = self._public_predicate_true(context, "release_ready")
 rack_seat_authorized = (vla_phase == "hang" and
     self._public_predicate_true(context, "rack_seat_aligned"))
@@ -534,6 +803,7 @@ if (not release_allowed and
   \item \textbf{Anchors expire.} A target is valid only for the observation it was computed from.
   \item \textbf{Arm contact recovery is narrow}: right hand moves 3--10\,cm away, at most 2 retreats and 3 incidents.
   \item \textbf{Grounding retries are limited}: a rejected pixel can be re-chosen at most twice, the second time from a different camera.
+  \item \textbf{Losing sight is not a reason to stop}: if the cameras lose the mug and table (or mug and rack while hanging) during a policy phase, the runtime itself continues the policy for one bounded chunk and looks again, instead of letting Opus abort (\code{_perception_gap_vla_continuation} in \code{planner/anthropic.py}).
   \item \textbf{Logs never contain secrets} or raw provider text; only short error codes.
 \end{itemize}
 
@@ -596,7 +866,7 @@ return tuple(float(value) for value in world[:3] / world[3])
 
 \begin{itemize}
   \item \textbf{SAM 3} (\code{harness/perception/modal_sam3.py}) draws masks. Mask confidence floors: mug 0.40, rack 0.60 (0.18 with the exploration prompt ``mug rack''), table 0.60.
-  \item \textbf{Opus keypoints} (\code{opus_frame.py}) give three ordered points on the rack peg or the mug handle; three points define a little 3D coordinate frame.
+  \item \textbf{Opus keypoints} (\code{opus_frame.py}) give three ordered points on the rack peg or the mug handle; three points define a little 3D coordinate frame. The points are turned into 3D with depth alone (each must sit on a smooth depth surface); no SAM mask is needed (\texttt{ground\_public\_\allowbreak object\_frame\_rgbd}).
   \item \textbf{Opus support pixel} (\code{table_plane.py}) marks the bottom of the mug, used to measure lift height.
 \end{itemize}
 
@@ -643,7 +913,9 @@ return tuple(float(value) for value in world[:3] / world[3])
 \begin{changeit}
 Lift thresholds are constructor arguments: \code{lifted_distance_m=0.04},
 \code{table_distance_m=0.025}, \code{consecutive_observations=2} in
-\code{harness/perception/table_plane.py}. Mask confidence floors are
+\code{harness/perception/table_plane.py}. The first lift check waits until the policy has run
+\code{perception.mug_lift_first_check_after_actions} actions (64 in the full-task config); before
+that the answer is \code{null}. Mask confidence floors are
 \code{MUG_MASK_MIN_CONFIDENCE} and \code{EXPLORE_RACK_MASK_MIN_CONFIDENCE} in
 \code{harness/runtime/assembly.py}. Prompts for Opus perception live in \code{harness/prompts/}.
 \end{changeit}
@@ -679,7 +951,7 @@ Lift thresholds are constructor arguments: \code{lifted_distance_m=0.04},
   \node[box=sun,minimum width=2.9cm] (pred) at (-1.9,-1.5) {Predicates\\\scriptsize checklist};
   \node[box=sun,minimum width=2.9cm] (sim) at (1.9,-1.5) {RoboTwin + CuRobo\\\scriptsize physics, planning};
   \begin{scope}[on background layer]
-    \node[zone=sky,fit=(cli)(per)(exe)(pred)(sim),label={[font=\small\bfseries,text=sky]above:\faLaptop\ Your machine (Linux + GPU)}] {};
+    \node[zone=sky,fit=(cli)(per)(exe)(pred)(sim),label={[font=\small\bfseries,text=sky]above:\faLaptop\ Your machine \emph{or} a Modal episode container}] {};
   \end{scope}
   \node[box=leaf,minimum width=3.0cm] (sam) at (-7.0,0) {SAM 3\\\scriptsize \code{modal_apps/sam3.py}\\\scriptsize T4 GPU};
   \node[box=leaf,minimum width=3.0cm] (pol) at (7.0,0) {Neotix policy\\\scriptsize \code{modal_apps/policy.py}\\\scriptsize T4 GPU};
@@ -695,7 +967,8 @@ Lift thresholds are constructor arguments: \code{lifted_distance_m=0.04},
   \draw[dflow] (exe.east) -- node[lbl,above,font=\tiny]{RGB +\\state} (pol.west);
   \draw[dflow] (per.west) -- node[lbl,above,font=\tiny]{RGB\\only} (sam.east);
 \end{tikzpicture}
-\caption{System architecture. Dashed arrows cross the network.}
+\caption{System architecture. Dashed arrows cross the network. The blue box runs either on your
+own GPU or, unchanged, inside a Modal container (Section~\ref{sec:runmodal}).}
 \end{figure}
 
 \subsection{How the code layers depend on each other}
@@ -744,7 +1017,10 @@ Lift thresholds are constructor arguments: \code{lifted_distance_m=0.04},
       [memory/ \ exploration/ \ evaluation/]
       [prompts/ \quad{\rmfamily\color{stone} text sent to Opus}]
       [legacy/ \quad{\rmfamily\color{stone} old pass-through supervisor}]]
-    [modal\_apps/ \quad{\rmfamily\color{stone} policy.py, sam3.py (cloud)}]
+    [modal\_apps/
+      [policy.py \ sam3.py \quad{\rmfamily\color{stone} cloud helpers}]
+      [simulator.py \quad{\rmfamily\color{stone} cloud image, spike, remote episodes}]
+      [episode\_request.py \quad{\rmfamily\color{stone} turns CLI options into a remote run}]]
     [development/
       [simulator/ \ replays/ \ capture/]
       [checkpoints/ \ recovery/ \ demos/]]
@@ -773,7 +1049,9 @@ how careful moves are executed & \code{harness/skills/analytic.py} \\
 how pictures become 3D anchors & \code{harness/perception/grounding.py}, \code{preparation.py} \\
 the checklist logic & \code{harness/predicates/} \\
 how RoboTwin is started & \code{harness/environment/robotwin.py} \\
-the cloud model code & \code{modal_apps/} \\
+the cloud model code & \code{modal_apps/policy.py}, \code{sam3.py} \\
+how an episode runs on Modal & \code{modal_apps/simulator.py}, \code{episode_request.py} \\
+how the simulator is wrapped & \code{development/simulator/local_simulator.py}, \code{harness/environment/local.py} \\
 \bottomrule
 \end{tabularx}
 \end{center}
@@ -782,16 +1060,18 @@ the cloud model code & \code{modal_apps/} \\
 \section{Code tour: how it works today}
 
 \subsection{Starting an episode}
-\code{main()} checks the command-line options \emph{before} anything expensive starts, then
+\code{main()} checks the command-line options with \code{parse_arguments()} \emph{before} anything
+expensive starts (the Modal launcher reuses the same check on your machine), then
 \code{run_episode()} owns the simulator for exactly one reset:
 
 \needspace{12\baselineskip}
-\begin{lstlisting}[numbers=none,caption={\srcref{run_skills.py:191} \ \code{run_episode} (abridged)}]
+\begin{lstlisting}[numbers=none,caption={\srcref{run_skills.py:200} \ \code{run_episode} (abridged)}]
 planner = assembly.build_planner(args.planner, settings, planner_settings=planner_settings,
                                  pixel_grounding=args.planner_pixel_grounding)
 simulator = LocalSimulator(args.robotwin_root.resolve(), rgbd_enabled=...)
 environment = open_environment(simulator, video=video, frozen=frozen)
-environment.reset(args.seed)  # Exactly one reset, owned by this runner.
+initial_observation = environment.reset(args.seed)  # Exactly one reset, owned by this runner.
+require_camera_frames(initial_observation, required_cameras)  # RGB-D runs: needed cameras present
 
 if settings.perception.opus_rack_grounding:          # optional: ground the rack once
     rack_frame_cache, rack_grounding = assembly.initialize_rack_frame(...)
@@ -854,7 +1134,7 @@ the executor. Unknown fields are rejected (\code{extra="forbid"}).
 
 \subsection{The heart of the turn loop}
 \needspace{12\baselineskip}
-\begin{lstlisting}[numbers=none,caption={\srcref{harness/runtime/orchestrator.py:259} (abridged)}]
+\begin{lstlisting}[numbers=none,caption={\srcref{harness/runtime/orchestrator.py:268} (abridged)}]
 selection = self.planner.select(PlannerContext(turn, observation.copy(), predicates, ...))
 command = SkillCommand.model_validate(selection.command.model_dump())
 self.log({**base, "event_type": "planner_selection", ...})   # intent logged before motion
@@ -871,7 +1151,7 @@ flags = recovery_flags(previous)        # known, recoverable failure types
 
 \subsection{Playing a policy chunk}
 \needspace{12\baselineskip}
-\begin{lstlisting}[numbers=none,caption={\srcref{harness/skills/vla_act.py:62} (abridged)}]
+\begin{lstlisting}[numbers=none,caption={\srcref{harness/skills/vla_act.py:68} (abridged)}]
 while context.chunks < (success_chunk_limit or configured_chunk_limit):
     observation = env.observe()
     context.chunks += 1                          # failed requests also count
@@ -897,7 +1177,7 @@ I want to\ldots & Do this \\
 \midrule
 change what Opus is told & Edit \code{harness/prompts/common.md} or \code{full_task.md}. The prompt hash in \code{manifest.json} changes, so old and new runs stay distinguishable. \\
 change budgets or chunk sizes & Edit the YAML in \code{configs/} (\code{budget:}, \code{anthropic.vla:}). No code change. \\
-get feedback after more chunks & \code{anthropic.planner_feedback_chunks} (1--4) in the config. \\
+get feedback after more chunks & \code{anthropic.planner_feedback_chunks} (1--4) in the config; the first window of each phase is \code{anthropic.<phase>_initial_feedback_after_actions}. \\
 use another segmentation model & Write a factory returning an object with \code{detect(images, *, observation_sequence)} and pass \opt{perception-factory pkg.module:factory}. \\
 add a new planner & Implement \code{select}, register it in \code{assembly.build_planner}, add a CLI choice in \code{run_skills.build_parser}. \\
 use another policy backend & Implement \code{reset_history()} and \code{infer(observation, n)} (\code{harness/vla/base.py}). \\
@@ -929,6 +1209,7 @@ perception:
   rgbd_enabled: true            # capture depth + calibration
   opus_rack_grounding: true     # ground the rack once at reset
   opus_mug_lift_grounding: true # table-plane lift evidence
+  mug_lift_first_check_after_actions: 64  # no lift check before this
   rack_grounding_camera: right_camera
   rack_prompt_profile: explore_mug_rack
 budget:
@@ -939,8 +1220,11 @@ budget:
 anthropic:
   model: claude-opus-5          # explicit; there is no fallback model
   task_scope: full_task         # grasp -> handoff -> hang
-  planner_feedback_chunks: 1    # Opus looks again after every chunk
-  vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 768}
+  planner_feedback_chunks: 1    # after the first window, Opus looks after every chunk
+  grasp_initial_feedback_after_actions: 64     # uninterrupted policy actions
+  handoff_initial_feedback_after_actions: 128  #   at the start of each phase
+  hang_initial_feedback_after_actions: 64
+  vla: {max_chunks: 32, chunk_size: 16, max_policy_actions: 768}
 \end{lstlisting}
 
 \begin{center}
@@ -961,72 +1245,331 @@ Config family & Use \\
 \end{center}
 
 % ================================================================ 14
-\section{Setting up and running}
+\section{How we work: the development ladder}
+\label{sec:ladder}
+
+\begin{eli5}
+Learning to swim, you start in the bathtub, then the shallow end, and only then the deep end.
+We test changes the same way. Each rung up the ladder costs more time and money, so only climb
+when the rung below passes.
+\end{eli5}
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[node distance=4mm and 4mm]
-  \node[pill=sky] (s1) {\textbf{1} conda env};
-  \node[pill=sky,right=of s1] (s2) {\textbf{2} RoboTwin\\+ CuRobo};
-  \node[pill=leaf,right=of s2] (s3) {\textbf{3} deploy\\policy};
-  \node[pill=leaf,right=of s3] (s4) {\textbf{4} deploy\\SAM 3};
-  \node[pill=grape,right=of s4] (s5) {\textbf{5} API key};
-  \node[pill=sun,right=of s5] (s6) {\textbf{6} tests};
-  \node[pill=rose,right=of s6] (s7) {\textbf{7} first\\episode};
-  \draw[flow] (s1)--(s2); \draw[flow] (s2)--(s3); \draw[flow] (s3)--(s4); \draw[flow] (s4)--(s5); \draw[flow] (s5)--(s6); \draw[flow] (s6)--(s7);
-  \node[lbl,below=1mm of s4] {optional:\\perception only};
-  \node[lbl,below=1mm of s5] {optional:\\Opus only};
+\begin{tikzpicture}[every node/.style={font=\small}]
+  \foreach \y/\c/\t/\d in {0/leaf/{\textbf{0} unit tests}/{CPU only, $\sim$8\,s, free},
+                          1/leaf/{\textbf{1} offline replays}/{saved pictures, no simulator},
+                          2/sky/{\textbf{2} local smoke episode}/{scripted + oracle, no Opus},
+                          3/sky/{\textbf{3} Modal smoke episode}/{same, on a cloud GPU, cents},
+                          4/grape/{\textbf{4} full Opus episode}/{local or Modal; Opus + GPU time},
+                          5/rose/{\textbf{5} campaigns}/{exploration or frozen evaluation}} {
+    \node[box=\c,minimum width=4.4cm,anchor=west] at (\y*0.9,\y*1.05) {\t};
+    \node[lbl,anchor=west,text width=4.6cm,align=left] at (\y*0.9+4.6,\y*1.05) {\d};
+  }
+  \draw[->,very thick,stone] (-0.6,-0.4) -- (4.0,5.6) node[above,font=\scriptsize,text=stone] {more cost, more realism};
 \end{tikzpicture}
-\caption{Deployment steps. You need Linux, Python 3.10 and an NVIDIA GPU with Vulkan.}
+\caption{Climb one rung at a time. Most bugs are cheapest to find on rungs 0--2.}
 \end{figure}
 
-\subsection*{Step 1--2: local environment and simulator}
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}X}
+\toprule
+Rung & Command (from the repository root) \\
+\midrule
+0 tests & \texttt{python -m unittest discover -s tests -q} \\
+1 replays & \texttt{python -m development.replays.perception \opt{help}} (and the other tools in \code{development/replays/}) \\
+2 local smoke & \texttt{python run\_skills.py \opt{config} configs/skill\_runtime.yaml \opt{development-oracle} \opt{output} data/runs/smoke\_01} \\
+3 Modal smoke & \texttt{modal run modal\_apps/simulator.py::episode \opt{config} configs/skill\_runtime.yaml \opt{development-oracle} \opt{output} data/runs/modal\_smoke\_01} \\
+4 full episode & Section~\ref{sec:runlocal} (local) or Section~\ref{sec:runmodal} (Modal) \\
+5 campaigns & \code{run_exploration.py}, \code{run_evaluation.py} (local only for now) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{keyidea}
+The rung-2 smoke run is \emph{expected} to stop with \code{"outcome": "step_budget"}: the scripted
+recipe gives its first move 1000 physics ticks, and the planned path needs a little more. It still
+proves the simulator, CuRobo and logging work. Same result on Modal $=$ the remote runner behaves
+like the local one.
+\end{keyidea}
+
+% ================================================================ 15
+\section{Setting up and running}
+
+There are two ways to run an episode. Both use the same command-line options and produce the same
+run folder; only \emph{where the simulator runs} changes.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=4mm and 5mm,every node/.style={font=\small}]
+  \node[pill=stone] (c1) {clone repo +\\Python env};
+  \node[pill=leaf,right=of c1] (c2) {deploy policy\\+ SAM 3};
+  \node[pill=grape,right=of c2] (c3) {Anthropic\\key};
+  \node[pill=sun,above right=3mm and 8mm of c3] (a1) {\textbf{A} local: RoboTwin,\\assets, CuRobo, Vulkan};
+  \node[pill=sky,below right=3mm and 8mm of c3] (b1) {\textbf{B} Modal: secrets,\\assets Volume, spike};
+  \node[pill=rose,right=30mm of c3] (run) {run an\\episode};
+  \draw[flow] (c1)--(c2); \draw[flow] (c2)--(c3); \draw[flow] (c3)--(a1); \draw[flow] (c3)--(b1);
+  \draw[flow] (a1)--(run); \draw[flow] (b1)--(run);
+\end{tikzpicture}
+\caption{Common steps, then path A (your own NVIDIA GPU) or path B (rented Modal GPU). You can set up both.}
+\end{figure}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.2cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+ & \textbf{A: local} & \textbf{B: Modal} \\
+\midrule
+You need & Linux, NVIDIA GPU with Vulkan, $\sim$10\,GB disk & any machine with Python and a Modal account \\
+Speed & pictures $\sim$0.8\,s each on a 4\,GB laptop GPU & pictures $\sim$0.11\,s each on an L4 \\
+Costs & electricity; Opus + policy calls & GPU time ($\sim$\$0.6--0.8/h) + Opus + policy calls \\
+Good for & debugging with the simulator in reach & long or many runs, small laptops \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Common steps (both paths)}
+\begin{eli5}
+The commands below prepare three separate helpers. The Python environment holds the project's
+code and libraries. The policy and SAM~3 deployments put the learned model and object detector on
+Modal. The Anthropic variable gives the coach permission to answer. None of these commands runs
+an episode yet; they only prepare the pieces needed by a later episode command.
+\end{eli5}
 \begin{cmd}
+git clone <this repository> \&\& cd Agent-Aware-Vision-Language-Action-Model\\
 conda create -n robotwin python=3.10 -y \&\& conda activate robotwin\\
-python -m pip install -r requirements/sim.txt \textbackslash\\
-\hspace*{1.5em}-r requirements/planner.txt 'modal>=1,<2'\\
+python -m pip install -r requirements/sim.txt -r requirements/planner.txt \textquotesingle{}modal>=1,<2\textquotesingle{}\\[4pt]
+modal setup \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \# log in to Modal once\\
+modal deploy modal\_apps/policy.py \ \ \ \ \ \ \ \ \ \# frozen Neotix policy (T4)\\[4pt]
+\# SAM 3: first request access at huggingface.co/facebook/sam3 and wait for approval\\
+modal secret create huggingface HF\_TOKEN=hf\_... \ \ \# add -{}-force to replace it\\
+modal deploy modal\_apps/sam3.py\\
+modal run modal\_apps/sam3.py \ \ \ \ \ \ \ \ \ \ \ \ \ \ \# smoke test: prints "SAM 3 ... ready"\\[4pt]
+\# Anthropic key, kept inside the conda env (never in git)\\
+conda env config vars set ANTHROPIC\_API\_KEY=sk-ant-...\\
+conda deactivate \&\& conda activate robotwin
+\end{cmd}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{First three lines:} download the repository, create an isolated Python 3.10
+        environment, and install the simulator/planner/Modal client libraries.
+  \item \textbf{\code{modal setup}:} authenticate the Modal command-line tool. This is not the
+        Anthropic login and does not upload the repository by itself.
+  \item \textbf{\code{modal deploy ...policy.py}:} start or update the persistent remote policy
+        helper. The episode runner later calls this helper with an observation.
+  \item \textbf{SAM~3 lines:} store the Hugging Face token as a Modal secret, deploy the detector,
+        and run its small readiness check. The token must not be pasted into a committed file.
+  \item \textbf{Anthropic lines:} store the coach's API key in the local conda environment.
+        \code{run\_skills.py} reads it when the planner is \code{anthropic}.
+\end{itemize}
+Path B only needs the Python packages (no simulator, no GPU) on your machine; the \code{robotwin}
+environment above works for both. Path A additionally needs the RoboTwin assets, CuRobo and a
+working NVIDIA Vulkan driver because the simulator and renderer run locally.
+
+\subsection{Path A: run on your own GPU}
+\label{sec:runlocal}
+
+\textbf{A1. RoboTwin and its assets.} Run from the repository root. The task only needs the
+\code{embodiments} and \code{objects} bundles ($\sim$4\,GB); the 11\,GB background textures are
+only used with random backgrounds, which \code{demo_clean} turns off.
+\begin{cmd}
 git clone https://github.com/RoboTwin-Platform/RoboTwin.git RoboTwin\\
 git -C RoboTwin checkout ea8b21121ebb3cd201ff5b3fe361944ac94eda3f\\
 git -C RoboTwin apply ../patches/robotwin-renderer.patch\\
-(cd RoboTwin \&\& bash scripts/\_download\_assets.sh)\\
-git clone -{}-branch v0.7.8 https://github.com/NVlabs/curobo.git \textbackslash\\
-\hspace*{1.5em}RoboTwin/envs/curobo\\
+cd RoboTwin/assets\\
+HF\_HUB\_DISABLE\_XET=1 python -c "from huggingface\_hub import snapshot\_download as get; \textbackslash\\
+\hspace*{1.5em}get(\textquotesingle{}TianxingChen/RoboTwin2.0\textquotesingle{}, repo\_type=\textquotesingle{}dataset\textquotesingle{}, local\_dir=\textquotesingle{}.\textquotesingle{}, \textbackslash\\
+\hspace*{1.5em}allow\_patterns=[\textquotesingle{}embodiments.zip\textquotesingle{}, \textquotesingle{}objects.zip\textquotesingle{}])"\\
+unzip -q embodiments.zip \&\& rm embodiments.zip\\
+unzip -q objects.zip \&\& rm objects.zip \&\& rm -rf \_\_MACOSX\\
+cd .. \&\& python scripts/update\_embodiment\_config\_path.py \&\& cd ..
+\end{cmd}
+
+\textbf{A2. CuRobo (the motion planner).} It compiles GPU code, so the compiler settings are stored
+in the conda environment once. CUDA~12.1's \code{nvcc} refuses gcc newer than 12; set
+\code{TORCH_CUDA_ARCH_LIST} to your GPU (8.6 for an RTX 2050/30-series).
+\begin{cmd}
+git clone -{}-branch v0.7.8 https://github.com/NVlabs/curobo.git RoboTwin/envs/curobo\\
 git -C RoboTwin/envs/curobo checkout d64c4b005459db10c5dd867d8b30a87d5bda9bdb\\
-python -m pip install -e RoboTwin/envs/curobo -{}-no-build-isolation\\
-python -m pip install warp-lang==1.12.0
-\end{cmd}
-Keep NumPy at 1.26.4 locally; the cloud workers use their own Python 3.12 images.
-
-\subsection*{Step 3--5: cloud workers and keys}
-\begin{cmd}
-modal setup\\
-modal deploy modal\_apps/policy.py \ \ \# frozen Neotix policy (T4)\\
-modal deploy modal\_apps/sam3.py \ \ \ \ \# needs Modal secret "huggingface" (HF\_TOKEN)\\
-export ANTHROPIC\_API\_KEY=... \ \ \ \ \ \# never commit it
+conda env config vars set CUDA\_HOME="\$CONDA\_PREFIX" CC=/usr/bin/gcc-12 \textbackslash\\
+\hspace*{1.5em}CXX=/usr/bin/g++-12 CUDAHOSTCXX=/usr/bin/g++-12 \textbackslash\\
+\hspace*{1.5em}NVCC\_PREPEND\_FLAGS="-ccbin /usr/bin/g++-12" TORCH\_CUDA\_ARCH\_LIST=8.6\\
+conda deactivate \&\& conda activate robotwin\\
+python -m pip install -e RoboTwin/envs/curobo -{}-no-build-isolation \ \ \# 5--15 minutes\\
+python -m pip install warp-lang==1.12.0\\
+python -c "import curobo; print(\textquotesingle{}curobo ok\textquotesingle{})"
 \end{cmd}
 
-\subsection*{Step 6: tests (CPU only, about 6 seconds)}
+\textbf{A3. Vulkan: use only the NVIDIA driver.} Laptops with a second (Intel) GPU can freeze the
+renderer otherwise.
 \begin{cmd}
-python -m unittest discover -s tests -q
+conda env config vars set VK\_DRIVER\_FILES=/usr/share/vulkan/icd.d/nvidia\_icd.json \textbackslash\\
+\hspace*{1.5em}VK\_ICD\_FILENAMES=/usr/share/vulkan/icd.d/nvidia\_icd.json\\
+conda deactivate \&\& conda activate robotwin\\
+vulkaninfo -{}-summary | grep deviceName \ \ \ \# should list only your NVIDIA GPU
 \end{cmd}
 
-\subsection*{Step 7: run something}
+\textbf{A4. Climb the ladder.} Tests, then the smoke run, then a full episode with a time limit.
+\code{timeout -s INT} sends the same signal as Ctrl+C, so the run still writes \code{summary.json}
+and its video.
 \begin{cmd}
-\# scripted planner + development oracle: no Opus calls, cheapest live check\\
+python -m unittest discover -s tests -q\\
 python run\_skills.py -{}-config configs/skill\_runtime.yaml \textbackslash\\
 \hspace*{1.5em}-{}-development-oracle -{}-output data/runs/smoke\_01\\[4pt]
-\# full task with Opus and public RGB-D perception\\
-python run\_skills.py \textbackslash\\
+timeout -s INT 75m python run\_skills.py \textbackslash\\
 \hspace*{1.5em}-{}-config configs/skill\_runtime\_opus\_full\_task\_rgbd\_table\_lift.yaml \textbackslash\\
 \hspace*{1.5em}-{}-planner anthropic \textbackslash\\
 \hspace*{1.5em}-{}-perception-factory harness.perception.modal\_sam3:create\_detector \textbackslash\\
 \hspace*{1.5em}-{}-output data/runs/full\_task\_01
 \end{cmd}
 
+\subsection{Path B: run on Modal}
+\label{sec:runmodal}
+
+\begin{eli5}
+Instead of using your own computer's graphics card, you \textbf{rent} a stronger one for as long as
+the episode lasts. Modal starts a fresh, clean computer (a \emph{container}) for every episode,
+runs exactly the same \code{run_skills.py} there, keeps the results in a cloud folder (a
+\emph{Volume}), and copies them back to your \code{data/runs/} folder at the end.
+\end{eli5}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small}]
+  \node[box=stone,text width=3.0cm] (lap) at (0,0) {\faLaptop\ your machine\\\scriptsize \code{modal run ...::episode}\\\scriptsize checks options first};
+  \node[box=sky,text width=4.0cm] (ep) at (6.2,0) {\textbf{episode container (L4)}\\\scriptsize \code{run_skills.py} + RoboTwin\\\scriptsize + CuRobo, fresh every run};
+  \node[box=leaf,text width=2.4cm] (pol) at (11.6,1.3) {policy (T4)};
+  \node[box=leaf,text width=2.4cm] (sam) at (11.6,0) {SAM 3 (T4)};
+  \node[box=grape,text width=2.4cm] (ant) at (11.6,-1.3) {Opus (API)};
+  \node[box=sun,text width=3.0cm] (va) at (4.4,-2.4) {Volume\\\code{robotwin-assets}};
+  \node[box=sun,text width=3.0cm] (vr) at (8.0,-2.4) {Volume\\\code{robotwin-runs}};
+  \draw[flow] (lap.north east) -- node[lbl,above,sloped]{args + config} (ep.north west);
+  \draw[flow] (vr.south) -- ++(0,-0.45) -| node[lbl,below,pos=0.25]{results copied back to \code{data/runs/}} (lap.south);
+  \draw[dflow] (ep) -- (pol); \draw[dflow] (ep) -- (sam); \draw[dflow] (ep) -- node[lbl,above,sloped,pos=0.6]{secret key} (ant);
+  \draw[flow] (va) -- node[lbl,left]{read} (ep); \draw[flow] (ep) -- node[lbl,right]{write} (vr);
+  \begin{scope}[on background layer]
+    \node[zone=leaf,fit=(ep)(pol)(sam)(va)(vr),label={[font=\small\bfseries,text=leaf]above:\faCloud\ Modal}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{An episode on Modal (\srcref{modal_apps/simulator.py}). Policy and SAM~3 calls stay inside Modal.}
+\end{figure}
+
+\textbf{B1. One-time setup.} The first command builds the cloud image (RoboTwin, CuRobo for
+T4/A10G/L4/A100, the same patches as path~A; about 20--40 minutes once, then cached) and copies the
+assets into a Volume. The spike is optional: it measures a GPU and saves a camera picture to
+\code{data/modal_spike/}.
+\begin{cmd}
+\# needed by every run of simulator.py, even the spike\\
+modal secret create anthropic ANTHROPIC\_API\_KEY=sk-ant-...\\
+modal run modal\_apps/simulator.py::download\_assets \ \ \ \ \ \ \ \ \# CPU only, once\\
+modal run modal\_apps/simulator.py::spike \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \# optional: test the L4\\
+SIM\_GPU=T4 modal run modal\_apps/simulator.py::spike \ \ \ \ \ \ \# optional: test a T4
+\end{cmd}
+
+\textbf{B2. Run episodes.} Use the normal \code{run_skills.py} options after \code{::episode}.
+Two extra options belong to the launcher: \opt{time-limit-minutes} (default 90, at most 210) and
+\opt{skip-observations} (leave the per-step pictures on the Volume).
+\begin{cmd}
+\# rung 3: cheap smoke run (no Opus calls)\\
+modal run modal\_apps/simulator.py::episode \textbackslash\\
+\hspace*{1.5em}-{}-config configs/skill\_runtime.yaml -{}-development-oracle \textbackslash\\
+\hspace*{1.5em}-{}-output data/runs/modal\_smoke\_01 -{}-time-limit-minutes 15\\[4pt]
+\# rung 4: the full task\\
+modal run modal\_apps/simulator.py::episode \textbackslash\\
+\hspace*{1.5em}-{}-config configs/skill\_runtime\_opus\_full\_task\_rgbd\_table\_lift.yaml \textbackslash\\
+\hspace*{1.5em}-{}-planner anthropic \textbackslash\\
+\hspace*{1.5em}-{}-perception-factory harness.perception.modal\_sam3:create\_detector \textbackslash\\
+\hspace*{1.5em}-{}-output data/runs/modal\_full\_01 -{}-time-limit-minutes 75
+\end{cmd}
+
+\textbf{B3. Housekeeping.}
+\begin{cmd}
+modal volume ls robotwin-runs \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \# list remote runs\\
+modal volume get robotwin-runs <run\_id> data/runs/ \ \ \ \ \# download a run again\\
+modal volume rm -r robotwin-runs <run\_id> \ \ \ \ \ \ \ \ \ \ \ \ \# delete an old run
+\end{cmd}
+
 \begin{careful}
-Use a new \opt{output} folder each time (the code refuses to overwrite). Run only one simulator
-job at a time on small GPUs. Choose exactly one evidence mode: oracle \emph{or} public perception.
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Keep the terminal open}: stopping \code{modal run} stops the episode. For a run that
+        survives a closed laptop use \texttt{modal run \opt{detach} ...}, then fetch the results with
+        \code{modal volume get}.
+  \item \textbf{One Modal episode at a time} for now: the policy worker keeps one shared
+        observation history, so parallel episodes would mix their memories.
+  \item Frozen evaluation (\opt{evaluation-manifest}) is refused on Modal; it stays local for now.
+\end{itemize}
 \end{careful}
+
+\subsection{Running cheaply}
+\begin{keyidea}
+\textbf{What is local and what is remote?} Your terminal first parses and validates the command.
+Then \code{modal\_apps/simulator.py} packages the request and starts a fresh L4 container. That
+container owns RoboTwin, SAPIEN, CuRobo and the episode loop. It calls the separate T4 policy and
+SAM~3 helpers, while the Anthropic request goes to the API. At the end, the container copies the
+run artifacts back to your local \code{data/runs/} directory. The remote container is temporary;
+the output directory is the durable record.
+\end{keyidea}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{5.0cm}X}
+\toprule
+Trick & Why it saves \\
+\midrule
+Stay low on the ladder & tests and replays are free; most mistakes show up there \\
+Scripted planner + \opt{development-oracle} & no Opus calls at all \\
+\opt{time-limit-minutes} (Modal) or \code{timeout -s INT} (local) & a stuck run cannot burn hours \\
+\code{SIM_GPU=T4} & cheaper per hour than the L4; pictures $\sim$3$\times$ slower, a full episode only $\sim$1 minute longer \\
+\opt{skip-observations} & smaller downloads; pictures stay on the Volume \\
+A copied config with smaller \code{max_turns} / \code{anthropic.max_calls} & caps Opus turns \\
+Delete old runs from \code{robotwin-runs} & Volumes keep (and bill for) what you store \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Rough cost of one full Modal episode ($\sim$30 minutes, mostly waiting for Opus): about \$0.30 on a T4
+or \$0.40 on an L4 of simulator GPU time, plus Opus tokens and policy time. Prices are approximate;
+check Modal's pricing page and dashboard.
+
+\subsection{Measured speed}
+\label{sec:speed}
+Same seed, same steps, measured with the spike (\code{data/modal_spike/}):
+\begin{center}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+ & laptop RTX 2050 & T4 & A10G & \textbf{L4} \\
+\midrule
+three RGB-D pictures & 800\,ms & 344\,ms & 153\,ms & \textbf{110\,ms} \\
+CuRobo plan & 322\,ms & 88\,ms & 73\,ms & 86\,ms \\
+physics step & 0.09\,ms & 0.01\,ms & 0.01\,ms & 0.01\,ms \\
+reset (once, cold) & 27\,s & 49\,s & 33\,s & 66\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+All three cloud GPUs draw the same picture as the laptop (mean difference 0.03 out of 255), so the
+policy sees the same thing wherever the episode runs. L4 is the default; T4 is the budget choice.
+
+\subsection{When something goes wrong}
+\label{sec:trouble}
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{5.2cm}X}
+\toprule
+You see\ldots & Do this \\
+\midrule
+\code{Permission denied} under \code{/run/media/...} while downloading & \code{HF_HOME} points at an unmounted drive. Set it to \code{\$HOME/.cache/huggingface} or mount the drive. \\
+\code{Not enough free disk space} & Download only \code{embodiments} and \code{objects} (A1); \code{conda clean -a} frees several GB. \\
+\code{unsupported GNU version! gcc versions later than 12} & Set the compiler variables in A2 and reactivate the environment. \\
+CuRobo ended up in \code{RoboTwin/RoboTwin/envs/} & You cloned from inside \code{RoboTwin/}; run the clone from the repository root. \\
+Episode freezes, GPU at 0\,\%, log files stop changing & Renderer hang: apply A3, stop with Ctrl+C, rerun with a time limit. \\
+\code{missing pytorch3d} at start-up & Harmless message from RoboTwin. \\
+Smoke run ends with \code{step_budget} & Expected (Section~\ref{sec:ladder}). \\
+SAM~3: \code{GatedRepoError ... not in the authorized list} & Your Hugging Face account is not approved yet, or the token is from another account; replace the secret with \opt{force}. \\
+Modal \code{ImageBuildError} & Run \code{modal image logs <id>} with the \emph{newest} id from the error box. \\
+\texttt{... already exists; choose a new \opt{output}} & Every run needs a new output folder. \\
+\bottomrule
+\end{tabularx}
+\end{center}
 
 \subsection{What you get after a run}
 \begin{figure}[H]
@@ -1064,7 +1607,8 @@ job at a time on small GPUs. Choose exactly one evidence mode: oracle \emph{or} 
 \end{figure}
 
 \begin{itemize}
-  \item \textbf{Exploration} (\code{run_exploration.py}) runs many episodes, each in a new process, and collects memory \emph{candidates}. It currently requires \opt{development-oracle}.
+  \item \textbf{One episode on Modal} (\texttt{modal run modal\_apps/simulator.py::episode}) takes the same options as \code{run_skills.py}; see Section~\ref{sec:runmodal}.
+  \item \textbf{Exploration} (\code{run_exploration.py}) runs many episodes, each in a new process, and collects memory \emph{candidates}. It currently requires \opt{development-oracle} and runs locally.
   \item \textbf{Evaluation} (\code{run_evaluation.py freeze}/\code{run}) locks seeds, code hashes and memory, so results cannot be accidentally tuned on the test seeds.
   \item \textbf{Offline tools} live in \code{development/}, for example\\\texttt{python -m development.replays.perception \opt{help}}.\\ Most need no simulator.
 \end{itemize}
@@ -1084,7 +1628,11 @@ Scripted acquisition / handoff & \textcolor{leaf}{\faCheck\ works} & development
 Opus planner, full task & \textcolor{sun}{\faQuestion\ exploring} & phases succeed sometimes; not yet reliable hanging \\
 Public RGB-D perception & \textcolor{sun}{\faQuestion\ exploring} & SAM 3 + Opus grounding; gaps return \code{null} \\
 Evaluation with perception & \textcolor{rose}{\faTimes\ not yet} & needs a frozen detector/prompt contract \\
-Unit tests & \textcolor{leaf}{\faCheck\ 425 pass} & \code{python -m unittest discover -s tests} \\
+Simulator on Modal & \textcolor{leaf}{\faCheck\ works} & T4, A10G and L4 render the same pictures as the laptop \\
+Single episodes on Modal & \textcolor{sun}{\faQuestion\ new} & \code{::episode} is built and tested offline; first live runs pending \\
+Parallel runs, campaigns on Modal & \textcolor{rose}{\faTimes\ not yet} & needs one policy session per episode \\
+Renderer freeze on two-GPU laptops & \textcolor{sun}{\faQuestion\ mitigated} & pin Vulkan to NVIDIA (Section~\ref{sec:trouble}) \\
+Unit tests & \textcolor{leaf}{\faCheck\ 435 pass} & \code{python -m unittest discover -s tests} \\
 \bottomrule
 \end{tabularx}
 \end{center}
@@ -1125,6 +1673,18 @@ Unit tests & \textcolor{leaf}{\faCheck\ 425 pass} & \code{python -m unittest dis
   So the coach can look again often. Long chunks are cheaper but react slower.
   \item[\color{sky}Where do I start reading code?]
   \code{run_skills.py}, then \code{harness/runtime/assembly.py}, then \code{harness/runtime/orchestrator.py}.
+  \item[\color{sky}Why run episodes on Modal instead of my laptop?]
+  A rented L4 draws the camera pictures about seven times faster than a 4\,GB laptop GPU, has no
+  memory squeeze, and avoids two-GPU laptop driver trouble. It costs GPU time, so use the ladder.
+  \item[\color{sky}Do I need RoboTwin on my machine to use Modal?]
+  No. The simulator lives in the cloud image. Your machine only needs the Python packages to check
+  the options and to talk to Modal.
+  \item[\color{sky}Does running on Modal change the results?]
+  The pictures match the laptop's almost exactly (0.03 out of 255 on average). Still treat local
+  and Modal runs as separate conditions when you compare numbers carefully.
+  \item[\color{sky}Why only one Modal episode at a time?]
+  The deployed policy remembers recent pictures for the episode it is serving. Two episodes at once
+  would share that memory. Giving each episode its own policy session is the next step.
 \end{description}
 
 \end{document}

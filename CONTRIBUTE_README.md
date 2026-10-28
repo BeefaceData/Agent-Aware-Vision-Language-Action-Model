@@ -139,6 +139,24 @@ derived mug state such as `held_left`, `staged` or `toppled`). It is for offline
 evaluators under `development/` only and must never reach runtime perception or
 the planner. A 900-action rollout saves about 57 frames (about 45 MB).
 
+Then score public perception against those labels offline. Query SAM 3 once per
+capture (three cameras per frame; Modal, no local GPU), then evaluate on CPU as
+often as needed:
+
+```bash
+python -m development.replays.sam3_cache --frames data/perception/frames/seed_3
+python -m development.replays.perception_evaluation \
+  --frames data/perception/frames/seed_3 --output data/perception/reports/baseline
+```
+
+The evaluator replays frames through the same provider an episode builds
+(`assembly.perception_provider_for`) with the real `ModalSam3Detector` answering
+from the cache, so head-first/wrist-fallback rules and thresholds match runtime.
+It reports mug detection rate and 3D offset per mug state, and per predicate a
+confusion table with precision, recall, unknown rate and false-true count.
+`frames.jsonl` keeps every per-frame result. The SAM 3 worker drops scores below
+its floors (mug 0.40, table 0.60), so the cache cannot study lower thresholds.
+
 Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run concurrent live jobs on this workstation; local RoboTwin/CuRobo runs share limited GPU VRAM. A live validation should state its seed, config, evidence mode (public perception or development oracle), Modal workers, timeout, output directory, and completion predicate. Keep evaluation changes separate from exploratory presets, and do not treat simulator-native success alone as verified visual rack contact.
 
 ## Collaboration notes

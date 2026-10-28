@@ -139,6 +139,15 @@ derived mug state such as `held_left`, `staged` or `toppled`). It is for offline
 evaluators under `development/` only and must never reach runtime perception or
 the planner. A 900-action rollout saves about 57 frames (about 45 MB).
 
+Locally a rollout takes about 35-40 minutes per seed on a small GPU. On Modal the
+same capture runs in about 7 minutes per seed (L4) and downloads each seed into
+`data/perception/frames/seed_<N>`; seeds run one after another because the policy
+worker keeps a single observation history:
+
+```bash
+SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+```
+
 Then score public perception against those labels offline. Query SAM 3 once per
 capture (three cameras per frame; Modal, no local GPU), then evaluate on CPU as
 often as needed:

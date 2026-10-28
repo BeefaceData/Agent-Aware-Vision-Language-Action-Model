@@ -8,6 +8,7 @@ fills the asset Volume once, measures a GPU (spike), and runs whole
     modal run modal_apps/simulator.py::spike             # default GPU: L4
     SIM_GPU=T4 modal run modal_apps/simulator.py::spike
     modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
+    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
 
 Episode-only options: ``--time-limit-minutes N`` (default 90) and
 ``--skip-observations`` (leave observations on the Volume, not downloaded).
@@ -43,6 +44,8 @@ EPISODE_INPUTS = "/tmp/episode-inputs"
 SHUTDOWN_GRACE_SECONDS = 5 * 60
 # Covers episode_request.MAX_TIME_LIMIT_MINUTES (210) plus shutdown and Volume commit.
 EPISODE_FUNCTION_TIMEOUT_SECONDS = 4 * 60 * 60
+# One 900-action labelled capture takes roughly 10 minutes on an L4.
+CAPTURE_FUNCTION_TIMEOUT_SECONDS = 60 * 60
 
 # T4, A100, A10G, L4. Compiling CuRobo for all of them lets one image serve any GPU.
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
@@ -263,6 +266,54 @@ def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: 
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else None
     return {"exit_code": exit_code, "timed_out": timed_out, "summary": summary,
             "interrupted_attempt": None if set_aside is None else set_aside.name}
+
+
+@app.function(image=image, gpu=GPU, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              timeout=CAPTURE_FUNCTION_TIMEOUT_SECONDS, single_use_containers=True)
+def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_size: int) -> dict:
+    """Run development.capture.labeled_frames in a fresh container; frames go to the runs Volume."""
+    sys.path.insert(0, "/root")
+    from episode_request import set_aside_previous_attempt
+    from development.capture.labeled_frames import capture
+
+    output = Path(RUNS) / run_id
+    set_aside_previous_attempt(output)  # a preempted attempt restarts the rollout cleanly
+    try:
+        return capture(ROBOTWIN, output, seed, every=every, max_actions=max_actions, chunk_size=chunk_size)
+    finally:
+        runs_volume.commit()
+
+
+@app.local_entrypoint()
+def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, chunk_size: int = 16,
+           output_root: str = "data/perception/frames"):
+    """Capture labelled perception frames on Modal and download each seed to <output_root>/seed_<N>.
+
+    Seeds run one after another: the deployed policy worker keeps a single
+    observation history, so concurrent rollouts would mix their inputs.
+    """
+    seed_list = [int(value) for value in seeds.split(",") if value.strip()]
+    root = Path(output_root).resolve()
+    targets = {seed: root / f"seed_{seed}" for seed in seed_list}
+    existing = [str(path) for path in targets.values() if path.exists()]
+    if not seed_list or existing:
+        raise SystemExit("frames: no seeds given" if not seed_list else
+                         "frames: already exist (delete them or pass --output-root): " + ", ".join(existing))
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    for seed, target in targets.items():
+        run_id = f"frames_{root.name}_seed{seed}_{stamp}"
+        print(f"Seed {seed}: capturing on {GPU} (up to {max_actions} actions) ...", flush=True)
+        try:
+            manifest = capture_frames.remote(run_id, seed, every, max_actions, chunk_size)
+            print(f"Seed {seed}: {manifest['frames_saved']} frames, {manifest['policy_actions']} actions, "
+                  f"stopped by {manifest['stop_reason']}", flush=True)
+        finally:
+            # Keep whatever was saved even if the rollout failed part-way.
+            try:
+                count = _download_run(run_id, target, skip_observations=False)
+                print(f"Seed {seed}: downloaded {count} files to {target}", flush=True)
+            except modal.exception.NotFoundError:
+                print(f"Seed {seed}: nothing saved on the Volume", flush=True)
 
 
 def _run_exists_on_volume(run_id):

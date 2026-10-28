@@ -226,7 +226,21 @@ GPU (mean difference 0.03/255). Still record which GPU produced a result.
 - The A100 has no ray-tracing cores and is untested for RoboTwin's ray-traced
   cameras. Run the spike first.
 
-### M6. Manage remote runs
+### M6. Capture labelled perception frames
+
+For offline perception evaluation (see `CONTRIBUTE_README.md`), roll out the frozen
+policy and save public frames plus simulator labels, one seed after another. The
+L4 suits this job because rendering dominates it (about 7 minutes per 900-action seed):
+
+```bash
+SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+```
+
+Each seed is downloaded into `data/perception/frames/seed_<N>`. Options:
+`--every 16`, `--max-actions 900`, `--chunk-size 16`, `--output-root DIR`. Existing
+seed folders are refused, never overwritten.
+
+### M7. Manage remote runs
 
 ```bash
 modal volume ls robotwin-runs                          # list runs
@@ -439,7 +453,7 @@ after as different conditions.
   - Modal: `--time-limit-minutes`.
   - Local: `timeout -s INT`.
   - Opus calls: copy a config and lower `max_turns` / `anthropic.max_calls`.
-- **Storage:** remote runs stay on the `robotwin-runs` Volume until you delete them (M6).
+- **Storage:** remote runs stay on the `robotwin-runs` Volume until you delete them (M7).
 
 ### Troubleshooting
 

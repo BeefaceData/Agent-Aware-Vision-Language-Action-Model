@@ -24,7 +24,7 @@ import statistics
 import numpy as np
 
 from harness.perception.replay import load_public_observation
-from development.capture.labeled_frames import LIFTED_HEIGHT_M, PRIVILEGED_FILE, TOPPLED_TILT_DEG
+from development.capture.labeled_frames import LIFTED_HEIGHT_M, PRIVILEGED_FILE, TOPPLED_TILT_DEG, mug_state
 from development.replays.sam3_cache import CACHE_FILE, CachedSam3Worker
 
 EVALUATED_PREDICATES = ("mug_lifted", "release_ready", "mug_staged_on_table", "right_mug_lifted")
@@ -85,6 +85,9 @@ def evaluate_capture(frames_dir, provider):
     frames_dir = Path(frames_dir)
     labels = sorted((json.loads(line) for line in (frames_dir / PRIVILEGED_FILE).read_text().splitlines()),
                     key=lambda item: item["sequence"])
+    # Recompute the derived state from the stored facts, so captures made under
+    # an earlier rule are scored with the current one.
+    labels = [{**label, "state": mug_state(label)} for label in labels]
     records = []
     for label in labels:
         observation = load_public_observation(frames_dir / label["observation"])

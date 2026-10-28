@@ -16,6 +16,7 @@ from tests.helpers import images
 def label(state="resting", *, tilt=0.0, height=0.0, lifted_before=False, left=False, right=False,
           table=True, sequence=0):
     return {"sequence": sequence, "policy_actions": sequence, "state": state, "lifted_before": lifted_before,
+            "native_success": False,
             "mug": {"pose": [0.1, 0.2, 0.75, 1, 0, 0, 0], "tilt_deg": tilt, "height_change_m": height},
             "contacts": {"left_gripper": left, "right_gripper": right, "table": table, "rack": False},
             "observation": f"observations/observation_{sequence:08d}.npz"}

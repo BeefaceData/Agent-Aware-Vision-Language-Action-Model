@@ -141,6 +141,12 @@ class MugStateTests(unittest.TestCase):
     def test_a_mug_on_its_side_is_toppled_even_while_touching_the_table(self):
         self.assertEqual(mug_state(label(lifted_before=True, mug={"tilt_deg": 90.0})), "toppled")
 
+    def test_a_tilted_mug_held_by_a_gripper_is_not_toppled(self):
+        held = label(lifted_before=True, mug={"tilt_deg": 85.0},
+                     contacts={"right_gripper": True, "table": False})
+
+        self.assertEqual(mug_state(held), "held_right")
+
     def test_gripper_contacts(self):
         self.assertEqual(mug_state(label(contacts={"left_gripper": True, "table": False})), "held_left")
         self.assertEqual(mug_state(label(contacts={"right_gripper": True, "table": False})), "held_right")

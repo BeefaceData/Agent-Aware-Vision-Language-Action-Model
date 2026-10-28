@@ -58,18 +58,19 @@ def tilt_deg(initial_pose, current_pose):
 def mug_state(label):
     """Name the mug's situation from simulator truth, for grouping evaluation results.
 
-    ``staged`` means back on the table after an earlier lift (the handoff point);
-    ``toppled`` overrides contact states because a mug on its side cannot be grasped
-    or hung normally.
+    ``staged`` means back on the table after an earlier lift (the handoff point).
+    ``toppled`` means tilted past ``TOPPLED_TILT_DEG`` with no gripper touching it
+    (fallen over); a mug the policy rotates in its grip, as it does for hanging,
+    is labelled by its grip instead.
     """
     contacts = label["contacts"]
+    left, right, table = contacts["left_gripper"], contacts["right_gripper"], contacts["table"]
     if label["native_success"]:
         return "hung"
-    if label["mug"]["tilt_deg"] > TOPPLED_TILT_DEG:
+    if label["mug"]["tilt_deg"] > TOPPLED_TILT_DEG and not (left or right):
         return "toppled"
     if contacts["rack"]:
         return "touching_rack"
-    left, right, table = contacts["left_gripper"], contacts["right_gripper"], contacts["table"]
     if left and right:
         return "held_both"
     if (left or right) and table:

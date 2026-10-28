@@ -308,6 +308,7 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
         raise SystemExit("frames: no seeds given" if not seed_list else
                          "frames: already exist (delete them or pass --output-root): " + ", ".join(existing))
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    failed = {}
     for seed, target in targets.items():
         run_id = f"frames_{root.name}_seed{seed}_{stamp}"
         print(f"Seed {seed}: capturing on {GPU} (up to {max_actions} actions) ...", flush=True)
@@ -315,13 +316,18 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
             manifest = capture_frames.remote(run_id, seed, every, max_actions, chunk_size)
             print(f"Seed {seed}: {manifest['frames_saved']} frames, {manifest['policy_actions']} actions, "
                   f"stopped by {manifest['stop_reason']}, on {manifest['gpu']}", flush=True)
-        finally:
-            # Keep whatever was saved even if the rollout failed part-way.
-            try:
-                count = _download_run(run_id, target, skip_observations=False)
-                print(f"Seed {seed}: downloaded {count} files to {target}", flush=True)
-            except modal.exception.NotFoundError:
-                print(f"Seed {seed}: nothing saved on the Volume", flush=True)
+        except Exception as exc:
+            # One failed rollout should not cost the remaining seeds.
+            failed[seed] = f"{type(exc).__name__}: {exc}"[:300]
+            print(f"Seed {seed}: FAILED ({failed[seed]}); keeping its partial frames", flush=True)
+        # Keep whatever was saved even if the rollout failed part-way.
+        try:
+            count = _download_run(run_id, target, skip_observations=False)
+            print(f"Seed {seed}: downloaded {count} files to {target}", flush=True)
+        except modal.exception.NotFoundError:
+            print(f"Seed {seed}: nothing saved on the Volume", flush=True)
+    if failed:
+        raise SystemExit(f"frames: seeds failed: {failed}")
 
 
 def _run_exists_on_volume(run_id):

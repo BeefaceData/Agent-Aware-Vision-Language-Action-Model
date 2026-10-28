@@ -315,7 +315,7 @@ To review or remove these environment settings, use
 
 ### L5. Run episodes
 
-Use a new `--output` folder for each run. `timeout -s INT` acts like Ctrl+C, so
+Each run needs a new folder (omit `--output` to get a dated name, see Outputs). `timeout -s INT` acts like Ctrl+C, so
 a stuck run still writes `summary.json` and its video.
 
 ```bash
@@ -358,6 +358,18 @@ NVIDIA-only Vulkan setting (L4).
 ## Reference
 
 ### Outputs
+
+`--output` is optional on both routes. Without it, runs go to a new folder named
+after when and what ran, so `ls data/runs` lists them in order:
+
+```
+data/runs/2026-10-28_Wed_07-55am_opus_full_task_rgbd_table_lift_seed3_modal-T4
+data/runs/2026-10-28_Wed_08-10am_skill_runtime_seed3_local
+```
+
+The parts are: local date, weekday and time; the config (without
+`skill_runtime_`); the seed; and `local` or `modal-<GPU>`. Runs started in the
+same minute get `-2`, `-3`. Pass `--output` to choose your own name instead.
 
 Each run folder (both routes) contains:
 
@@ -405,7 +417,7 @@ after as different conditions.
 | SAM 3 `GatedRepoError` | both | access not approved yet, or wrong token; replace with `modal secret create huggingface ... --force` |
 | `missing pytorch3d` at start-up | both | harmless RoboTwin message |
 | Smoke run ends with `step_budget` | both | expected, see M4 |
-| `... already exists; choose a new --output` | both | each run needs a new output folder |
+| `... already exists; choose a new --output` | both | each run needs a new output folder; omit `--output` for an automatic dated name |
 | Modal run fails with a missing secret | Modal | create the `anthropic` secret (M1) |
 | `ImageBuildError` | Modal | `modal image logs <id>` with the newest image ID |
 | `Permission denied` under `/run/media/...` during downloads | local | `HF_HOME` points at an unmounted drive; set it to `$HOME/.cache/huggingface` |

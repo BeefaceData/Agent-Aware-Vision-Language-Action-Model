@@ -22,6 +22,7 @@ def rendered_camera(depth_mm=500.0):
 def fake_simulator(simulator_type):
     simulator = simulator_type.return_value
     simulator.setup = {}
+    simulator.perception_cameras = {}
     simulator.return_value = ({"state": np.zeros(14, dtype=np.float32)}, {})
     simulator.task.get_obs.return_value = {"observation": {
         "head_camera": rendered_camera(), "front_camera": rendered_camera()}}
@@ -37,7 +38,7 @@ class SceneViewsCaptureTests(unittest.TestCase):
                 simulator = fake_simulator(simulator_type)
                 report = capture("RoboTwin", output, 3)
 
-            simulator_type.assert_called_once_with("RoboTwin", rgbd_enabled=True)
+            simulator_type.assert_called_once_with("RoboTwin", rgbd_enabled=True, perception_cameras=())
             simulator.assert_called_once_with("127.0.0.1", 0, "/reset", {"seed": 3})
             simulator.close.assert_called_once_with()
             for name in ("head_camera_rgb.png", "head_camera_depth.png", "front_camera_rgb.png",

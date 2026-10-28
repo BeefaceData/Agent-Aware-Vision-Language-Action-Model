@@ -26,7 +26,9 @@ PROMPTS = {"mug": "mug", "rack": "rack", "table": "table surface"}
 RACK_PROMPT_VARIANTS = ("rack", "wire rack", "mug rack", "hanging rack")
 RACK_PROFILES = {"default": ("rack", 0.60),
                  "explore_mug_rack": ("mug rack", 0.18)}
-CAMERAS = frozenset({"head_camera", "left_camera", "right_camera"})
+# The camera name only labels the request; the policy cameras plus
+# harness.environment.layout.PERCEPTION_CAMERAS (this image does not ship the harness).
+CAMERAS = frozenset({"head_camera", "left_camera", "right_camera", "perception_camera"})
 REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements"
 
 

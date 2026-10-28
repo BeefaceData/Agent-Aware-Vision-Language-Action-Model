@@ -9,6 +9,9 @@ public evidence with the privileged labels:
       --frames data/perception/frames/seed_0 --frames data/perception/frames/seed_1 \\
       --output data/perception/reports/baseline
 
+Pass ``--ignore-camera perception_camera`` to score the same frames as if that
+camera did not exist, for a with/without comparison.
+
 Reports detection rate and 3D error per mug state, and for each predicate a
 confusion table with precision, recall, unknown rate and false-true count.
 Labels never reach the provider; they are only read for scoring and to tell
@@ -17,6 +20,7 @@ the detector which phase the runtime planner would be in.
 
 import argparse
 from collections import Counter, defaultdict
+from dataclasses import replace
 import json
 from pathlib import Path
 import statistics
@@ -26,6 +30,7 @@ import numpy as np
 from harness.perception.replay import load_public_observation
 from development.capture.labeled_frames import LIFTED_HEIGHT_M, PRIVILEGED_FILE, TOPPLED_TILT_DEG, mug_state
 from development.replays.sam3_cache import CACHE_FILE, CachedSam3Worker
+from harness.environment.layout import PERCEPTION_CAMERAS
 
 EVALUATED_PREDICATES = ("mug_lifted", "release_ready", "mug_staged_on_table", "right_mug_lifted")
 # The full-task configs ground the rack from the right wrist camera.
@@ -80,7 +85,18 @@ def mug_error(grounded, label):
     return float(np.linalg.norm(estimate[:2] - truth[:2])), float(estimate[2] - truth[2])
 
 
-def evaluate_capture(frames_dir, provider):
+def without_cameras(observation, cameras):
+    """The same public observation with the named perception-only cameras removed."""
+    if not cameras:
+        return observation
+    frames = observation.camera_frames
+    return replace(observation,
+                   images={name: image for name, image in observation.images.items() if name not in cameras},
+                   camera_frames=None if frames is None else
+                   {name: frame for name, frame in frames.items() if name not in cameras} or None)
+
+
+def evaluate_capture(frames_dir, provider, *, ignore_cameras=()):
     """Replay one capture in sequence order; return one record per labelled frame."""
     frames_dir = Path(frames_dir)
     labels = sorted((json.loads(line) for line in (frames_dir / PRIVILEGED_FILE).read_text().splitlines()),
@@ -90,7 +106,8 @@ def evaluate_capture(frames_dir, provider):
     labels = [{**label, "state": mug_state(label)} for label in labels]
     records = []
     for label in labels:
-        observation = load_public_observation(frames_dir / label["observation"])
+        observation = without_cameras(load_public_observation(frames_dir / label["observation"]),
+                                      ignore_cameras)
         phase = detector_phase(label)
         provider.set_task_phase(phase)
         result = provider.observe(observation)
@@ -167,6 +184,7 @@ def summarize(records):
 
 def markdown_report(summary):
     lines = [f"# Perception evaluation ({summary['frames']} frames, {len(summary['captures'])} captures)", "",
+             f"Ignored cameras: {', '.join(summary.get('ignored_cameras') or []) or 'none'}", "",
              "## Mug detection by state", "",
              "| State | Frames | Detected | Rate | Cameras | Median xy error (m) | Misses |",
              "|---|---|---|---|---|---|---|"]
@@ -207,6 +225,8 @@ def main(argv=None):
     parser.add_argument("--frames", type=Path, action="append", required=True,
                         help="labeled_frames capture folder with a sam3_cache.json; repeatable")
     parser.add_argument("--output", type=Path, required=True, help="new report directory")
+    parser.add_argument("--ignore-camera", action="append", default=[], choices=PERCEPTION_CAMERAS,
+                        help="score as if this perception-only camera had not been captured; repeatable")
     args = parser.parse_args(argv)
     missing = [str(folder / CACHE_FILE) for folder in args.frames if not (folder / CACHE_FILE).is_file()]
     if missing:
@@ -215,8 +235,9 @@ def main(argv=None):
     records = []
     for folder in args.frames:
         # A fresh provider per capture: lift latches and initial heights are per episode.
-        records += evaluate_capture(folder, runtime_provider(folder / CACHE_FILE))
-    summary = summarize(records)
+        records += evaluate_capture(folder, runtime_provider(folder / CACHE_FILE),
+                                    ignore_cameras=tuple(args.ignore_camera))
+    summary = {**summarize(records), "ignored_cameras": sorted(args.ignore_camera)}
     (args.output / "frames.jsonl").write_text("".join(json.dumps(record) + "\n" for record in records))
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     (args.output / "summary.md").write_text(markdown_report(summary))

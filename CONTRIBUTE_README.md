@@ -166,6 +166,27 @@ confusion table with precision, recall, unknown rate and false-true count.
 `frames.jsonl` keeps every per-frame result. The SAM 3 worker drops scores below
 its floors (mug 0.40, table 0.60), so the cache cannot study lower thresholds.
 
+**Perception-only camera.** `harness/environment/perception_cameras.py` defines an
+optional fixed RGB-D camera, `perception_camera`, on the far side of the table. The
+local simulator adds it right after each reset, so it draws no seeded random numbers
+and every seed keeps its exact scene. The policy never receives it, and Opus prompts
+still use only the three policy cameras. When an observation has it, the SAM 3 client
+tries it after the head camera and before the wrist views. Preview it, then capture
+and score with and without it:
+
+```bash
+python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3_cam --perception-camera default
+SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4 \
+  --perception-camera default --output-root data/perception/frames_cam
+python -m development.replays.perception_evaluation --frames data/perception/frames_cam/seed_3 \
+  --output data/perception/reports/cam_off --ignore-camera perception_camera
+```
+
+Other poses use `--perception-camera=x,y,z/tx,ty,tz/fovy` (metres and degrees; keep
+the `=` when the value starts with `-`). The deployed SAM 3 worker must accept the
+camera name, so redeploy it once after pulling this change:
+`modal deploy modal_apps/sam3.py`.
+
 Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run concurrent live jobs on this workstation; local RoboTwin/CuRobo runs share limited GPU VRAM. A live validation should state its seed, config, evidence mode (public perception or development oracle), Modal workers, timeout, output directory, and completion predicate. Keep evaluation changes separate from exploratory presets, and do not treat simulator-native success alone as verified visual rack contact.
 
 ## Collaboration notes

@@ -8,6 +8,8 @@ observer, which the harness ignores) and writes viewable PNGs:
 
     python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3
     python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3_viewer --viewer
+    python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3_cam \
+      --perception-camera="-0.30,0.45,1.20/0.0,-0.10,0.80/60"    # preview a perception-only camera
 
 Each output folder gets ``<camera>_rgb.png``, ``<camera>_depth.png``,
 ``observer_camera_rgb.png``, an ``overview.png`` contact sheet and ``cameras.json``.
@@ -20,11 +22,14 @@ from pathlib import Path
 
 import numpy as np
 
-from harness.environment.layout import CAMERAS
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
+from harness.environment.perception_cameras import describe, parse_camera_spec
 
 # Depth colour scale; the table and robot sit roughly 0.2-2 m from the cameras.
 DEPTH_DISPLAY_RANGE_MM = (200.0, 2000.0)
 CONTACT_SHEET_COLUMNS = 3
+# Cameras the harness reads: the policy's three plus perception-only ones.
+HARNESS_CAMERAS = (*CAMERAS, *PERCEPTION_CAMERAS)
 
 
 def depth_to_rgb(depth_mm):
@@ -42,7 +47,7 @@ def depth_to_rgb(depth_mm):
 def camera_summary(name, data):
     """Describe one camera from RoboTwin's ``get_obs()['observation'][name]``."""
     rgb = np.asarray(data["rgb"])
-    summary = {"image_hw": list(rgb.shape[:2]), "used_by_harness": name in CAMERAS,
+    summary = {"image_hw": list(rgb.shape[:2]), "used_by_harness": name in HARNESS_CAMERAS,
                "position_m": [round(float(v), 3) for v in np.asarray(data["cam2world_gl"])[:3, 3]],
                "focal_px": [round(float(np.asarray(data["intrinsic_cv"])[i, i]), 1) for i in (0, 1)]}
     if "depth" in data:
@@ -51,6 +56,14 @@ def camera_summary(name, data):
         summary["depth_range_m"] = ([round(float(valid.min()) / 1000, 3), round(float(valid.max()) / 1000, 3)]
                                     if valid.size else None)
     return summary
+
+
+def perception_camera_views(payload, handles):
+    """Perception-only cameras from an observation payload, in RoboTwin's ``get_obs`` shape."""
+    return {name: {"rgb": payload[name], "depth": payload[f"{name}__depth_mm"],
+                   "intrinsic_cv": payload[f"{name}__intrinsic_cv"],
+                   "cam2world_gl": np.asarray(camera.get_model_matrix())}
+            for name, camera in handles.items()}
 
 
 def save_contact_sheet(tiles, path, seed):
@@ -71,17 +84,19 @@ def save_contact_sheet(tiles, path, seed):
     plt.close(figure)
 
 
-def capture(robotwin_root, output, seed, *, viewer=False):
+def capture(robotwin_root, output, seed, *, viewer=False, perception_camera=None):
     """Reset once, save every camera to ``output`` and return the report.
 
     With ``viewer``, also open SAPIEN's interactive window and block until it is closed.
+    ``perception_camera`` (a ``FixedCamera``) is added after reset, as in a capture.
     """
     from PIL import Image
     from development.simulator.local_simulator import LocalSimulator
 
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    simulator = LocalSimulator(robotwin_root, rgbd_enabled=True)
+    simulator = LocalSimulator(robotwin_root, rgbd_enabled=True,
+                               perception_cameras=() if perception_camera is None else (perception_camera,))
     if viewer:
         simulator.setup["render_freq"] = 1  # build_task sets 0 (headless)
     try:
@@ -91,9 +106,11 @@ def capture(robotwin_root, output, seed, *, viewer=False):
         rendered = task.get_obs()["observation"]
 
         cameras, tiles = {}, []
+        for name, data in perception_camera_views(payload, simulator.perception_cameras).items():
+            rendered[name] = data
         for name, data in sorted(rendered.items()):
             cameras[name] = camera_summary(name, data)
-            marker = " *" if name in CAMERAS else ""
+            marker = " *" if name in HARNESS_CAMERAS else ""
             rgb = np.ascontiguousarray(np.asarray(data["rgb"], dtype=np.uint8)[..., :3])
             Image.fromarray(rgb).save(output / f"{name}_rgb.png")
             tiles.append((f"{name}{marker}  rgb", rgb))
@@ -111,7 +128,8 @@ def capture(robotwin_root, output, seed, *, viewer=False):
         report = {"schema_version": 1, "mode": "scene_views", "task": "hanging_mug", "seed": seed,
                   "robot_actions_after_reset": 0, "policy_started": False, "planner_started": False,
                   "robot_state_14": [round(float(v), 4) for v in payload["state"]],
-                  "cameras": cameras}
+                  "cameras": cameras,
+                  "perception_camera": None if perception_camera is None else describe(perception_camera)}
         (output / "cameras.json").write_text(json.dumps(report, indent=2) + "\n")
 
         if viewer:
@@ -142,12 +160,20 @@ def main(argv=None):
     parser.add_argument("--robotwin-root", type=Path, default=root / "RoboTwin")
     parser.add_argument("--viewer", action="store_true",
                         help="also open SAPIEN's interactive 3D window (needs a display)")
+    parser.add_argument("--perception-camera", metavar="SPEC",
+                        help="add a perception-only camera: 'default' or 'x,y,z/tx,ty,tz/fovy' "
+                             "(write --perception-camera=SPEC if it starts with '-')")
     args = parser.parse_args(argv)
     if args.seed < 0:
         parser.error("seed must be nonnegative")
+    try:
+        camera = None if args.perception_camera is None else parse_camera_spec(args.perception_camera)
+    except ValueError as error:
+        parser.error(str(error))
     # RoboTwin changes the working directory during start-up, so resolve paths first.
     output = args.output.resolve()
-    report = capture(args.robotwin_root.resolve(), output, args.seed, viewer=args.viewer)
+    report = capture(args.robotwin_root.resolve(), output, args.seed, viewer=args.viewer,
+                     perception_camera=camera)
     print_camera_table(report, output)
     return 0
 

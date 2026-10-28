@@ -57,6 +57,18 @@ class Sam3CacheTests(unittest.TestCase):
         self.assertEqual(len(worker.calls), 2 * len(CAMERAS))
         self.assertTrue(all(include_rack for _sequence, _camera, include_rack in worker.calls))
 
+    def test_a_captured_perception_camera_is_cached_too(self):
+        directory = tempfile.TemporaryDirectory()
+        store = ObservationStore(Path(directory.name) / "observations")
+        store.save(Observation(0, {**images(), "perception_camera": images()["head_camera"]}, tuple([0.0] * 14)))
+        worker = FakeWorker()
+
+        cache = build_cache(directory.name, worker, log=lambda message: None)
+        directory.cleanup()
+
+        self.assertEqual(cache["cameras"], [*CAMERAS, "perception_camera"])
+        self.assertIn("perception_camera", cache["frames"]["0"])
+
     def test_cached_answers_replay_through_the_real_detector(self):
         directory = capture_with([0])
         cache = build_cache(directory.name, FakeWorker(), log=lambda message: None)

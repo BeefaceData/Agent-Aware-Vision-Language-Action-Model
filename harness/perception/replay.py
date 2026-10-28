@@ -81,11 +81,13 @@ def load_public_observation(path):
     """Load only the versioned public observation fields from one NPZ archive."""
     path = Path(path)
     with np.load(path, allow_pickle=False) as archive:
-        required = {"head_camera", "left_camera", "right_camera", "command_state", "sequence"}
+        from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
+        required = {*CAMERAS, "command_state", "sequence"}
         if not required <= set(archive.files):
             raise ValueError("incomplete_public_observation_archive")
+        # Perception-only cameras are optional: older captures do not have them.
         images = {name: np.asarray(archive[name]).copy()
-                  for name in ("head_camera", "left_camera", "right_camera")}
+                  for name in (*CAMERAS, *PERCEPTION_CAMERAS) if name in archive.files}
         from .rgbd import camera_frames_from_archive
         frames = camera_frames_from_archive(archive, images)
         from harness.environment.base import Observation

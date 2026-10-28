@@ -34,6 +34,7 @@ def simulator(task, diagnostics):
     instance.initialized = True
     instance.diagnostics = diagnostics
     instance._step_count = 0
+    instance.perception_cameras = {}
     return instance
 
 

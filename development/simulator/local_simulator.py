@@ -13,9 +13,17 @@ from harness.environment.base import vector14
 
 
 class LocalSimulator:
-    def __init__(self, robotwin_root, *, rgbd_enabled=False, diagnostics=None):
+    def __init__(self, robotwin_root, *, rgbd_enabled=False, diagnostics=None, perception_cameras=()):
+        """``perception_cameras``: ``FixedCamera`` specs added to the scene after every reset."""
         if type(rgbd_enabled) is not bool:
             raise ValueError("rgbd_setting_must_be_boolean")
+        from harness.environment.perception_cameras import FixedCamera
+        if (not isinstance(perception_cameras, (tuple, list))
+                or any(not isinstance(spec, FixedCamera) for spec in perception_cameras)
+                or len({spec.name for spec in perception_cameras}) != len(perception_cameras)):
+            raise ValueError("invalid_perception_cameras")
+        self.perception_camera_specs = tuple(perception_cameras)
+        self.perception_cameras = {}
         from harness.environment.robotwin import build_task
         self.task, self.setup = build_task(str(Path(robotwin_root).resolve()), "hanging_mug")
         if rgbd_enabled:
@@ -41,7 +49,6 @@ class LocalSimulator:
 
     def __call__(self, host, port, path, payload):
         import torch
-        from harness.environment.robotwin import observation_of
         start = time.perf_counter()
         step_id = None
         phase = "request"
@@ -57,6 +64,11 @@ class LocalSimulator:
                     self._diagnostic("simulator_phase_failed", phase=phase,
                                      error_type=type(exc).__name__)
                     raise
+                # Added after setup_demo has placed the objects, so no seeded
+                # random numbers are drawn; setup_demo builds a new scene each reset.
+                from harness.environment.perception_cameras import add_fixed_camera
+                self.perception_cameras = {spec.name: add_fixed_camera(self.task.scene, spec)
+                                           for spec in self.perception_camera_specs}
                 # This flag is scoped to the local agentic runner. The frozen
                 # baseline runner and RoboTwin's ordinary evaluation path keep
                 # their native terminal behavior.
@@ -91,7 +103,7 @@ class LocalSimulator:
         self._diagnostic("simulator_phase_started", phase=phase, step_id=step_id)
         phase_start = time.perf_counter()
         try:
-            observation = observation_of(self.task, self.blank, success)
+            observation = self.observation(success)
         except Exception as exc:
             self._diagnostic("simulator_phase_failed", phase=phase, step_id=step_id,
                              error_type=type(exc).__name__)
@@ -108,7 +120,13 @@ class LocalSimulator:
             "sim_encode_ms": 0.0,
         }
 
+    def observation(self, success):
+        """Render the current observation payload, including any perception cameras."""
+        from harness.environment.robotwin import observation_of
+        return observation_of(self.task, self.blank, success, self.perception_cameras)
+
     def close(self):
         if self.initialized:
             self.task.close_env()
+            self.perception_cameras = {}
             self.initialized = False

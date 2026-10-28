@@ -1,6 +1,6 @@
 """Cache Modal SAM 3 answers for captured frames, then serve them back offline.
 
-Each frame's three camera images are sent to the deployed SAM 3 worker once;
+Each frame's camera images (three, or four with a perception camera) are sent to the deployed SAM 3 worker once;
 the raw responses are stored beside the frames. ``CachedSam3Worker`` replays
 them through the real ``ModalSam3Detector`` client, so offline evaluation uses
 the runtime's own head-first/wrist-fallback rules and thresholds without
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from harness.environment.layout import CAMERAS
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.perception.replay import load_public_observation
 
 CACHE_FILE = "sam3_cache.json"
@@ -54,17 +54,19 @@ def build_cache(frames_dir, worker, *, rack_prompt_profile=DEFAULT_RACK_PROMPT_P
     archives = sorted(Path(frames_dir, "observations").glob("observation_*.npz"))
     if not archives:
         raise ValueError("no_captured_observations")
-    frames = {}
+    frames, cameras = {}, set()
     for index, path in enumerate(archives, start=1):
         observation = load_public_observation(path)
+        # Every camera the frame has, including a perception-only camera when captured.
         frames[str(observation.sequence)] = {
             camera: _to_json(worker.detect.remote(
-                encode_png(observation.images[camera]), observation_sequence=observation.sequence,
+                encode_png(image), observation_sequence=observation.sequence,
                 camera=camera, rack_prompt_profile=rack_prompt_profile, include_rack=True))
-            for camera in CAMERAS}
+            for camera, image in observation.images.items()}
+        cameras.update(observation.images)
         log(f"  {index}/{len(archives)} frames")
     return {"schema_version": 1, "rack_prompt_profile": rack_prompt_profile,
-            "cameras": list(CAMERAS), "frames": frames}
+            "cameras": [name for name in (*CAMERAS, *PERCEPTION_CAMERAS) if name in cameras], "frames": frames}
 
 
 class _CachedDetect:
@@ -112,7 +114,7 @@ def main(argv=None):
     print(f"Querying SAM 3 for {args.frames} ...")
     cache = build_cache(args.frames, worker, rack_prompt_profile=args.rack_prompt_profile)
     target.write_text(json.dumps(cache) + "\n")
-    print(f"Saved {len(cache['frames'])} frames x {len(CAMERAS)} cameras to {target}")
+    print(f"Saved {len(cache['frames'])} frames x {len(cache['cameras'])} cameras to {target}")
     return 0
 
 

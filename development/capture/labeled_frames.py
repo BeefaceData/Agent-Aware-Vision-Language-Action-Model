@@ -5,6 +5,8 @@ local simulator and environment client as ``run_skills.py``, so frames cover
 reset, grasp, handoff and hang views at no planner cost:
 
     python -m development.capture.labeled_frames --seed 3 --output data/perception/frames/seed_3
+    python -m development.capture.labeled_frames --seed 3 --output data/perception/frames_cam/seed_3 \
+      --perception-camera default        # or "x,y,z/tx,ty,tz/fovy" in metres and degrees
 
 Output folder:
   observations/observation_XXXXXXXX.npz  public observations (same format as episode runs)
@@ -25,6 +27,7 @@ import subprocess
 
 import numpy as np
 
+from harness.environment.perception_cameras import describe, parse_camera_spec
 from harness.jsonl import append_jsonl
 from harness.perception.rgbd import intrinsic_sha256
 from development.simulator.rack_geometry import mug_contacts, pose_matrix
@@ -181,8 +184,12 @@ def camera_summary(store_directory):
 
 
 def capture(robotwin_root, output, seed, *, every=CAPTURE_EVERY_ACTIONS, max_actions=MAX_POLICY_ACTIONS,
-            chunk_size=POLICY_CHUNK_SIZE):
-    """Run one labelled rollout into the new folder ``output`` and return its manifest."""
+            chunk_size=POLICY_CHUNK_SIZE, perception_camera=None):
+    """Run one labelled rollout into the new folder ``output`` and return its manifest.
+
+    ``perception_camera``: an optional ``FixedCamera`` rendered into every frame
+    for perception only; the policy still receives its three cameras.
+    """
     from development.simulator.local_simulator import LocalSimulator
     from harness.environment.local import LocalEnvironmentClient
     from harness.perception.observations import ObservationStore
@@ -192,7 +199,8 @@ def capture(robotwin_root, output, seed, *, every=CAPTURE_EVERY_ACTIONS, max_act
     output.mkdir(parents=True, exist_ok=False)
     commit = robotwin_commit(robotwin_root)
     simulator = LocalSimulator(robotwin_root, rgbd_enabled=True,
-                               diagnostics=partial(append_jsonl, output / "simulator_timing.jsonl"))
+                               diagnostics=partial(append_jsonl, output / "simulator_timing.jsonl"),
+                               perception_cameras=() if perception_camera is None else (perception_camera,))
     try:
         environment = LocalEnvironmentClient(simulator)
         store = ObservationStore(output / "observations")
@@ -207,6 +215,7 @@ def capture(robotwin_root, output, seed, *, every=CAPTURE_EVERY_ACTIONS, max_act
                 "policy_chunk_size": chunk_size, "frames_saved": frames, "policy_actions": actions,
                 "stop_reason": stop_reason, "robotwin_commit": commit,
                 "cameras": camera_summary(output / "observations"),
+                "perception_camera": None if perception_camera is None else describe(perception_camera),
                 "public_files": ["observations/"], "privileged_files": [PRIVILEGED_FILE],
                 "privileged_note": "labels.jsonl is simulator truth for offline evaluation only"}
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -223,12 +232,19 @@ def main(argv=None):
     parser.add_argument("--every", type=int, default=CAPTURE_EVERY_ACTIONS, help="save a frame every N actions")
     parser.add_argument("--max-actions", type=int, default=MAX_POLICY_ACTIONS)
     parser.add_argument("--chunk-size", type=int, default=POLICY_CHUNK_SIZE)
+    parser.add_argument("--perception-camera", metavar="SPEC",
+                        help="add a perception-only camera: 'default' or 'x,y,z/tx,ty,tz/fovy' "
+                             "(write --perception-camera=SPEC if it starts with '-')")
     args = parser.parse_args(argv)
     if args.seed < 0 or args.every < 1 or args.max_actions < 1 or not 1 <= args.chunk_size <= 64:
         parser.error("seed must be >= 0, --every and --max-actions >= 1, --chunk-size 1-64")
+    try:
+        camera = None if args.perception_camera is None else parse_camera_spec(args.perception_camera)
+    except ValueError as error:
+        parser.error(str(error))
     # RoboTwin changes the working directory during start-up, so resolve paths first.
     manifest = capture(args.robotwin_root.resolve(), args.output.resolve(), args.seed, every=args.every,
-                       max_actions=args.max_actions, chunk_size=args.chunk_size)
+                       max_actions=args.max_actions, chunk_size=args.chunk_size, perception_camera=camera)
     print(json.dumps({key: manifest[key] for key in ("seed", "frames_saved", "policy_actions", "stop_reason")},
                      indent=2))
     return 0

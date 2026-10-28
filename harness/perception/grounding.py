@@ -15,6 +15,7 @@ import numpy as np
 from .anchors import Anchor, AnchorRegistry
 from .geometry import pose7
 from .rgbd import RGBDCamera, calibration_sha256
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.predicates.base import PredicateResult
 
 
@@ -113,7 +114,7 @@ class RGBDPerceptionProvider:
     RIGHT_LIFT_STABLE_OBSERVATIONS = 2
 
     def __init__(self, detector: SemanticDetector, anchors: AnchorRegistry | None = None,
-                 *, camera_order=("head_camera", "left_camera", "right_camera"),
+                 *, camera_order=(*CAMERAS, *PERCEPTION_CAMERAS),
                  min_confidence=0.60, ambiguity_margin=0.10,
                  min_valid_depth_fraction=0.35, max_anchor_distance_m=0.65,
                  max_approach_offset_m=0.20, sample_limit=256,

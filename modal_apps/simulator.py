@@ -9,6 +9,8 @@ fills the asset Volume once, measures a GPU (spike), and runs whole
     SIM_GPU=T4 modal run modal_apps/simulator.py::spike
     modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
     SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
+    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
+      --output-root data/perception/frames_cam                              # ... with the perception camera
 
 Episode-only options: ``--time-limit-minutes N`` (default 90) and
 ``--skip-observations`` (leave observations on the Volume, not downloaded).
@@ -278,16 +280,19 @@ def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: 
 
 @app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
               timeout=CAPTURE_FUNCTION_TIMEOUT_SECONDS, single_use_containers=True)
-def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_size: int) -> dict:
+def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_size: int,
+                   perception_camera: str = "") -> dict:
     """Run development.capture.labeled_frames in a fresh container; frames go to the runs Volume."""
     sys.path.insert(0, "/root")
     from episode_request import set_aside_previous_attempt
     from development.capture.labeled_frames import capture
+    from harness.environment.perception_cameras import parse_camera_spec
 
     output = Path(RUNS) / run_id
     set_aside_previous_attempt(output)  # a preempted attempt restarts the rollout cleanly
     try:
-        manifest = capture(ROBOTWIN, output, seed, every=every, max_actions=max_actions, chunk_size=chunk_size)
+        manifest = capture(ROBOTWIN, output, seed, every=every, max_actions=max_actions, chunk_size=chunk_size,
+                           perception_camera=parse_camera_spec(perception_camera) if perception_camera else None)
         # With GPU fallbacks the type that actually ran is only known here.
         manifest["gpu"] = _command_output(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]).strip()
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -298,13 +303,20 @@ def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_s
 
 @app.local_entrypoint()
 def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, chunk_size: int = 16,
-           output_root: str = "data/perception/frames"):
+           output_root: str = "data/perception/frames", perception_camera: str = ""):
     """Capture labelled perception frames on Modal and download each seed to <output_root>/seed_<N>.
+
+    ``--perception-camera default`` (or ``x,y,z/tx,ty,tz/fovy``) adds a
+    perception-only camera to every frame; the policy still gets its three.
 
     Seeds run one after another: the deployed policy worker keeps a single
     observation history, so concurrent rollouts would mix their inputs.
     """
     seed_list = [int(value) for value in seeds.split(",") if value.strip()]
+    if perception_camera:
+        sys.path.insert(0, str(REPO))
+        from harness.environment.perception_cameras import parse_camera_spec
+        parse_camera_spec(perception_camera)  # reject a typo before any GPU starts
     root = Path(output_root).resolve()
     targets = {seed: root / f"seed_{seed}" for seed in seed_list}
     existing = [str(path) for path in targets.values() if path.exists()]
@@ -317,7 +329,7 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
         run_id = f"frames_{root.name}_seed{seed}_{stamp}"
         print(f"Seed {seed}: capturing on {GPU} (up to {max_actions} actions) ...", flush=True)
         try:
-            manifest = capture_frames.remote(run_id, seed, every, max_actions, chunk_size)
+            manifest = capture_frames.remote(run_id, seed, every, max_actions, chunk_size, perception_camera)
             print(f"Seed {seed}: {manifest['frames_saved']} frames, {manifest['policy_actions']} actions, "
                   f"stopped by {manifest['stop_reason']}, on {manifest['gpu']}", flush=True)
         except Exception as exc:

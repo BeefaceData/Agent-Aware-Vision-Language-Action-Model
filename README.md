@@ -309,7 +309,35 @@ vulkaninfo --summary | grep deviceName   # should list only the NVIDIA GPU
 To review or remove these environment settings, use
 `conda env config vars list -n robotwin` or `conda env config vars unset -n robotwin NAME`.
 
-### L5. Run episodes
+### L5. Look at the scene (simulator only)
+
+Before running episodes, check that RoboTwin renders and see what each camera
+sees. This resets the simulator once. It starts no policy, planner or Modal
+client, and it never moves the robot.
+
+```bash
+python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3
+xdg-open data/scenes/seed_3/overview.png
+
+# Compare seeds: each seed moves the mug and rack and picks one of 10 mug models
+for s in 0 1 2 4; do python -m development.capture.scene_views --seed $s --output data/scenes/seed_$s; done
+
+# Interactive 3D window (needs a display; close it to exit)
+python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3_viewer --viewer
+```
+
+Each folder gets colour and depth PNGs for every camera RoboTwin renders, an
+`overview.png` contact sheet and `cameras.json` (size, position, depth range).
+
+| Camera | Mounted | Used by the harness and policy? |
+|---|---|---|
+| `head_camera` | fixed, above the table | yes |
+| `left_camera` | left wrist | yes |
+| `right_camera` | right wrist | yes |
+| `front_camera` | fixed, low and in front | no |
+| `observer_camera` | third-person view | no |
+
+### L6. Run episodes
 
 Use a new `--output` folder for each run. `timeout -s INT` acts like Ctrl+C, so
 a stuck run still writes `summary.json` and its video.
@@ -330,7 +358,7 @@ timeout -s INT 75m python run_skills.py \
 Development-oracle mode is for internal debugging. Do not combine it with a
 public perception factory. Run one RoboTwin job at a time on GPUs with little VRAM.
 
-### L6. Campaigns, evaluation and the baseline
+### L7. Campaigns, evaluation and the baseline
 
 ```bash
 # Bounded scripted exploration campaign (one process per attempt)
@@ -345,7 +373,7 @@ python run_inference_chunked.py policy --episodes 1 --steps 900 --chunk-size 8
 RoboTwin's own step limit for `hanging_mug` is 900 policy actions. Frozen
 evaluation (`run_evaluation.py freeze` / `run`) also runs on this route.
 
-### L7. Local GPU
+### L8. Local GPU
 
 Local runs use whichever NVIDIA GPU Vulkan and CUDA select. After changing
 hardware, update `TORCH_CUDA_ARCH_LIST`, reinstall CuRobo (L3), and keep the

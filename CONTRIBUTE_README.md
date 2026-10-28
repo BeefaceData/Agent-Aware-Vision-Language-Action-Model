@@ -69,7 +69,7 @@ modal_apps/                Modal deployments: policy.py (Neotix), sam3.py (SAM 3
 development/               offline developer tools; never runtime evidence
   simulator/               in-process RoboTwin, the opt-in development oracle, rack geometry
   replays/                 perception/planner replays over saved observations (no simulator)
-  capture/                 record policy failures and RGB-D frames; annotate masks
+  capture/                 record policy failures and RGB-D frames; annotate masks; view scene cameras
   checkpoints/             failure checkpoint bank, seeded action replay, source provenance
   recovery/                adapters for the legacy development-only recovery skills
   demos/                   recorded demonstrations and sampled episode video
@@ -113,6 +113,18 @@ python -m unittest discover -s tests -q
 python -m development.replays.perception --help
 python -m development.replays.table_plane_lift --help
 ```
+
+To see the scene and every camera RoboTwin renders before working on perception
+(local simulator only; no policy, planner or Modal):
+
+```bash
+python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3
+```
+
+It writes colour and depth PNGs per camera, an `overview.png` contact sheet and
+`cameras.json`. Add `--viewer` for SAPIEN's interactive 3D window. Only
+`head_camera`, `left_camera` and `right_camera` feed the harness;
+`front_camera` and the observer view are rendered but unused.
 
 Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run concurrent live jobs on this workstation; local RoboTwin/CuRobo runs share limited GPU VRAM. A live validation should state its seed, config, evidence mode (public perception or development oracle), Modal workers, timeout, output directory, and completion predicate. Keep evaluation changes separate from exploratory presets, and do not treat simulator-native success alone as verified visual rack contact.
 

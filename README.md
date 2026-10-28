@@ -176,6 +176,10 @@ Limitations today:
 - **Keep the terminal open.** Stopping `modal run` stops the episode. To run
   without your terminal, use `modal run --detach ...`, then fetch the results
   with `modal volume get robotwin-runs <run_id> data/runs/`.
+- **Preemption.** Modal GPUs are always preemptible: Modal may reclaim one
+  mid-episode and retry the function. The retry keeps the interrupted folder on
+  the Volume as `<run_id>.preempted-N` and starts the episode again from reset,
+  repeating its Opus and GPU costs; only the final attempt is downloaded.
 - **Run one Modal episode at a time.** The policy worker keeps a single
   observation history (`max_containers=1`).
 - **Frozen evaluation and campaigns run locally.** `--evaluation-manifest` is
@@ -183,15 +187,15 @@ Limitations today:
 
 ### M5. Choose the simulator GPU
 
-Set `SIM_GPU` on the same command line as `modal run`. The default is `L4`.
+Set `SIM_GPU` on the same command line as `modal run`. The default is `T4`.
 
 ```bash
-SIM_GPU=T4 modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME
+SIM_GPU=L4 modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME
 SIM_GPU=A10G modal run modal_apps/simulator.py::spike    # measure before switching
 ```
 
 `SIM_GPU` is read when `modal run` starts, so it applies to that run only. To
-change the default, edit `GPU = os.environ.get("SIM_GPU", "L4")` in
+change the default, edit `GPU = os.environ.get("SIM_GPU", "T4")` in
 `modal_apps/simulator.py`. The run's `summary.json` does not record the GPU, so
 name the output folder after it when you compare GPUs.
 
@@ -199,9 +203,9 @@ Measured with the spike (seed 3; three RGB-D cameras):
 
 | GPU | Render 3 RGB-D cameras | CuRobo plan | Approx. $/h* | Notes |
 |---|---|---|---|---|
-| T4 | 344 ms | 88 ms | ~0.59 | cheapest; only about 1 min slower per full episode |
+| T4 | 344 ms | 88 ms | ~0.59 | default; cheapest, about 1 min slower per full episode |
 | A10G | 153 ms | 73 ms | ~1.10 | slower than L4 and pricier |
-| L4 | 110 ms | 86 ms | ~0.80 | default; fastest rendering tested |
+| L4 | 110 ms | 86 ms | ~0.80 | fastest rendering tested |
 | Laptop RTX 2050 (route 2) | 800 ms | 322 ms | — | for comparison |
 
 \*Approximate; check Modal's pricing page.

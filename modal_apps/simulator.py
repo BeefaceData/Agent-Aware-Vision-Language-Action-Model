@@ -291,6 +291,11 @@ def episode(*argv):
     import run_skills
     from modal_apps.episode_request import build_request
 
+    # Without --output, name the run like local runs, marked with where it ran.
+    known, _unknown = run_skills.build_parser(REPO).parse_known_args(list(argv))
+    if known.output is None:
+        argv = (*argv, "--output", str(run_skills.default_output(
+            REPO, known.config, known.seed, where=f"modal-{GPU}")))
     try:
         request = build_request(argv, stamp=time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
                                 input_dir=EPISODE_INPUTS, runs_dir=RUNS, robotwin_root=ROBOTWIN)

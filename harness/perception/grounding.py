@@ -113,7 +113,12 @@ class RGBDPerceptionProvider:
     """
 
     source = "perception"
-    RIGHT_ARM_ASSOCIATION_MAX_M = 0.16
+    # The measured pose is the arm's end-effector frame behind the fingers, and
+    # the policy grips the mug's rim or handle: a right-held mug's true centre
+    # sat 0.20-0.22 m from it (median) in the seed 0-4 captures, so the earlier
+    # 0.16 m almost never associated. Table-height mugs near the gripper stay
+    # excluded by the lift and table-support checks before association.
+    RIGHT_ARM_ASSOCIATION_MAX_M = 0.24
     RIGHT_ARM_ASSOCIATION_MARGIN_M = 0.06
     RIGHT_LIFT_STABLE_OBSERVATIONS = 2
     # Measured on the 236 seed 0-4 frames at 320x240: every upright mug that met
@@ -677,7 +682,9 @@ class RGBDPerceptionProvider:
             if self._right_lift_confirmed:
                 value, reason = True, "right_gripper_lift_association_latched"
             elif mug is None:
-                self._right_lift_candidate_count = 0
+                # Not seeing the mug (often the gripper hides it) does not
+                # contradict an earlier right-arm association, so it does not
+                # reset the count; contradicting observations below do.
                 value, reason = None, "mug_geometry_unavailable"
             elif self._initial_mug_height is None:
                 value, reason = None, "initial_mug_height_unavailable"

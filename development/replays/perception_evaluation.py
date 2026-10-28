@@ -54,14 +54,24 @@ def detector_phase(label):
     return "handoff"
 
 
-def truth_predicates(label):
+def right_gripper_lifting(label):
+    """The right gripper alone holds the mug off the table in this frame."""
+    contacts = label["contacts"]
+    return (contacts["right_gripper"] and not contacts["left_gripper"] and not contacts["table"]
+            and label["mug"]["height_change_m"] >= LIFTED_HEIGHT_M)
+
+
+def truth_predicates(label, *, right_lifted_before=False):
     """What each public predicate should answer, by its documented meaning.
 
     - mug_lifted: the mug has been lifted at some point (the public signal latches).
     - release_ready: the mug is upright and supported by the table, so opening a
       gripper would not drop it.
     - mug_staged_on_table: release_ready after an earlier lift (the handoff point).
-    - right_mug_lifted: the right gripper alone holds the mug off the table.
+    - right_mug_lifted: the right gripper alone has held the mug off the table at
+      some point. It is the handoff milestone that moves the planner to HANG for
+      the rest of the episode, so the public signal latches like mug_lifted.
+      ``right_lifted_before`` says whether an earlier frame showed it.
     """
     contacts = label["contacts"]
     upright = label["mug"]["tilt_deg"] <= TOPPLED_TILT_DEG
@@ -69,9 +79,7 @@ def truth_predicates(label):
     return {"mug_lifted": lifted_so_far(label),
             "release_ready": supported,
             "mug_staged_on_table": supported and label["lifted_before"],
-            "right_mug_lifted": (contacts["right_gripper"] and not contacts["left_gripper"]
-                                 and not contacts["table"]
-                                 and label["mug"]["height_change_m"] >= LIFTED_HEIGHT_M)}
+            "right_mug_lifted": right_lifted_before or right_gripper_lifting(label)}
 
 
 def mug_error(grounded, label):
@@ -105,6 +113,7 @@ def evaluate_capture(frames_dir, provider, *, ignore_cameras=()):
     # an earlier rule are scored with the current one.
     labels = [{**label, "state": mug_state(label)} for label in labels]
     records = []
+    right_lifted_before = False
     for label in labels:
         observation = without_cameras(load_public_observation(frames_dir / label["observation"]),
                                       ignore_cameras)
@@ -118,7 +127,8 @@ def evaluate_capture(frames_dir, provider, *, ignore_cameras=()):
                   "mug_xy_error_m": None, "mug_z_offset_m": None, "predicates": {}}
         if mug is not None:
             record["mug_xy_error_m"], record["mug_z_offset_m"] = mug_error(mug, label)
-        truth = truth_predicates(label)
+        truth = truth_predicates(label, right_lifted_before=right_lifted_before)
+        right_lifted_before = truth["right_mug_lifted"]
         for name in EVALUATED_PREDICATES:
             evidence = provider.predicate_evidence(name, observation)
             record["predicates"][name] = {"public": evidence["value"], "reason": evidence["reason"],

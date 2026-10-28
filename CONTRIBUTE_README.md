@@ -166,6 +166,20 @@ confusion table with precision, recall, unknown rate and false-true count.
 `frames.jsonl` keeps every per-frame result. The SAM 3 worker drops scores below
 its floors (mug 0.40, table 0.60), so the cache cannot study lower thresholds.
 
+Each predicate is scored against what it means to the planner
+(`truth_predicates` in `development/replays/perception_evaluation.py`):
+
+| Predicate | True when | Latches |
+|---|---|---|
+| `mug_lifted` | the mug has been lifted at some point | yes |
+| `release_ready` | the mug is upright and touching the table now | no |
+| `mug_staged_on_table` | `release_ready` after an earlier lift | no |
+| `right_mug_lifted` | the right gripper alone has held the mug off the table at some point | yes |
+
+`mug_lifted` and `right_mug_lifted` are milestones: once true, the planner keeps the
+phase they unlock (HANDOFF and HANG) for the rest of the episode, so a later drop
+does not make them wrong.
+
 **Perception-only camera.** `harness/environment/perception_cameras.py` defines an
 optional fixed RGB-D camera, `perception_camera`, on the far side of the table. The
 local simulator adds it right after each reset, so it draws no seeded random numbers

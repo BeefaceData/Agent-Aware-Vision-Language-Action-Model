@@ -45,6 +45,14 @@ class TruthTests(unittest.TestCase):
         self.assertTrue(truth_predicates(held_right)["right_mug_lifted"])
         self.assertFalse(truth_predicates(held_both)["right_mug_lifted"])
 
+    def test_right_mug_lifted_stays_true_after_the_milestone(self):
+        # The planner keeps HANG once the right arm has lifted the mug, even if
+        # the mug is later put back down.
+        back_on_table = label("staged", lifted_before=True)
+
+        self.assertFalse(truth_predicates(back_on_table)["right_mug_lifted"])
+        self.assertTrue(truth_predicates(back_on_table, right_lifted_before=True)["right_mug_lifted"])
+
 
 class PhaseTests(unittest.TestCase):
     def test_phase_follows_the_runtime_milestones(self):

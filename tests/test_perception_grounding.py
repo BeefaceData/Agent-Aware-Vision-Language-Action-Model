@@ -513,6 +513,48 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertFalse(evidence["value"])
         self.assertEqual(evidence["reason"], "mug_associated_with_left_gripper")
 
+    def test_right_arm_lift_associates_a_mug_held_ahead_of_the_end_effector(self):
+        # Seed 0 frame 400: the right-held mug's centre sat 0.20 m from the
+        # measured end-effector pose, which is behind the fingers.
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
+            Detection("mug", .99, mask()),)))
+        provider = RGBDPerceptionProvider(detector)
+        provider.observe(observation(0))
+        mug_xyz = np.asarray((0., -.525, 2.1))
+        right = np.r_[mug_xyz + np.asarray((0., .20, 0.)), (0., 0., 0., 1.)]
+        left = np.r_[mug_xyz + np.asarray((.45, 0., 0.)), (0., 0., 0., 1.)]
+
+        for sequence in (1, 2):
+            raised = observation(sequence, np.full((2, 3), 2.1, dtype=np.float32),
+                                 {"left": tuple(left), "right": tuple(right)})
+            provider.observe(raised)
+            evidence = provider.predicate_evidence("right_mug_lifted", raised)
+
+        self.assertTrue(evidence["value"])
+        self.assertEqual(evidence["reason"], "stable_right_gripper_lift_association")
+
+    def test_a_frame_without_the_mug_does_not_reset_the_right_lift_count(self):
+        # frames_cam seed 1: right-associated at 400, 448 and 480 with the mug
+        # hidden in the frames between, so it never confirmed.
+        seen = {"value": True}
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
+            (Detection("mug", .99, mask()),) if seen["value"] else ())))
+        provider = RGBDPerceptionProvider(detector)
+        provider.observe(observation(0))
+        mug_xyz = np.asarray((0., -.525, 2.1))
+        poses = {"left": tuple(np.r_[mug_xyz + (.45, 0., 0.), (0., 0., 0., 1.)]),
+                 "right": tuple(np.r_[mug_xyz + (0., .20, 0.), (0., 0., 0., 1.)])}
+
+        answers = []
+        for sequence, visible in ((1, True), (2, False), (3, True)):
+            seen["value"] = visible
+            raised = observation(sequence, np.full((2, 3), 2.1, dtype=np.float32), poses)
+            provider.observe(raised)
+            answers.append(provider.predicate_evidence("right_mug_lifted", raised)["reason"])
+
+        self.assertEqual(answers, ["right_gripper_lift_candidate_not_stable", "mug_geometry_unavailable",
+                                   "stable_right_gripper_lift_association"])
+
     def test_right_arm_lift_requires_stable_right_gripper_association(self):
         detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
             Detection("mug", .99, mask()),)))

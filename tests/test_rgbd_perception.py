@@ -90,6 +90,17 @@ class RGBDPerceptionTests(unittest.TestCase):
         observation.camera_frames["head_camera"].depth_m[0, 0] = 10
         self.assertEqual(float(client.observe().camera_frames["head_camera"].depth_m[0, 0]), 2.0)
 
+    def test_non_finite_or_negative_depth_pixels_become_missing_not_an_error(self):
+        raw = payload()
+        depth = np.full((2, 3), 2000.0, dtype=np.float32)
+        depth[0, 0], depth[0, 1], depth[1, 2] = np.nan, -5.0, np.inf
+        raw["head_camera__depth_mm"] = depth
+
+        frames = camera_frames_from_payload(raw, images())
+
+        np.testing.assert_array_equal(frames["head_camera"].depth_m,
+                                      [[0.0, 0.0, 2.0], [2.0, 2.0, 0.0]])
+
     def test_robotwin_three_by_four_cv_extrinsic_is_homogenized(self):
         raw = payload()
         raw["head_camera__extrinsic_cv"] = np.array(

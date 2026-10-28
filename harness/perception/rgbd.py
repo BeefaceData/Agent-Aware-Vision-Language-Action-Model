@@ -140,6 +140,11 @@ def camera_frames_from_payload(payload, images):
         if depth_mm.shape != image.shape[:2]:
             raise ValueError("depth_rgb_shape_mismatch")
         depth_m = np.asarray(depth_mm, dtype=np.float32) / 1000.0
+        # Ray-traced depth can contain non-finite or negative samples, e.g. when a
+        # wrist camera is almost touching geometry. Mark them as missing (0), like
+        # pixels with no surface, so grounding treats them as unknown evidence
+        # instead of rejecting the whole observation and ending the episode.
+        depth_m = np.where(np.isfinite(depth_m) & (depth_m >= 0), depth_m, np.float32(0.0))
         extrinsic = np.asarray(payload[keys[2]], dtype=np.float64)
         # RoboTwin/SAPIEN returns the OpenCV world-to-camera matrix as 3x4.
         # Internally keep the equivalent homogeneous 4x4 form for inversion.

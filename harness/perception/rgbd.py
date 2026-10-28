@@ -112,6 +112,42 @@ class RGBDCamera:
             raise ValueError("invalid_unprojected_point")
         return tuple(float(value) for value in world[:3] / world[3])
 
+    def vertical_normal_components(self, mask, *, erode_px=2, max_depth_step_m=0.01):
+        """Return |z| of the world surface normal at each usable pixel of ``mask``.
+
+        0 means the surface faces sideways, 1 that it faces straight up or down.
+        Normals come from central depth differences, so pixels within
+        ``erode_px`` of the mask edge, at the image border, or beside a depth
+        jump (an occluding edge) are left out.
+        """
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != self.depth_m.shape:
+            raise ValueError("mask_shape_mismatch")
+        inner = mask.copy()
+        for _ in range(erode_px):
+            eroded = inner.copy()
+            eroded[1:] &= inner[:-1]
+            eroded[:-1] &= inner[1:]
+            eroded[:, 1:] &= inner[:, :-1]
+            eroded[:, :-1] &= inner[:, 1:]
+            inner = eroded
+        depth = self.depth_m.astype(np.float64)
+        height, width = depth.shape
+        u, v = np.meshgrid(np.arange(width), np.arange(height))
+        pixels = np.stack((u, v, np.ones_like(u)), axis=-1).astype(np.float64)
+        camera_xyz = (pixels @ np.linalg.inv(self.intrinsic).T) * depth[..., None]
+        along_u = camera_xyz[1:-1, 2:] - camera_xyz[1:-1, :-2]
+        along_v = camera_xyz[2:, 1:-1] - camera_xyz[:-2, 1:-1]
+        # Only the rotation matters for a direction; world_to_camera is rigid.
+        normals = np.cross(along_u, along_v) @ self.world_to_camera[:3, :3]
+        length = np.linalg.norm(normals, axis=-1)
+        neighbours = (depth[1:-1, 2:], depth[1:-1, :-2], depth[2:, 1:-1], depth[:-2, 1:-1])
+        usable = (inner[1:-1, 1:-1] & (depth[1:-1, 1:-1] > 0) & (length > 1e-12)
+                  & np.all([value > 0 for value in neighbours], axis=0)
+                  & (np.abs(neighbours[0] - neighbours[1]) <= max_depth_step_m)
+                  & (np.abs(neighbours[2] - neighbours[3]) <= max_depth_step_m))
+        return np.abs(normals[usable, 2] / length[usable])
+
 
 def intrinsic_sha256(camera) -> str:
     """Identify a camera's lens model; unchanged while the robot moves the camera."""

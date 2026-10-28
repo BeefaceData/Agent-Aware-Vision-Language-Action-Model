@@ -381,25 +381,75 @@ class PerceptionGroundingTests(unittest.TestCase):
                 self.assertEqual(evidence["source"], "perception")
                 self.assertEqual(evidence["reason"], "not_provable_from_semantic_rgbd_alone")
 
-    def test_release_ready_requires_mug_lower_surface_on_local_table(self):
-        def obj(label, center_z, point_zs):
-            points = tuple((0.0, 0.0, float(z)) for z in point_zs)
-            return GroundedObject(label, (0.0, 0.0, center_z), .99, 2,
-                                  "head_camera", 1.0, points,
-                                  points if label == "mug" else ())
+    @staticmethod
+    def support_object(label, center_z, point_zs, median_normal_z=None):
+        points = tuple((0.0, 0.0, float(z)) for z in point_zs)
+        return GroundedObject(label, (0.0, 0.0, center_z), .99, 2, "head_camera", 1.0, points,
+                              points if label == "mug" else (), median_normal_z=median_normal_z)
 
-        mug = obj("mug", 1.1, (1.00, 1.01, 1.02, 1.10, 1.20))
+    def test_release_ready_requires_mug_lower_surface_on_local_table(self):
+        obj = self.support_object
+        mug = obj("mug", 1.1, (1.00, 1.01, 1.02, 1.10, 1.20), median_normal_z=0.05)
         table = obj("table", 1.0, (1.0, 1.0, 1.0, 1.0))
         value, reason = RGBDPerceptionProvider._table_support_evidence(
             {"mug": mug, "table": table})
         self.assertTrue(value)
         self.assertEqual(reason, "mug_silhouette_meets_local_table")
 
-        lifted = obj("mug", 1.2, (1.12, 1.13, 1.14, 1.20, 1.25))
+        lifted = obj("mug", 1.2, (1.12, 1.13, 1.14, 1.20, 1.25), median_normal_z=0.05)
         value, reason = RGBDPerceptionProvider._table_support_evidence(
             {"mug": lifted, "table": table})
         self.assertIsNone(value)
         self.assertEqual(reason, "mug_table_support_not_established")
+
+    def test_a_mug_on_its_side_meets_the_table_but_is_not_release_ready(self):
+        # Seed 3's toppled mug seen from the head camera: median normal |z| 0.86.
+        toppled = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=0.86)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": toppled, "table": table})
+
+        self.assertIs(value, False)
+        self.assertEqual(reason, "mug_surface_faces_up_not_upright")
+
+    def test_table_support_is_not_judged_from_a_wrist_camera(self):
+        # Seed 1 (frames_cam) frame 560: the right wrist saw a toppled mug's flat
+        # base end-on, which faces sideways like an upright wall (|z| 0.07).
+        from dataclasses import replace
+        base_on = replace(self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=0.07),
+                          camera="right_camera")
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": base_on, "table": table})
+
+        self.assertIsNone(value)
+        self.assertEqual(reason, "table_support_not_judged_from_wrist_view")
+
+    def test_table_support_stays_unknown_when_mug_orientation_was_not_measured(self):
+        sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": sliver, "table": table})
+
+        self.assertIsNone(value)
+        self.assertEqual(reason, "mug_orientation_unavailable")
+
+    def test_grounding_measures_mug_orientation_from_the_mask_and_depth(self):
+        mug_mask = np.zeros((20, 20), dtype=bool)
+        mug_mask[5:15, 5:15] = True
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
+            Detection("mug", .99, mug_mask),)))
+        provider = RGBDPerceptionProvider(detector)
+        provider.MIN_ORIENTATION_PIXELS = 10
+        frame = RGBDCamera(np.full((20, 20), 2.0, dtype=np.float32),
+                           np.array([[20., 0., 10.], [0., 20., 10.], [0., 0., 1.]]), np.eye(4))
+        obs = Observation(0, {name: np.zeros((20, 20, 3), dtype=np.uint8) for name in images()},
+                          (0.,) * 14, {"head_camera": frame})
+
+        mug = provider.observe(obs).objects["mug"]
+
+        # Identity extrinsic: the camera looks along world z, so the flat patch faces up.
+        self.assertAlmostEqual(mug.median_normal_z, 1.0)
 
     def test_release_ready_stays_unknown_when_local_table_geometry_is_missing(self):
         mug = GroundedObject("mug", (0., 0., 1.), .99, 1, "head_camera", 1.,

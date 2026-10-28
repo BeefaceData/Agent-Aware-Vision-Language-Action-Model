@@ -80,6 +80,31 @@ class RGBDPerceptionTests(unittest.TestCase):
         surface = camera(depth=depth)
         self.assertLessEqual(surface.local_depth_gap(4, 4, search_radius=4), .06)
 
+    def test_surface_normals_tell_a_floor_from_a_wall_in_world_axes(self):
+        depth = np.full((9, 9), .70, dtype=np.float32)
+        mask = np.zeros((9, 9), dtype=bool)
+        mask[1:8, 1:8] = True
+        # Identity extrinsic: the camera looks along world z, so a constant-depth
+        # surface faces up. Turned 90 degrees about x, the same surface is a wall.
+        sideways = np.eye(4)
+        sideways[:3, :3] = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]]
+
+        floor = camera(depth=depth).vertical_normal_components(mask)
+        wall = camera(depth=depth, world_to_camera=sideways).vertical_normal_components(mask)
+
+        np.testing.assert_allclose(floor, 1.0)
+        np.testing.assert_allclose(wall, 0.0, atol=1e-9)
+        self.assertEqual(len(floor), 3 * 3)  # the 7x7 mask eroded by 2 px on each side
+
+    def test_surface_normals_skip_pixels_beside_a_depth_jump(self):
+        depth = np.full((9, 9), .70, dtype=np.float32)
+        depth[:, 5:] = .90
+
+        normal_z = camera(depth=depth).vertical_normal_components(np.ones((9, 9), dtype=bool), erode_px=0)
+
+        self.assertEqual(len(normal_z), 7 * 5)  # columns 4 and 5 sit beside the step
+        np.testing.assert_allclose(normal_z, 1.0)
+
     def test_environment_client_converts_millimeters_and_copies_camera_frames(self):
         raw = payload()
         client = EnvironmentClient(lambda *args: (raw, {}))

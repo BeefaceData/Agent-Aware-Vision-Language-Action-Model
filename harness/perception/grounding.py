@@ -120,6 +120,10 @@ class RGBDPerceptionProvider:
     # the table had >= 775 normal pixels; the two toppled frames below 0.25 were
     # 45- and 80-pixel slivers.
     MIN_ORIENTATION_PIXELS = 300
+    # A mug being lifted or set down moves between policy chunks (16 actions):
+    # 2.6-4.0 cm in the seed 0-4 captures, while 95% of mugs resting on the
+    # table moved less than 2 cm between observations.
+    MUG_SETTLED_MAX_STEP_M = 0.02
 
     def __init__(self, detector: SemanticDetector, anchors: AnchorRegistry | None = None,
                  *, camera_order=(*CAMERAS, *PERCEPTION_CAMERAS),
@@ -159,6 +163,7 @@ class RGBDPerceptionProvider:
         self._last_sequence = -1
         self._last_result = None
         self._initial_mug_height = None
+        self._previous_mug_height = None
         self._mug_lift_seen = False
         self._right_lift_confirmed = False
         self._right_lift_candidate_count = 0
@@ -477,7 +482,9 @@ class RGBDPerceptionProvider:
                 status[label] = next((reason for reason in priority if reason in reasons), reasons[0])
 
         mug = objects.get("mug")
+        previous_mug_height = self._previous_mug_height
         if mug is not None:
+            self._previous_mug_height = mug.position[2]
             if self._initial_mug_height is None:
                 self._initial_mug_height = mug.position[2]
             elif mug.position[2] >= self._initial_mug_height + 0.03:
@@ -493,6 +500,13 @@ class RGBDPerceptionProvider:
                 and self._initial_mug_height is not None
                 and abs(mug.position[2] - self._initial_mug_height) > 0.03):
             release_ready, release_reason = None, "mug_above_initial_table_height"
+        # A mug the gripper is still lifting or lowering can sit within those
+        # tolerances; support also needs it to have stopped moving since the
+        # last observation that grounded it.
+        elif release_ready is True and (
+                previous_mug_height is None
+                or abs(mug.position[2] - previous_mug_height) > self.MUG_SETTLED_MAX_STEP_M):
+            release_ready, release_reason = None, "mug_not_yet_settled"
         if release_ready is True and self._mug_lift_seen:
             staged, staged_reason = True, "public_lift_then_table_support"
         elif release_ready is True:

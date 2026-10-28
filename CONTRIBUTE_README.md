@@ -145,7 +145,7 @@ same capture runs in about 7 minutes per seed (L4) and downloads each seed into
 worker keeps a single observation history:
 
 ```bash
-SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
 ```
 
 Then score public perception against those labels offline. Query SAM 3 once per

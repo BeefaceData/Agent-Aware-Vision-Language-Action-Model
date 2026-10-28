@@ -5,7 +5,7 @@ fills the asset Volume once, measures a GPU (spike), and runs whole
 ``run_skills.py`` episodes remotely with the same arguments as locally.
 
     modal run modal_apps/simulator.py::download_assets   # once; CPU only
-    modal run modal_apps/simulator.py::spike             # default GPU: L4
+    modal run modal_apps/simulator.py::spike             # default GPU: T4
     SIM_GPU=T4 modal run modal_apps/simulator.py::spike
     modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
     SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
@@ -49,7 +49,11 @@ CAPTURE_FUNCTION_TIMEOUT_SECONDS = 60 * 60
 
 # T4, A100, A10G, L4. Compiling CuRobo for all of them lets one image serve any GPU.
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
-GPU = os.environ.get("SIM_GPU", "T4")
+# SIM_GPU may list fallbacks, e.g. "L4,A10G,T4": Modal uses the first type with free
+# capacity instead of queueing for one. GPU is the label used in names and messages.
+GPU_CHOICES = tuple(name.strip() for name in os.environ.get("SIM_GPU", "T4").split(",") if name.strip())
+GPU = "-".join(GPU_CHOICES)
+GPU_REQUEST = list(GPU_CHOICES) if len(GPU_CHOICES) > 1 else GPU_CHOICES[0]
 
 # Fallback Vulkan loader entry for when the container runtime mounts NVIDIA's
 # graphics libraries but not their ICD file (ManiSkill's documented fix).
@@ -169,7 +173,7 @@ def _timed(function, repeats=1):
     return result, (time.perf_counter() - started) * 1000.0 / repeats
 
 
-@app.function(image=image, gpu=GPU, volumes={ASSETS: assets_volume}, timeout=30 * 60)
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume}, timeout=30 * 60)
 def measure(seed: int = 3, observations: int = 20, physics_steps: int = 200):
     """Report driver, Vulkan, render, physics and CuRobo timings for one simulator."""
     import io
@@ -224,7 +228,7 @@ def spike(seed: int = 3):
     print("vulkan summary saved in", output / f"{GPU}.json")
 
 
-@app.function(image=image, gpu=GPU, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
               secrets=[modal.Secret.from_name("anthropic")],
               timeout=EPISODE_FUNCTION_TIMEOUT_SECONDS, single_use_containers=True)
 def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: int) -> dict:
@@ -268,7 +272,7 @@ def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: 
             "interrupted_attempt": None if set_aside is None else set_aside.name}
 
 
-@app.function(image=image, gpu=GPU, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
               timeout=CAPTURE_FUNCTION_TIMEOUT_SECONDS, single_use_containers=True)
 def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_size: int) -> dict:
     """Run development.capture.labeled_frames in a fresh container; frames go to the runs Volume."""
@@ -279,7 +283,11 @@ def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_s
     output = Path(RUNS) / run_id
     set_aside_previous_attempt(output)  # a preempted attempt restarts the rollout cleanly
     try:
-        return capture(ROBOTWIN, output, seed, every=every, max_actions=max_actions, chunk_size=chunk_size)
+        manifest = capture(ROBOTWIN, output, seed, every=every, max_actions=max_actions, chunk_size=chunk_size)
+        # With GPU fallbacks the type that actually ran is only known here.
+        manifest["gpu"] = _command_output(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]).strip()
+        (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return manifest
     finally:
         runs_volume.commit()
 
@@ -306,7 +314,7 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
         try:
             manifest = capture_frames.remote(run_id, seed, every, max_actions, chunk_size)
             print(f"Seed {seed}: {manifest['frames_saved']} frames, {manifest['policy_actions']} actions, "
-                  f"stopped by {manifest['stop_reason']}", flush=True)
+                  f"stopped by {manifest['stop_reason']}, on {manifest['gpu']}", flush=True)
         finally:
             # Keep whatever was saved even if the rollout failed part-way.
             try:

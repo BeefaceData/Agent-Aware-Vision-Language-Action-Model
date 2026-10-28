@@ -194,7 +194,10 @@ SIM_GPU=L4 modal run modal_apps/simulator.py::episode --config ... --output data
 SIM_GPU=A10G modal run modal_apps/simulator.py::spike    # measure before switching
 ```
 
-`SIM_GPU` is read when `modal run` starts, so it applies to that run only. To
+`SIM_GPU` is read when `modal run` starts, so it applies to that run only. It also
+accepts a ranked list, such as `SIM_GPU=L4,A10G,T4`: Modal starts on the first type
+with free capacity instead of queueing for one. A queued call shows the function as
+*Inactive* with no live containers on the dashboard. To
 change the default, edit `GPU = os.environ.get("SIM_GPU", "T4")` in
 `modal_apps/simulator.py`. The run's `summary.json` does not record the GPU, so
 name the output folder after it when you compare GPUs.
@@ -233,10 +236,10 @@ policy and save public frames plus simulator labels, one seed after another. The
 L4 suits this job because rendering dominates it (about 7 minutes per 900-action seed):
 
 ```bash
-SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
 ```
 
-Each seed is downloaded into `data/perception/frames/seed_<N>`. Options:
+The manifest records which GPU actually ran. Each seed is downloaded into `data/perception/frames/seed_<N>`. Options:
 `--every 16`, `--max-actions 900`, `--chunk-size 16`, `--output-root DIR`. Existing
 seed folders are refused, never overwritten.
 

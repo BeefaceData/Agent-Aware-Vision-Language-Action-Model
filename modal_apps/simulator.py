@@ -265,6 +265,13 @@ def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: 
             "interrupted_attempt": None if set_aside is None else set_aside.name}
 
 
+def _run_exists_on_volume(run_id):
+    try:
+        return bool(runs_volume.listdir(run_id))
+    except modal.exception.NotFoundError:
+        return False
+
+
 def _download_run(run_id, destination, *, skip_observations):
     """Copy one run directory from the runs Volume into ``destination``; return the file count."""
     from modal.volume import FileEntryType
@@ -297,8 +304,7 @@ def episode(*argv):
         argv = (*argv, "--output", str(run_skills.default_output(
             REPO, known.config, known.seed, where=f"modal-{GPU}")))
     try:
-        request = build_request(argv, stamp=time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
-                                input_dir=EPISODE_INPUTS, runs_dir=RUNS, robotwin_root=ROBOTWIN)
+        request = build_request(argv, input_dir=EPISODE_INPUTS, runs_dir=RUNS, robotwin_root=ROBOTWIN)
     except ValueError as exc:
         raise SystemExit(f"episode: {exc}") from None
     # The same checks run_skills.main makes, before any GPU is allocated.
@@ -306,6 +312,9 @@ def episode(*argv):
     output = request.local_output.resolve()
     if output.exists():
         raise SystemExit(f"episode: {output} already exists; choose a new --output")
+    if _run_exists_on_volume(request.run_id):
+        raise SystemExit(f"episode: {request.run_id} already exists on the robotwin-runs Volume; "
+                         "choose a new --output or delete it with modal volume rm -r")
     uploads = {name: path.read_bytes() for name, path in request.uploads.items()}
 
     print(f"Running {request.run_id} on {GPU} (limit {request.time_limit_minutes} min)")

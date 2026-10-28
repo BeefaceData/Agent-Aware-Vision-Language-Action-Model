@@ -161,8 +161,8 @@ What `::episode` does:
    container on the chosen GPU. It calls the policy and SAM 3 inside Modal, and
    Anthropic with the `anthropic` secret.
 3. **Saves and downloads the results.** They are written to the `robotwin-runs`
-   Volume as `<output name>-<UTC timestamp>`, then copied into your `--output`
-   folder. Partial results are copied even after a failure.
+   Volume under the same name as your `--output` folder, then copied into it.
+   Partial results are copied even after a failure.
 
 `::episode` also has two options of its own:
 
@@ -397,7 +397,10 @@ data/runs/2026-10-28_Wed_08-10am_skill_runtime_seed3_local
 
 The parts are: local date, weekday and time; the config (without
 `skill_runtime_`); the seed; and `local` or `modal-<GPU>`. Runs started in the
-same minute get `-2`, `-3`. Pass `--output` to choose your own name instead.
+same minute get `-2`, `-3`. Long config names are shortened (filler words such as
+`task` are dropped) so names stay short enough for memory candidate ids. Pass
+`--output` to choose your own name instead; a Modal run refuses to start if that
+name already exists on the `robotwin-runs` Volume.
 
 Each run folder (both routes) contains:
 

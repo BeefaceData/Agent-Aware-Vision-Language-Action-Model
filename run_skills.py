@@ -16,6 +16,12 @@ from harness.runtime.settings import RunSettings
 from harness.exploration.candidates import candidates_from_attempt
 
 RUNS_DIRECTORY = Path("data/runs")
+# Memory candidate ids are "<run name>.observation" and must fit the 80-character
+# memory Name limit (harness/memory/base.py); 3 more characters stay free for a
+# same-minute "-NN" suffix.
+MAX_RUN_NAME_LENGTH = 80 - len(".observation") - 3
+# Dropped first, in order, when a config name would make the run name too long.
+CONFIG_FILLER_WORDS = ("task", "table")
 
 SUCCESSFUL_OUTCOMES = frozenset({
     "acquisition_confirmed", "left_transfer_complete", "handoff_confirmed", "task_success"})
@@ -39,19 +45,32 @@ def default_output(root, config, seed, *, where, now=None):
 
     The name leads with a sortable date, then weekday and local time, then what
     ran: ``2026-10-28_Wed_07-55am_opus_full_task_rgbd_table_lift_seed3_local``.
-    A ``-2``, ``-3``... suffix keeps runs started in the same minute apart.
+    A ``-2``, ``-3``... suffix keeps runs started in the same minute apart. Long
+    config names are shortened so the name fits ``MAX_RUN_NAME_LENGTH``.
     """
     now = now or datetime.now()
     when = now.strftime("%Y-%m-%d_%a_%I-%M") + now.strftime("%p").lower()
     config_name = Path(config).stem
     if config_name.startswith("skill_runtime_"):
         config_name = config_name.removeprefix("skill_runtime_")
-    folder = Path(root) / RUNS_DIRECTORY / f"{when}_{config_name}_seed{seed}_{where}"
+    tail = f"_seed{seed}_{where}"
+    config_name = _shorten_config_name(config_name, MAX_RUN_NAME_LENGTH - len(when) - 1 - len(tail))
+    folder = Path(root) / RUNS_DIRECTORY / f"{when}_{config_name}{tail}"
     candidate, count = folder, 1
     while candidate.exists():
         count += 1
         candidate = folder.with_name(f"{folder.name}-{count}")
     return candidate
+
+
+def _shorten_config_name(name, room):
+    """Fit ``name`` into ``room`` characters, dropping filler words before truncating."""
+    words = name.split("_")
+    for filler in CONFIG_FILLER_WORDS:
+        if len("_".join(words)) <= room:
+            break
+        words = [word for word in words if word != filler] or words
+    return "_".join(words)[:max(room, 1)].rstrip("_")
 
 
 def option_error(args, settings):

@@ -126,6 +126,19 @@ It writes colour and depth PNGs per camera, an `overview.png` contact sheet and
 `head_camera`, `left_camera` and `right_camera` feed the harness;
 `front_camera` and the observer view are rendered but unused.
 
+To build an offline evaluation set, roll out the frozen policy alone (no planner,
+SAM 3 or Opus) and save public frames with separate simulator labels:
+
+```bash
+python -m development.capture.labeled_frames --seed 3 --output data/perception/frames/seed_3
+```
+
+`observations/` holds the public `.npz` frames. `labels.jsonl` holds privileged
+simulator truth (mug and rack poses, mug tilt, contacts, gripper values and a
+derived mug state such as `held_left`, `staged` or `toppled`). It is for offline
+evaluators under `development/` only and must never reach runtime perception or
+the planner. A 900-action rollout saves about 57 frames (about 45 MB).
+
 Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run concurrent live jobs on this workstation; local RoboTwin/CuRobo runs share limited GPU VRAM. A live validation should state its seed, config, evidence mode (public perception or development oracle), Modal workers, timeout, output directory, and completion predicate. Keep evaluation changes separate from exploratory presets, and do not treat simulator-native success alone as verified visual rack contact.
 
 ## Collaboration notes

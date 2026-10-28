@@ -1,8 +1,8 @@
 """Translate ``run_skills.py`` arguments into one remote Modal episode request.
 
-Pure argument handling with no Modal import, so it is testable without network
-or GPU. ``modal_apps/simulator.py`` owns the uploads, the remote call and the
-download back into ``--output``.
+Argument and run-folder handling with no Modal import, so it is testable
+without network or GPU. ``modal_apps/simulator.py`` owns the uploads, the remote
+call and the download back into ``--output``.
 """
 
 from dataclasses import dataclass
@@ -93,3 +93,21 @@ def build_request(argv, *, stamp, input_dir, runs_dir, robotwin_root):
     return EpisodeRequest(run_id=run_id, local_output=output, local_argv=tuple(local_argv),
                           remote_argv=tuple(remote_argv), uploads=uploads,
                           time_limit_minutes=time_limit, skip_observations=skip_observations)
+
+
+def set_aside_previous_attempt(output):
+    """Rename a run folder left by an earlier attempt; return its new path, or None.
+
+    Modal restarts a preempted function with the same input, so the retry finds
+    the interrupted attempt's folder. Keeping it (as ``<name>.preempted-N``) lets
+    the retry start a clean episode without losing the partial artifacts.
+    """
+    output = Path(output)
+    if not output.exists():
+        return None
+    attempt = 1
+    while output.with_name(f"{output.name}.preempted-{attempt}").exists():
+        attempt += 1
+    target = output.with_name(f"{output.name}.preempted-{attempt}")
+    output.rename(target)
+    return target

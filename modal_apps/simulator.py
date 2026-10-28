@@ -46,6 +46,10 @@ SHUTDOWN_GRACE_SECONDS = 5 * 60
 EPISODE_FUNCTION_TIMEOUT_SECONDS = 4 * 60 * 60
 # One 900-action labelled capture takes roughly 10 minutes on an L4.
 CAPTURE_FUNCTION_TIMEOUT_SECONDS = 60 * 60
+# Files committed inside a container can take seconds to appear in this
+# machine's listing of the Volume; downloads wait up to a minute for them.
+VOLUME_SETTLE_ATTEMPTS = 12
+VOLUME_SETTLE_SECONDS = 5
 
 # T4, A100, A10G, L4. Compiling CuRobo for all of them lets one image serve any GPU.
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
@@ -318,16 +322,45 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
                   f"stopped by {manifest['stop_reason']}, on {manifest['gpu']}", flush=True)
         except Exception as exc:
             # One failed rollout should not cost the remaining seeds.
+            manifest = None
             failed[seed] = f"{type(exc).__name__}: {exc}"[:300]
             print(f"Seed {seed}: FAILED ({failed[seed]}); keeping its partial frames", flush=True)
         # Keep whatever was saved even if the rollout failed part-way.
-        try:
-            count = _download_run(run_id, target, skip_observations=False)
-            print(f"Seed {seed}: downloaded {count} files to {target}", flush=True)
-        except modal.exception.NotFoundError:
+        expected = None if manifest is None else manifest["frames_saved"]
+        if _wait_for_volume(run_id, expected_observations=expected) == 0:
             print(f"Seed {seed}: nothing saved on the Volume", flush=True)
+            continue
+        count = _download_run(run_id, target, skip_observations=False)
+        frames_downloaded = len(list((target / "observations").glob("observation_*.npz")))
+        print(f"Seed {seed}: downloaded {count} files ({frames_downloaded} frames) to {target}", flush=True)
+        if expected is not None and frames_downloaded < expected:
+            print(f"Seed {seed}: WARNING only {frames_downloaded} of {expected} frames arrived; fetch again with "
+                  f"modal volume get robotwin-runs {run_id} <dir>", flush=True)
     if failed:
         raise SystemExit(f"frames: seeds failed: {failed}")
+
+
+def _wait_for_volume(run_id, *, expected_observations=None):
+    """Wait until this machine's view of the runs Volume shows a finished run.
+
+    With ``expected_observations`` wait for that many observation files;
+    otherwise wait until two listings agree. Returns the number of files seen.
+    """
+    previous = None
+    for attempt in range(VOLUME_SETTLE_ATTEMPTS):
+        try:
+            paths = [entry.path for entry in runs_volume.listdir(run_id, recursive=True)]
+        except modal.exception.NotFoundError:
+            paths = []
+        observations = sum("/observations/observation_" in f"/{path}" for path in paths)
+        if expected_observations is not None and observations >= expected_observations:
+            return len(paths)
+        if expected_observations is None and paths and len(paths) == previous:
+            return len(paths)
+        previous = len(paths)
+        if attempt + 1 < VOLUME_SETTLE_ATTEMPTS:
+            time.sleep(VOLUME_SETTLE_SECONDS)
+    return previous or 0
 
 
 def _run_exists_on_volume(run_id):
@@ -389,6 +422,7 @@ def episode(*argv):
     finally:
         # Partial artifacts are still worth having after a failed or interrupted run.
         try:
+            _wait_for_volume(request.run_id)
             count = _download_run(request.run_id, output, skip_observations=request.skip_observations)
             print(f"Downloaded {count} files to {output}")
         except Exception as exc:

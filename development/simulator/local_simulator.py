@@ -79,23 +79,8 @@ class LocalSimulator:
                 self._diagnostic("simulator_phase_completed", phase=phase,
                                  elapsed_ms=(time.perf_counter() - phase_start) * 1000)
             elif path == "/step" and self.initialized:
-                self._step_count += 1
-                step_id = self._step_count
-                phase = "task_action"
-                self._diagnostic("simulator_phase_started", phase=phase, step_id=step_id)
-                phase_start = time.perf_counter()
-                try:
-                    self.task.take_action(np.asarray(vector14(payload["action"]), dtype=np.float64))
-                    success = (bool(self.task.eval_success)
-                               or bool(getattr(self.task, "harness_native_success_latched", False))
-                               or bool(self.task.check_success()))
-                except Exception as exc:
-                    self._diagnostic("simulator_phase_failed", phase=phase, step_id=step_id,
-                                     error_type=type(exc).__name__)
-                    raise
-                action_finished = time.perf_counter()
-                self._diagnostic("simulator_phase_completed", phase=phase, step_id=step_id,
-                                 elapsed_ms=(action_finished - phase_start) * 1000)
+                step_id = self._step_count + 1
+                success = self.act(payload["action"])
             else:
                 raise ValueError("local simulator requires reset followed by steps")
         after_action = time.perf_counter()
@@ -119,6 +104,35 @@ class LocalSimulator:
             "sim_observation_ms": (observation_finished - after_action) * 1000,
             "sim_encode_ms": 0.0,
         }
+
+    def act(self, action):
+        """Apply one action without rendering and return the native success flag.
+
+        Rendering every camera with depth costs most of a step (about 80% on a
+        Modal A10, more on a laptop GPU), so a caller that needs only some frames
+        acts here and calls ``observation`` for those.
+        """
+        import torch
+        if not self.initialized:
+            raise ValueError("local simulator requires reset followed by steps")
+        self._step_count += 1
+        step_id = self._step_count
+        phase = "task_action"
+        self._diagnostic("simulator_phase_started", phase=phase, step_id=step_id)
+        phase_start = time.perf_counter()
+        try:
+            with torch.enable_grad():
+                self.task.take_action(np.asarray(vector14(action), dtype=np.float64))
+                success = (bool(self.task.eval_success)
+                           or bool(getattr(self.task, "harness_native_success_latched", False))
+                           or bool(self.task.check_success()))
+        except Exception as exc:
+            self._diagnostic("simulator_phase_failed", phase=phase, step_id=step_id,
+                             error_type=type(exc).__name__)
+            raise
+        self._diagnostic("simulator_phase_completed", phase=phase, step_id=step_id,
+                         elapsed_ms=(time.perf_counter() - phase_start) * 1000)
+        return success
 
     def observation(self, success):
         """Render the current observation payload, including any perception cameras."""

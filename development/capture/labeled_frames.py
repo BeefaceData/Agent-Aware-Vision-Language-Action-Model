@@ -126,6 +126,9 @@ def roll_out(environment, task, vla, store, labels_path, *, seed, every, max_act
              contacts=mug_contacts):
     """Reset once, run the policy and save a frame plus label every ``every`` actions.
 
+    Actions run through ``environment.advance`` without rendering; a frame is
+    rendered only for the policy (once per chunk) and for saved frames.
+
     Returns ``(frames_saved, actions_executed, stop_reason)``.
     """
     observation = environment.reset(seed)
@@ -154,15 +157,19 @@ def roll_out(environment, task, vla, store, labels_path, *, seed, every, max_act
         if chunk.ndim != 2 or len(chunk) == 0:
             stop_reason = "policy_returned_no_actions"
             break
+        frame = None  # the rendered current state, if a saved frame already rendered it
         for action in chunk:
-            observation = environment.step(action)
+            environment.advance(action)
+            frame = None
             actions += 1
             update_lift()
             if environment.native_success:
                 stop_reason = "native_success"
                 break
             if actions % every == 0:
-                record(observation, actions)
+                frame = environment.observe()
+                record(frame, actions)
+        observation = frame if frame is not None else environment.observe()
     if saved[-1] != observation.sequence:
         record(observation, actions)  # always keep the final state
     return len(saved), actions, stop_reason

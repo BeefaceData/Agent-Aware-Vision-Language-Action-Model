@@ -41,18 +41,19 @@ class FakeEnvironment:
 
     def __init__(self, task, success_after=None):
         self.task, self.success_after, self.actions = task, success_after, 0
+        self.rendered = []  # action count at each render
 
-    def _observation(self):
+    def observe(self):
+        self.rendered.append(self.actions)
         return Observation(self.actions, images(self.actions % 255), tuple([0.0] * 14))
 
     def reset(self, seed):
-        return self._observation()
+        return self.observe()
 
-    def step(self, action):
+    def advance(self, action):
         self.actions += 1
         self.task.mug_pose[2] = 0.75 + 0.001 * self.actions
         self.task.success = self.success_after is not None and self.actions >= self.success_after
-        return self._observation()
 
     @property
     def native_success(self):
@@ -98,6 +99,15 @@ class RollOutTests(unittest.TestCase):
         self.assertEqual((frames, actions, stop), (4, 10, "action_limit"))
         self.assertEqual([item["policy_actions"] for item in labels], [0, 4, 8, 10])
         self.assertEqual(policy.resets, 1)
+
+    def test_renders_only_policy_inputs_and_saved_frames_once_each(self):
+        task = FakeTask()
+        environment = FakeEnvironment(task)
+        directory, _output, _result, _labels, _policy = run(task, environment, every=4, max_actions=12,
+                                                            chunk_size=4)
+        directory.cleanup()
+
+        self.assertEqual(environment.rendered, [0, 4, 8, 12])
 
     def test_labels_point_at_saved_public_observations(self):
         task = FakeTask()

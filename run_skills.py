@@ -271,7 +271,8 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
         simulator = LocalSimulator(args.robotwin_root.resolve(),
             rgbd_enabled=settings.perception.rgbd_enabled,
             diagnostics=partial(append_jsonl, output / "simulator_timing.jsonl"))
-        environment = open_environment(simulator, video=video, frozen=frozen)
+        environment = open_environment(simulator, video=video, frozen=frozen,
+                                       render_once_per_step=settings.render_once_per_step)
         initial_observation = environment.reset(args.seed)  # Exactly one reset, owned by this runner.
         if settings.perception.rgbd_enabled:
             from harness.perception.rgbd import require_camera_frames
@@ -323,14 +324,14 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
     return summary
 
 
-def open_environment(simulator, *, video, frozen):
+def open_environment(simulator, *, video, frozen, render_once_per_step=False):
     from harness.environment.local import LocalEnvironmentClient
 
     if video is not None:
         from development.demos.episode_video import RecordingEnvironment
-        environment = RecordingEnvironment(simulator, video)
+        environment = RecordingEnvironment(simulator, video, render_once_per_step=render_once_per_step)
     else:
-        environment = LocalEnvironmentClient(simulator)
+        environment = LocalEnvironmentClient(simulator, render_once_per_step=render_once_per_step)
     if frozen:
         from harness.evaluation.guard import SingleResetEnvironment
         environment = SingleResetEnvironment(environment)

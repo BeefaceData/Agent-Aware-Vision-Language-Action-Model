@@ -28,6 +28,10 @@ class PerceptionSettings(Model):
 
 class RunSettings(Model):
     record_video: StrictBool = False
+    # Local simulator only: render each policy step once instead of twice (the
+    # base step also renders the pre-action state and discards it). Same
+    # observations; off by default so existing runs keep their measured timing.
+    render_once_per_step: StrictBool = False
     perception: PerceptionSettings = Field(default_factory=PerceptionSettings)
     max_turns: Annotated[StrictInt, Field(ge=1, le=1000)] = 20
     recipe: GraspRetrySettings = Field(default_factory=GraspRetrySettings)

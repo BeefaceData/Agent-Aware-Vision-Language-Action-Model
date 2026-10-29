@@ -41,6 +41,9 @@ POLICY_CHUNK_SIZE = 16
 # not the public perception thresholds being evaluated.
 LIFTED_HEIGHT_M = 0.03
 TOPPLED_TILT_DEG = 45.0
+# Far below the tabletop: the mug fell to the floor (seed 4 came to rest about
+# 0.70 m down), where no camera sees it.
+OFF_TABLE_DROP_M = 0.20
 PRIVILEGED_FILE = "labels.jsonl"
 
 
@@ -64,12 +67,15 @@ def mug_state(label):
     ``staged`` means back on the table after an earlier lift (the handoff point).
     ``toppled`` means tilted past ``TOPPLED_TILT_DEG`` with no gripper touching it
     (fallen over); a mug the policy rotates in its grip, as it does for hanging,
-    is labelled by its grip instead.
+    is labelled by its grip instead. ``off_table`` means it fell more than
+    ``OFF_TABLE_DROP_M`` below its reset height, off the table.
     """
     contacts = label["contacts"]
     left, right, table = contacts["left_gripper"], contacts["right_gripper"], contacts["table"]
     if label["native_success"]:
         return "hung"
+    if label["mug"].get("height_change_m", 0.0) <= -OFF_TABLE_DROP_M:
+        return "off_table"
     if label["mug"]["tilt_deg"] > TOPPLED_TILT_DEG and not (left or right):
         return "toppled"
     if contacts["rack"]:

@@ -1040,4 +1040,174 @@ TCP & tool centre point: the arm's measured end-effector frame \\
 \bottomrule
 \end{tabularx}
 
+\normalsize
+\appendix
+\clearpage
+\section{Plan: recovering a toppled mug}
+
+\begin{keyidea}
+Goal: when the policy topples the mug, the supervisor sends bounded skill commands that
+pick the mug up, stand it upright at the place where the left hand normally sets it down,
+and then continue the normal handoff. \textbf{This is a plan; none of it is implemented
+yet.}
+\end{keyidea}
+
+\subsection{The recovery as a chain of skills and checks}
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.32cm]
+  \node[pill=rose,font=\scriptsize] (t) {\code{mug_toppled}\\= true};
+  \node[box=sky,font=\scriptsize,below=of t] (s1) {\code{move_to(left, toppled_mug_pregrasp)}\\\scriptsize above the mug, across its axis};
+  \node[box=sky,font=\scriptsize,below=of s1] (s2) {\code{move_to(left, current_ee, offset down)}};
+  \node[box=sky,font=\scriptsize,below=of s2] (s3) {\code{set_gripper(left, 0.0)}\\\scriptsize close, then check the grasp};
+  \node[box=sky,font=\scriptsize,below=of s3] (s4) {\code{move_to(left, current_ee, offset up 0.10)}};
+  \node[box=grape,font=\scriptsize,below=of s4] (s5) {\textbf{\code{reorient(left, roll 90 deg)}}\\\scriptsize new skill};
+  \node[box=sky,font=\scriptsize,below=of s5] (s6) {\code{move_to(left, stage_pose)}\\\scriptsize new anchor};
+  \node[box=sky,font=\scriptsize,below=of s6] (s7) {\code{release(left)}, then \code{move_to(left, current_ee, offset up)}};
+  \node[pill=leaf,font=\scriptsize,below=of s7] (g) {\code{mug_staged_on_table}\\= true};
+  \node[box=leaf,font=\scriptsize,below=of g] (r) {resume \code{HandoffPlanner}\\at the right-arm grasp};
+  \foreach \a/\b in {t/s1,s1/s2,s2/s3,s3/s4,s4/s5,s5/s6,s6/s7,s7/g,g/r} \draw[flow] (\a) -- (\b);
+  \node[box=stone,font=\scriptsize,text width=3.9cm,right=1.4cm of s3] (u) {any check \textbf{unknown}\\$\Rightarrow$ wait and look again};
+  \node[box=rose,font=\scriptsize,text width=3.9cm,below=0.5cm of u] (a) {retries used up or a check \textbf{false}\\$\Rightarrow$ \code{abort}};
+  \draw[dflow] (s3.east) -- (u.west); \draw[dflow] (u) -- (a);
+  \node[box=stone,font=\scriptsize,text width=3.6cm,left=1.0cm of s3] (b) {cheap baseline first:\\\code{vla_act} from the toppled state with a fresh history};
+\end{tikzpicture}
+\end{center}
+
+\subsection{What exists and what is missing}
+
+\begin{center}
+\begin{tikzpicture}
+  \node[box=leaf,font=\scriptsize,text width=7.0cm,align=left,anchor=north] (e) at (0,0) {
+   \textbullet\ skills: \code{move_to} (named target + offset $\le$ 20 cm), \code{rotate_wrist} (yaw $\pm$30$^\circ$),
+   \code{set_gripper}, \code{release}, \code{vla_act}, \code{abort}\\
+   \textbullet\ anchors: \code{current_ee}, \code{mug_pregrasp}, \code{rack_approach}, \code{table_approach}, \code{rack_seat}\\
+   \textbullet\ \code{HandoffPlanner} phases and predicate gates\\
+   \textbullet\ CuRobo planning to any full pose (\code{plan})\\
+   \textbullet\ the surface-normal toppled evidence (as a reason)\\
+   \textbullet\ checkpoint bank and \code{manual_skill.py} for rehearsing skills};
+  \node[box=rose,font=\scriptsize,text width=7.0cm,align=left,anchor=north] (m) at (8.3,0) {
+   \textbf{1.} \code{mug_toppled} predicate (needs the end-on fix first)\\
+   \textbf{2.} \code{toppled_mug_pregrasp} anchor: axis direction and grasp from depth\\
+   \textbf{3.} \code{stage_pose} anchor: the handover place, defined publicly\\
+   \textbf{4.} \code{reorient} skill: about 90$^\circ$ roll through CuRobo\\
+   \textbf{5.} planner recovery phase (+ Opus schema, new prompt version)\\
+   \textbf{6.} toppled checkpoints and a recovery evaluation};
+  \node[font=\small\bfseries,text=leaf,above=0.15cm of e] {\faCheck\ Already in the code};
+  \node[font=\small\bfseries,text=rose,above=0.15cm of m] {\faPlus\ To build};
+\end{tikzpicture}
+\end{center}
+
+\subsection{The perception pieces}
+
+\textbf{1. A \code{mug_toppled} predicate.} Today ``toppled'' only blocks
+\code{release_ready}. Recovery needs a fact the planner can branch on: true when the
+mug is grounded from the head or perception camera, touches the table and its surface
+faces up. It inherits the end-on blind spot from seed 6 (it would say false there), so
+that fix comes first --- designed on seeds 0--4, confirmed on fresh seeds 10--14.
+
+\textbf{2. Where it lies and which way.} A pick-up needs the mug's axis and its open end,
+not just its centre.
+
+\begin{center}
+\begin{tikzpicture}
+  \fill[sun!25] (-3.4,-0.15) rectangle (3.4,0);
+  \fill[sky!60,rounded corners=2pt] (-1.4,0) rectangle (1.2,0.9);
+  \draw[sky!80!black,line width=2pt] (-0.6,0.9) arc (180:0:0.35 and 0.3);
+  \draw[sky!80!black,thick] (1.2,0.45) ellipse (0.12 and 0.45);
+  \draw[->,very thick,rose] (-2.1,0.45) -- (2.2,0.45) node[right,font=\scriptsize]{axis (from 3D mask points)};
+  \node[font=\scriptsize] at (1.25,-0.45) {open end};
+  \node[font=\scriptsize] at (-1.2,1.3) {handle};
+  \draw[ink,line width=3pt] (0.2,2.4) -- (0.2,1.6);
+  \draw[ink,line width=2pt] (0.2,1.6) -- (-0.05,1.15) (0.2,1.6) -- (0.45,1.15);
+  \node[font=\scriptsize,anchor=west] at (0.5,2.1) {gripper across the axis};
+\end{tikzpicture}
+\end{center}
+
+The long direction of the mask's 3D points gives the axis (it lies horizontal); the end
+whose depth shows a hollow gives the opening. Trusted perception code turns that into a
+fresh \code{toppled_mug_pregrasp} anchor each observation --- never simulator poses.
+
+\textbf{3. A public ``handover place''.} The left hand sets the mug where the
+\emph{policy} chooses, near RoboTwin's \code{middle_pos} --- simulator truth, so not
+usable at runtime. Define \code{stage_pose} as a fixed pose in the table frame, taught once
+and stored in config (like a taught position on a real robot), or as the median position
+where perception saw the mug when \code{mug_staged_on_table} first became true in successful
+development runs, frozen into config.
+
+\subsection{The motion piece: standing it up}
+
+\begin{center}
+\begin{tikzpicture}
+  \begin{scope}
+    \fill[sun!25] (-1.4,-0.1) rectangle (1.4,0);
+    \fill[sky!60,rounded corners=2pt] (-0.8,0) rectangle (0.8,0.65);
+    \draw[ink,line width=3pt] (0,1.7) -- (0,1.0); \draw[ink,line width=2pt] (0,1.0) -- (-0.25,0.65) (0,1.0) -- (0.25,0.65);
+    \node[font=\scriptsize] at (0,-0.45) {1. grip lying mug};
+  \end{scope}
+  \draw[flow] (1.6,0.6) -- (2.4,0.6);
+  \begin{scope}[xshift=4cm]
+    \fill[sky!60,rounded corners=2pt] (-0.8,1.0) rectangle (0.8,1.65);
+    \draw[ink,line width=3pt] (0,2.7) -- (0,2.0); \draw[ink,line width=2pt] (0,2.0) -- (-0.25,1.65) (0,2.0) -- (0.25,1.65);
+    \draw[->,thick,grape] (1.0,1.6) arc (60:-60:0.5); \node[font=\scriptsize,text=grape] at (1.6,1.3) {roll 90$^\circ$};
+    \node[font=\scriptsize] at (0,0.55) {2. lift 10 cm};
+  \end{scope}
+  \draw[flow] (5.8,0.6) -- (6.6,0.6);
+  \begin{scope}[xshift=8.4cm]
+    \fill[sun!25] (-1.4,-0.1) rectangle (1.4,0);
+    \fill[sky!60,rounded corners=2pt] (-0.35,0) rectangle (0.35,1.1);
+    \draw[ink,line width=3pt] (-1.2,0.55) -- (-0.6,0.55); \draw[ink,line width=2pt] (-0.6,0.55) -- (-0.35,0.8) (-0.6,0.55) -- (-0.35,0.3);
+    \node[font=\scriptsize] at (0,-0.45) {3. place upright at \code{stage_pose}};
+  \end{scope}
+\end{tikzpicture}
+\end{center}
+
+\code{rotate_wrist} only turns $\pm$30$^\circ$ about the vertical. Standing a mug up needs
+about 90$^\circ$ about a horizontal axis: a new bounded \code{reorient} skill (axis and angle,
+angle limited to about $\pm$90$^\circ$, planned with CuRobo to a full pose), or \code{move_to}
+accepting a named target orientation such as ``upright at \code{stage_pose}''.
+
+\begin{careful}
+\textbf{Check feasibility first.} The Aloha arms have 6 joints, so a 90$^\circ$ roll above the
+table may not be reachable everywhere. The gripper opening against the mug's $\approx$8 cm
+diameter decides whether the body can be gripped or the rim at the open end must be pinched
+(as a person would). If the arm cannot do this with perfect positions, the perception work for
+it is not worth building yet.
+\end{careful}
+
+\subsection{How to develop it safely}
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.15cm]
+  \node[box=stone,text width=2.6cm,font=\scriptsize] (c) {\textbf{1. Checkpoints}\\toppled states from seeds 6 and 7 (still from action 528) in the checkpoint bank};
+  \node[box=rose,text width=2.6cm,font=\scriptsize,right=of c] (o) {\textbf{2. Oracle motion}\\grasp, lift, reorient, place with simulator anchors via \code{manual_skill.py}};
+  \node[box=grape,text width=2.6cm,font=\scriptsize,right=of o] (p) {\textbf{3. Perception}\\\code{mug_toppled} and the grasp anchor, scored offline by the evaluator};
+  \node[box=leaf,text width=2.6cm,font=\scriptsize,right=of p] (e) {\textbf{4. End to end}\\supervised episodes that topple: success with and without recovery};
+  \draw[flow] (c) -- (o); \draw[flow] (o) -- node[lbl,above=0.75cm]{arm can?} (p); \draw[flow] (p) -- node[lbl,above=0.75cm]{eyes can?} (e);
+\end{tikzpicture}
+\end{center}
+
+Step 2 separates ``can the arm do it?'' from step 3's ``can perception see it?''. Each new
+predicate is scored for precision before the planner may act on it, as for every predicate in
+this branch.
+
+\subsection{Effort and risk}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}Xll@{}}
+\toprule
+\textbf{Piece} & \textbf{Effort} & \textbf{Risk} \\
+\midrule
+\code{mug_toppled} predicate & small, after the end-on fix & medium (end-on views) \\
+Axis and grasp anchor from depth & medium & medium \\
+\code{stage_pose} anchor from config & small & low \\
+\code{reorient} skill with CuRobo & medium--large & \textcolor{rose}{\textbf{high}} (reachability, gripper fit) \\
+Planner phase and Opus schema & medium & low \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{Start with steps 1 and 2} --- checkpoints and oracle motion --- before any perception code.
+
 \end{document}

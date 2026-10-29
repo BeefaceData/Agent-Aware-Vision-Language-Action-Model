@@ -46,7 +46,7 @@ EPISODE_FUNCTION_TIMEOUT_SECONDS = 4 * 60 * 60
 
 # T4, A100, A10G, L4. Compiling CuRobo for all of them lets one image serve any GPU.
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
-GPU = os.environ.get("SIM_GPU", "L4")
+GPU = os.environ.get("SIM_GPU", "T4")
 
 # Fallback Vulkan loader entry for when the container runtime mounts NVIDIA's
 # graphics libraries but not their ICD file (ManiSkill's documented fix).
@@ -118,6 +118,7 @@ image = (
     .add_local_dir(REPO / "development", "/root/development", ignore=["**/__pycache__"])
     .add_local_dir(REPO / "configs", "/root/configs")
     .add_local_file(REPO / "run_skills.py", "/root/run_skills.py")
+    .add_local_file(REPO / "modal_apps/episode_request.py", "/root/episode_request.py")
 )
 
 
@@ -227,8 +228,17 @@ def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: 
     """Run one run_skills.py episode and keep its artifacts on the runs Volume.
 
     A single-use container replaces the fresh process each local attempt gets, so
-    no CUDA, renderer or planner state survives between episodes.
+    no CUDA, renderer or planner state survives between episodes. If Modal
+    preempted an earlier attempt, its folder is kept beside this one and the
+    episode starts again from reset.
     """
+    from episode_request import set_aside_previous_attempt
+
+    output = Path(argv[argv.index("--output") + 1])
+    set_aside = set_aside_previous_attempt(output)
+    if set_aside is not None:
+        print(f"Earlier attempt was interrupted; kept it as {set_aside.name} and restarting the episode",
+              flush=True)
     inputs = Path(EPISODE_INPUTS)
     inputs.mkdir(parents=True, exist_ok=True)
     for name, content in uploads.items():
@@ -249,9 +259,10 @@ def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: 
             exit_code = process.wait()
     runs_volume.commit()
 
-    summary_path = Path(argv[argv.index("--output") + 1]) / "summary.json"
+    summary_path = output / "summary.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else None
-    return {"exit_code": exit_code, "timed_out": timed_out, "summary": summary}
+    return {"exit_code": exit_code, "timed_out": timed_out, "summary": summary,
+            "interrupted_attempt": None if set_aside is None else set_aside.name}
 
 
 def _download_run(run_id, destination, *, skip_observations):
@@ -280,6 +291,11 @@ def episode(*argv):
     import run_skills
     from modal_apps.episode_request import build_request
 
+    # Without --output, name the run like local runs, marked with where it ran.
+    known, _unknown = run_skills.build_parser(REPO).parse_known_args(list(argv))
+    if known.output is None:
+        argv = (*argv, "--output", str(run_skills.default_output(
+            REPO, known.config, known.seed, where=f"modal-{GPU}")))
     try:
         request = build_request(argv, stamp=time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
                                 input_dir=EPISODE_INPUTS, runs_dir=RUNS, robotwin_root=ROBOTWIN)
@@ -304,3 +320,7 @@ def episode(*argv):
         except Exception as exc:
             print(f"No artifacts downloaded for {request.run_id}: {type(exc).__name__}: {exc}")
     print(json.dumps(result, indent=2))
+    if result and result.get("interrupted_attempt"):
+        print(f"Modal preempted an earlier attempt; its partial run is on the Volume as "
+              f"{result['interrupted_attempt']} (modal volume get robotwin-runs "
+              f"{result['interrupted_attempt']} data/runs/).")

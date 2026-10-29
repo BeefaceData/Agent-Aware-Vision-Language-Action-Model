@@ -176,6 +176,10 @@ Limitations today:
 - **Keep the terminal open.** Stopping `modal run` stops the episode. To run
   without your terminal, use `modal run --detach ...`, then fetch the results
   with `modal volume get robotwin-runs <run_id> data/runs/`.
+- **Preemption.** Modal GPUs are always preemptible: Modal may reclaim one
+  mid-episode and retry the function. The retry keeps the interrupted folder on
+  the Volume as `<run_id>.preempted-N` and starts the episode again from reset,
+  repeating its Opus and GPU costs; only the final attempt is downloaded.
 - **Run one Modal episode at a time.** The policy worker keeps a single
   observation history (`max_containers=1`).
 - **Frozen evaluation and campaigns run locally.** `--evaluation-manifest` is
@@ -183,15 +187,15 @@ Limitations today:
 
 ### M5. Choose the simulator GPU
 
-Set `SIM_GPU` on the same command line as `modal run`. The default is `L4`.
+Set `SIM_GPU` on the same command line as `modal run`. The default is `T4`.
 
 ```bash
-SIM_GPU=T4 modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME
+SIM_GPU=L4 modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME
 SIM_GPU=A10G modal run modal_apps/simulator.py::spike    # measure before switching
 ```
 
 `SIM_GPU` is read when `modal run` starts, so it applies to that run only. To
-change the default, edit `GPU = os.environ.get("SIM_GPU", "L4")` in
+change the default, edit `GPU = os.environ.get("SIM_GPU", "T4")` in
 `modal_apps/simulator.py`. The run's `summary.json` does not record the GPU, so
 name the output folder after it when you compare GPUs.
 
@@ -199,9 +203,9 @@ Measured with the spike (seed 3; three RGB-D cameras):
 
 | GPU | Render 3 RGB-D cameras | CuRobo plan | Approx. $/h* | Notes |
 |---|---|---|---|---|
-| T4 | 344 ms | 88 ms | ~0.59 | cheapest; only about 1 min slower per full episode |
+| T4 | 344 ms | 88 ms | ~0.59 | default; cheapest, about 1 min slower per full episode |
 | A10G | 153 ms | 73 ms | ~1.10 | slower than L4 and pricier |
-| L4 | 110 ms | 86 ms | ~0.80 | default; fastest rendering tested |
+| L4 | 110 ms | 86 ms | ~0.80 | fastest rendering tested |
 | Laptop RTX 2050 (route 2) | 800 ms | 322 ms | — | for comparison |
 
 \*Approximate; check Modal's pricing page.
@@ -311,7 +315,7 @@ To review or remove these environment settings, use
 
 ### L5. Run episodes
 
-Use a new `--output` folder for each run. `timeout -s INT` acts like Ctrl+C, so
+Each run needs a new folder (omit `--output` to get a dated name, see Outputs). `timeout -s INT` acts like Ctrl+C, so
 a stuck run still writes `summary.json` and its video.
 
 ```bash
@@ -354,6 +358,18 @@ NVIDIA-only Vulkan setting (L4).
 ## Reference
 
 ### Outputs
+
+`--output` is optional on both routes. Without it, runs go to a new folder named
+after when and what ran, so `ls data/runs` lists them in order:
+
+```
+data/runs/2026-10-28_Wed_07-55am_opus_full_task_rgbd_table_lift_seed3_modal-T4
+data/runs/2026-10-28_Wed_08-10am_skill_runtime_seed3_local
+```
+
+The parts are: local date, weekday and time; the config (without
+`skill_runtime_`); the seed; and `local` or `modal-<GPU>`. Runs started in the
+same minute get `-2`, `-3`. Pass `--output` to choose your own name instead.
 
 Each run folder (both routes) contains:
 
@@ -401,7 +417,7 @@ after as different conditions.
 | SAM 3 `GatedRepoError` | both | access not approved yet, or wrong token; replace with `modal secret create huggingface ... --force` |
 | `missing pytorch3d` at start-up | both | harmless RoboTwin message |
 | Smoke run ends with `step_budget` | both | expected, see M4 |
-| `... already exists; choose a new --output` | both | each run needs a new output folder |
+| `... already exists; choose a new --output` | both | each run needs a new output folder; omit `--output` for an automatic dated name |
 | Modal run fails with a missing secret | Modal | create the `anthropic` secret (M1) |
 | `ImageBuildError` | Modal | `modal image logs <id>` with the newest image ID |
 | `Permission denied` under `/run/media/...` during downloads | local | `HF_HOME` points at an unmounted drive; set it to `$HOME/.cache/huggingface` |

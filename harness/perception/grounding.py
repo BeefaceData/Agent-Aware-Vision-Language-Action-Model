@@ -15,6 +15,7 @@ import numpy as np
 from .anchors import Anchor, AnchorRegistry
 from .geometry import pose7
 from .rgbd import RGBDCamera, calibration_sha256
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.predicates.base import PredicateResult
 
 
@@ -84,6 +85,10 @@ class GroundedObject:
     normalized_bbox: tuple[float, float, float, float] | None = None
     median_rgb_0_255: tuple[float, float, float] | None = None
     visible_surface_extent_m: tuple[float, float, float] | None = None
+    # Median |z| of the mask's world surface normals (mug only): near 0 when the
+    # visible surface faces sideways like an upright mug's wall; None when too
+    # few pixels allow a normal.
+    median_normal_z: float | None = None
 
 
 @dataclass(frozen=True)
@@ -108,12 +113,25 @@ class RGBDPerceptionProvider:
     """
 
     source = "perception"
-    RIGHT_ARM_ASSOCIATION_MAX_M = 0.16
+    # The measured pose is the arm's end-effector frame behind the fingers, and
+    # the policy grips the mug's rim or handle: a right-held mug's true centre
+    # sat 0.20-0.22 m from it (median) in the seed 0-4 captures, so the earlier
+    # 0.16 m almost never associated. Table-height mugs near the gripper stay
+    # excluded by the lift and table-support checks before association.
+    RIGHT_ARM_ASSOCIATION_MAX_M = 0.24
     RIGHT_ARM_ASSOCIATION_MARGIN_M = 0.06
     RIGHT_LIFT_STABLE_OBSERVATIONS = 2
+    # Measured on the 236 seed 0-4 frames at 320x240: every upright mug that met
+    # the table had >= 775 normal pixels; the two toppled frames below 0.25 were
+    # 45- and 80-pixel slivers.
+    MIN_ORIENTATION_PIXELS = 300
+    # A mug being lifted or set down moves between policy chunks (16 actions):
+    # 2.6-4.0 cm in the seed 0-4 captures, while 95% of mugs resting on the
+    # table moved less than 2 cm between observations.
+    MUG_SETTLED_MAX_STEP_M = 0.02
 
     def __init__(self, detector: SemanticDetector, anchors: AnchorRegistry | None = None,
-                 *, camera_order=("head_camera", "left_camera", "right_camera"),
+                 *, camera_order=(*CAMERAS, *PERCEPTION_CAMERAS),
                  min_confidence=0.60, ambiguity_margin=0.10,
                  min_valid_depth_fraction=0.35, max_anchor_distance_m=0.65,
                  max_approach_offset_m=0.20, sample_limit=256,
@@ -150,6 +168,7 @@ class RGBDPerceptionProvider:
         self._last_sequence = -1
         self._last_result = None
         self._initial_mug_height = None
+        self._previous_mug_height = None
         self._mug_lift_seen = False
         self._right_lift_confirmed = False
         self._right_lift_candidate_count = 0
@@ -468,7 +487,9 @@ class RGBDPerceptionProvider:
                 status[label] = next((reason for reason in priority if reason in reasons), reasons[0])
 
         mug = objects.get("mug")
+        previous_mug_height = self._previous_mug_height
         if mug is not None:
+            self._previous_mug_height = mug.position[2]
             if self._initial_mug_height is None:
                 self._initial_mug_height = mug.position[2]
             elif mug.position[2] >= self._initial_mug_height + 0.03:
@@ -484,6 +505,13 @@ class RGBDPerceptionProvider:
                 and self._initial_mug_height is not None
                 and abs(mug.position[2] - self._initial_mug_height) > 0.03):
             release_ready, release_reason = None, "mug_above_initial_table_height"
+        # A mug the gripper is still lifting or lowering can sit within those
+        # tolerances; support also needs it to have stopped moving since the
+        # last observation that grounded it.
+        elif release_ready is True and (
+                previous_mug_height is None
+                or abs(mug.position[2] - previous_mug_height) > self.MUG_SETTLED_MAX_STEP_M):
+            release_ready, release_reason = None, "mug_not_yet_settled"
         if release_ready is True and self._mug_lift_seen:
             staged, staged_reason = True, "public_lift_then_table_support"
         elif release_ready is True:
@@ -654,7 +682,9 @@ class RGBDPerceptionProvider:
             if self._right_lift_confirmed:
                 value, reason = True, "right_gripper_lift_association_latched"
             elif mug is None:
-                self._right_lift_candidate_count = 0
+                # Not seeing the mug (often the gripper hides it) does not
+                # contradict an earlier right-arm association, so it does not
+                # reset the count; contradicting observations below do.
                 value, reason = None, "mug_geometry_unavailable"
             elif self._initial_mug_height is None:
                 value, reason = None, "initial_mug_height_unavailable"
@@ -773,7 +803,11 @@ class RGBDPerceptionProvider:
         low, high = np.percentile(points, (10, 90), axis=0)
         visible_extent = tuple(float(value) for value in high-low)
         boundary_points = ()
+        median_normal_z = None
         if detection.label == "mug":
+            normal_z = frame.vertical_normal_components(detection.mask)
+            if len(normal_z) >= self.MIN_ORIENTATION_PIXELS:
+                median_normal_z = float(np.median(normal_z))
             # The outer silhouette avoids treating depth seen through the mug's
             # hollow interior as evidence that the mug itself touches the table.
             mask = detection.mask
@@ -788,21 +822,32 @@ class RGBDPerceptionProvider:
         return GroundedObject(detection.label, tuple(float(x) for x in point),
             float(detection.confidence), sequence, camera, fraction,
             tuple(tuple(float(value) for value in sample) for sample in points),
-            boundary_points, normalized_bbox, median_rgb, visible_extent), "grounded"
+            boundary_points, normalized_bbox, median_rgb, visible_extent, median_normal_z), "grounded"
 
     @staticmethod
     def _table_support_evidence(objects, *, neighborhood_m=0.14, tolerance_m=0.025,
-                                min_local_points=3, min_mug_points=3):
-        """Conservatively detect a mug resting on the locally visible tabletop.
+                                min_local_points=3, min_mug_points=3, upright_max_normal_z=0.25,
+                                support_view_cameras=("head_camera", *PERCEPTION_CAMERAS)):
+        """Conservatively detect an upright mug resting on the locally visible tabletop.
 
         A semantic overlap or object-center distance is not contact evidence.
         This compares outer-silhouette mug points with the local table-mask
         surface. Incomplete geometry remains unknown rather than being
         interpreted as safe to open the gripper.
+
+        A mug on its side also meets the table, so support further needs the
+        visible surface to face sideways like an upright mug's wall. From the
+        head camera the median normal |z| of upright mugs that met the table was
+        at most 0.18, of toppled mugs at least 0.29. A wrist camera close to a
+        toppled mug can see only its flat base, which faces sideways too, so
+        support is judged only from the elevated fixed views: across two
+        five-seed captures every wrist-view release_ready=true (22) was wrong.
         """
         mug, table = objects.get("mug"), objects.get("table")
         if mug is None or table is None:
             return None, "mug_or_table_geometry_unavailable"
+        if mug.camera not in support_view_cameras:
+            return None, "table_support_not_judged_from_wrist_view"
         mug_points = np.asarray(mug.boundary_points, dtype=float)
         table_points = np.asarray(table.surface_points, dtype=float)
         if (mug_points.ndim != 2 or mug_points.shape[1:] != (3,)
@@ -819,6 +864,10 @@ class RGBDPerceptionProvider:
         # plane. Interior pixels through a hollow mug are excluded above.
         supported = np.abs(mug_points[:, 2] - table_z) <= tolerance_m
         support_fraction = float(supported.mean())
-        if int(supported.sum()) >= min_mug_points and support_fraction >= 0.05:
-            return True, "mug_silhouette_meets_local_table"
-        return None, "mug_table_support_not_established"
+        if int(supported.sum()) < min_mug_points or support_fraction < 0.05:
+            return None, "mug_table_support_not_established"
+        if mug.median_normal_z is None:
+            return None, "mug_orientation_unavailable"
+        if mug.median_normal_z > upright_max_normal_z:
+            return False, "mug_surface_faces_up_not_upright"
+        return True, "mug_silhouette_meets_local_table"

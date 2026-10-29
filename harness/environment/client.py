@@ -8,6 +8,7 @@ observation endpoint. External mutation is unsupported by this R1 adapter.
 import numpy as np
 
 from harness.environment.base import CAMERAS, copy_images, vector14
+from harness.environment.layout import PERCEPTION_CAMERAS
 from harness.perception.rgbd import camera_frames_from_payload
 from .base import Observation
 
@@ -26,7 +27,7 @@ class EnvironmentClient:
         success = np.asarray(raw["success"])
         if success.shape != () or success.dtype.kind != "b":
             raise ValueError("invalid evaluator terminal signal")
-        images = copy_images({k: raw[k] for k in CAMERAS})
+        images = copy_images({k: raw[k] for k in (*CAMERAS, *PERCEPTION_CAMERAS) if k in raw})
         camera_frames = camera_frames_from_payload(raw, images)
         observation = Observation(sequence, images, vector14(raw["state"]), camera_frames or None)
         self._observation = observation

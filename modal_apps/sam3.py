@@ -24,9 +24,17 @@ MAX_DETECTIONS_PER_LABEL = 3
 MUG_SCORE_THRESHOLD = 0.40
 PROMPTS = {"mug": "mug", "rack": "rack", "table": "table surface"}
 RACK_PROMPT_VARIANTS = ("rack", "wire rack", "mug rack", "hanging rack")
+# Development probe for mugs the runtime "mug" prompt misses, mostly ones turned
+# on their side in a gripper. Scores down to the floor below are returned so
+# offline analysis can study thresholds under MUG_SCORE_THRESHOLD.
+MUG_PROMPT_VARIANTS = ("mug", "cup", "coffee mug", "mug held by a robot gripper",
+                       "mug lying on its side")
+MUG_PROBE_SCORE_FLOOR = 0.05
 RACK_PROFILES = {"default": ("rack", 0.60),
                  "explore_mug_rack": ("mug rack", 0.18)}
-CAMERAS = frozenset({"head_camera", "left_camera", "right_camera"})
+# The camera name only labels the request; the policy cameras plus
+# harness.environment.layout.PERCEPTION_CAMERAS (this image does not ship the harness).
+CAMERAS = frozenset({"head_camera", "left_camera", "right_camera", "perception_camera"})
 REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements"
 
 
@@ -203,6 +211,63 @@ class Sam3PerceptionWorker:
                         best.update(confidence=score, mask_png=stream.getvalue(),
                                     mask_area_fraction=float(mask.mean()))
             variants.append(best)
+        return {"observation_sequence": observation_sequence, "camera": camera,
+                "variants": variants}
+
+    @modal.method()
+    def detect_mug_prompt_variants(self, rgb_png: bytes, *, observation_sequence: int,
+                                   camera: str):
+        """Development-only: each mug prompt's top masks down to MUG_PROBE_SCORE_FLOOR.
+
+        Not called by runtime perception. Used offline to compare prompts and
+        thresholds on saved frames against simulator truth.
+        """
+        import numpy as np
+        from PIL import Image
+
+        if (type(observation_sequence) is not int or observation_sequence < 0
+                or camera not in CAMERAS or not isinstance(rgb_png, bytes)
+                or not rgb_png or len(rgb_png) > MAX_IMAGE_BYTES):
+            raise ValueError("invalid_sam3_request")
+        with Image.open(BytesIO(rgb_png)) as opened:
+            image = np.asarray(opened.convert("RGB"))
+        if (image.ndim != 3 or image.shape[2] != 3
+                or max(image.shape[:2]) > MAX_IMAGE_SIDE):
+            raise ValueError("sam3_image_size_out_of_bounds")
+
+        variants = []
+        for prompt in MUG_PROMPT_VARIANTS:
+            inputs = self.processor(images=image, text=prompt, return_tensors="pt")
+            inputs = self._to_device(inputs, "cuda")
+            with self.torch.inference_mode():
+                outputs = self.model(**inputs)
+            sizes = inputs.get("original_sizes")
+            if sizes is None:
+                raise RuntimeError("sam3_original_image_size_missing")
+            if hasattr(sizes, "tolist"):
+                sizes = sizes.tolist()
+            result = self.processor.post_process_instance_segmentation(
+                outputs, threshold=MUG_PROBE_SCORE_FLOOR, mask_threshold=0.5, target_sizes=sizes)[0]
+            masks, scores = result.get("masks"), result.get("scores")
+            detections = []
+            if masks is not None and scores is not None:
+                masks = self._numpy(masks)
+                scores = self._numpy(scores).reshape(-1)
+                if masks.ndim == 4 and masks.shape[1] == 1:
+                    masks = masks[:, 0]
+                if masks.ndim != 3 or len(masks) != len(scores):
+                    raise RuntimeError("sam3_output_shape_invalid")
+                ranked = sorted(range(len(scores)), key=lambda index: float(scores[index]), reverse=True)
+                for index in ranked[:MAX_DETECTIONS_PER_LABEL]:
+                    score = float(scores[index])
+                    binary = np.asarray(masks[index], dtype=np.uint8) * 255
+                    if (not confidence_meets_threshold(score, MUG_PROBE_SCORE_FLOOR)
+                            or binary.shape != image.shape[:2] or not binary.any()):
+                        continue
+                    stream = BytesIO()
+                    Image.fromarray(binary).save(stream, format="PNG", optimize=True)
+                    detections.append({"confidence": score, "mask_png": stream.getvalue()})
+            variants.append({"prompt": prompt, "detections": detections})
         return {"observation_sequence": observation_sequence, "camera": camera,
                 "variants": variants}
 

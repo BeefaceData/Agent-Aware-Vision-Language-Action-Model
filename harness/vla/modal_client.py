@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,37 @@ from harness.environment.layout import ACTION_DIM, CAMERAS
 
 if TYPE_CHECKING:  # The baseline runner shares this module without pydantic.
     from harness.environment.base import Observation
+
+# Modal's ``.remote()`` has no deadline: when the policy container vanished
+# mid-request, a capture waited for hours on a closed connection. A cold start
+# takes about 30-60 s and a warm chunk under a second, so this only fires on a
+# lost call.
+POLICY_CALL_TIMEOUT_SECONDS = 300.0
+
+
+def call_with_timeout(function, timeout_seconds, *args, **kwargs):
+    """Return ``function(*args, **kwargs)``, or raise ``TimeoutError`` after ``timeout_seconds``.
+
+    The call runs on a daemon thread so a dead connection cannot keep the
+    process alive. A timed-out call is abandoned, not cancelled: the remote side
+    may still have run it, so the caller must not retry it blindly.
+    """
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = function(*args, **kwargs)
+        except BaseException as exc:  # Re-raised in the caller's thread below.
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        raise TimeoutError(f"modal_policy_call_timed_out after {timeout_seconds:.0f} s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 def pack_observation(images, state):
@@ -34,20 +66,22 @@ def pack_observation(images, state):
 class ModalPolicyClient:
     """Remote handle for ``modal_apps/policy.py``; returns actions plus latency timings."""
 
-    def __init__(self, app_name: str, class_name: str):
+    def __init__(self, app_name: str, class_name: str, *, timeout_seconds=POLICY_CALL_TIMEOUT_SECONDS):
         import modal
 
         self.worker = modal.Cls.from_name(app_name, class_name)()
+        self.timeout_seconds = timeout_seconds
 
     def reset(self):
         started = time.perf_counter()
-        info = self.worker.reset_episode.remote()
+        info = call_with_timeout(self.worker.reset_episode.remote, self.timeout_seconds)
         return info, (time.perf_counter() - started) * 1000.0
 
     def act_chunk(self, images, state, chunk_size):
         packed, pack_ms, payload_kb = pack_observation(images, state)
         started = time.perf_counter()
-        result = self.worker.act_chunk.remote(packed, requested_actions=chunk_size)
+        result = call_with_timeout(self.worker.act_chunk.remote, self.timeout_seconds,
+                                   packed, requested_actions=chunk_size)
         rpc_ms = (time.perf_counter() - started) * 1000.0
 
         actions = np.asarray(result["actions"], dtype=np.float32)

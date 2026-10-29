@@ -1,8 +1,8 @@
 """Translate ``run_skills.py`` arguments into one remote Modal episode request.
 
-Pure argument handling with no Modal import, so it is testable without network
-or GPU. ``modal_apps/simulator.py`` owns the uploads, the remote call and the
-download back into ``--output``.
+Argument and run-folder handling with no Modal import, so it is testable
+without network or GPU. ``modal_apps/simulator.py`` owns the uploads, the remote
+call and the download back into ``--output``.
 """
 
 from dataclasses import dataclass
@@ -43,11 +43,11 @@ def _split_assignments(argv):
     return tokens
 
 
-def build_request(argv, *, stamp, input_dir, runs_dir, robotwin_root):
+def build_request(argv, *, input_dir, runs_dir, robotwin_root):
     """Return the ``EpisodeRequest`` for ``argv``; raise ``ValueError`` on unusable options.
 
-    ``stamp`` makes the remote run directory unique, so reusing a local name
-    never collides with an earlier run on the Volume.
+    The remote run folder has the same name as the local ``--output`` folder;
+    the launcher refuses to start when that name already exists on the Volume.
     """
     tokens = _split_assignments(argv)
     local_argv, remote_argv, uploads = [], [], {}
@@ -87,9 +87,27 @@ def build_request(argv, *, stamp, input_dir, runs_dir, robotwin_root):
         raise ValueError("--output is required")
     if not 1 <= time_limit <= MAX_TIME_LIMIT_MINUTES:
         raise ValueError(f"{TIME_LIMIT_OPTION} must be between 1 and {MAX_TIME_LIMIT_MINUTES}")
-    run_id = f"{output.name}-{stamp}"
+    run_id = output.name
     remote_argv.extend(("--output", str(PurePosixPath(runs_dir) / run_id),
                         "--robotwin-root", robotwin_root))
     return EpisodeRequest(run_id=run_id, local_output=output, local_argv=tuple(local_argv),
                           remote_argv=tuple(remote_argv), uploads=uploads,
                           time_limit_minutes=time_limit, skip_observations=skip_observations)
+
+
+def set_aside_previous_attempt(output):
+    """Rename a run folder left by an earlier attempt; return its new path, or None.
+
+    Modal restarts a preempted function with the same input, so the retry finds
+    the interrupted attempt's folder. Keeping it (as ``<name>.preempted-N``) lets
+    the retry start a clean episode without losing the partial artifacts.
+    """
+    output = Path(output)
+    if not output.exists():
+        return None
+    attempt = 1
+    while output.with_name(f"{output.name}.preempted-{attempt}").exists():
+        attempt += 1
+    target = output.with_name(f"{output.name}.preempted-{attempt}")
+    output.rename(target)
+    return target

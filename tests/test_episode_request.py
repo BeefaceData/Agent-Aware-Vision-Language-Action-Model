@@ -1,14 +1,15 @@
 """Modal episode requests keep run_skills arguments and redirect container-owned paths."""
 
 from pathlib import Path
+import tempfile
 import unittest
 
-from modal_apps.episode_request import DEFAULT_TIME_LIMIT_MINUTES, build_request
+from modal_apps.episode_request import (DEFAULT_TIME_LIMIT_MINUTES, build_request,
+                                        set_aside_previous_attempt)
 
 
 def request(*argv):
-    return build_request(argv, stamp="20261026T120000Z", input_dir="/tmp/in",
-                         runs_dir="/runs", robotwin_root="/opt/RoboTwin")
+    return build_request(argv, input_dir="/tmp/in", runs_dir="/runs", robotwin_root="/opt/RoboTwin")
 
 
 class EpisodeRequestTests(unittest.TestCase):
@@ -21,9 +22,9 @@ class EpisodeRequestTests(unittest.TestCase):
     def test_output_and_robotwin_root_point_into_the_container(self):
         result = request("--output", "data/runs/x")
 
-        self.assertEqual(result.run_id, "x-20261026T120000Z")
+        self.assertEqual(result.run_id, "x")
         self.assertEqual(result.local_output, Path("data/runs/x"))
-        self.assertEqual(result.remote_argv, ("--output", "/runs/x-20261026T120000Z",
+        self.assertEqual(result.remote_argv, ("--output", "/runs/x",
                                               "--robotwin-root", "/opt/RoboTwin"))
 
     def test_other_options_are_forwarded_unchanged(self):
@@ -62,6 +63,33 @@ class EpisodeRequestTests(unittest.TestCase):
     def test_option_missing_its_value_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "needs a value"):
             request("--output")
+
+
+class PreviousAttemptTests(unittest.TestCase):
+    def test_fresh_output_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(set_aside_previous_attempt(Path(directory) / "run"))
+
+    def test_interrupted_attempt_is_kept_beside_a_clean_output_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            output.mkdir()
+            (output / "summary.json").write_text("{}")
+
+            kept = set_aside_previous_attempt(output)
+
+            self.assertEqual(kept.name, "run.preempted-1")
+            self.assertTrue((kept / "summary.json").is_file())
+            self.assertFalse(output.exists())
+
+    def test_repeated_preemptions_get_increasing_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            output.mkdir()
+            set_aside_previous_attempt(output)
+            output.mkdir()
+
+            self.assertEqual(set_aside_previous_attempt(output).name, "run.preempted-2")
 
 
 if __name__ == "__main__":

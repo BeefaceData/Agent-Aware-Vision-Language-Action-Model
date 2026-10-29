@@ -251,6 +251,22 @@ class ModalSam3ClientTests(unittest.TestCase):
         self.assertEqual([call[2] for call in worker.detect.calls],
                          ["head_camera", "left_camera"])
 
+    def test_perception_camera_is_tried_before_the_wrist_views_when_present(self):
+        mask = np.ones((4, 5), dtype=bool)
+        worker = FakeWorker([
+            self.response(23, "head_camera"),
+            self.response(23, "perception_camera", [self.mug_detection(mask)]),
+        ])
+        detector = ModalSam3Detector(worker)
+        detector.set_task_phase("HANDOFF")
+        images = {name: np.zeros((4, 5, 3), dtype=np.uint8)
+                  for name in ("head_camera", "left_camera", "right_camera", "perception_camera")}
+
+        batches = detector.detect(images, observation_sequence=23)
+
+        self.assertEqual([batch.camera for batch in batches], ["head_camera", "perception_camera"])
+        self.assertEqual([call[2] for call in worker.detect.calls], ["head_camera", "perception_camera"])
+
     def test_handoff_phase_tries_left_then_right_wrist_until_mug_is_found(self):
         mask = np.ones((4, 5), dtype=bool)
         worker = FakeWorker([

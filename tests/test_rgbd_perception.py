@@ -80,6 +80,31 @@ class RGBDPerceptionTests(unittest.TestCase):
         surface = camera(depth=depth)
         self.assertLessEqual(surface.local_depth_gap(4, 4, search_radius=4), .06)
 
+    def test_surface_normals_tell_a_floor_from_a_wall_in_world_axes(self):
+        depth = np.full((9, 9), .70, dtype=np.float32)
+        mask = np.zeros((9, 9), dtype=bool)
+        mask[1:8, 1:8] = True
+        # Identity extrinsic: the camera looks along world z, so a constant-depth
+        # surface faces up. Turned 90 degrees about x, the same surface is a wall.
+        sideways = np.eye(4)
+        sideways[:3, :3] = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]]
+
+        floor = camera(depth=depth).vertical_normal_components(mask)
+        wall = camera(depth=depth, world_to_camera=sideways).vertical_normal_components(mask)
+
+        np.testing.assert_allclose(floor, 1.0)
+        np.testing.assert_allclose(wall, 0.0, atol=1e-9)
+        self.assertEqual(len(floor), 3 * 3)  # the 7x7 mask eroded by 2 px on each side
+
+    def test_surface_normals_skip_pixels_beside_a_depth_jump(self):
+        depth = np.full((9, 9), .70, dtype=np.float32)
+        depth[:, 5:] = .90
+
+        normal_z = camera(depth=depth).vertical_normal_components(np.ones((9, 9), dtype=bool), erode_px=0)
+
+        self.assertEqual(len(normal_z), 7 * 5)  # columns 4 and 5 sit beside the step
+        np.testing.assert_allclose(normal_z, 1.0)
+
     def test_environment_client_converts_millimeters_and_copies_camera_frames(self):
         raw = payload()
         client = EnvironmentClient(lambda *args: (raw, {}))
@@ -89,6 +114,17 @@ class RGBDPerceptionTests(unittest.TestCase):
         observation.camera_frames["head_camera"].depth_m.setflags(write=True)
         observation.camera_frames["head_camera"].depth_m[0, 0] = 10
         self.assertEqual(float(client.observe().camera_frames["head_camera"].depth_m[0, 0]), 2.0)
+
+    def test_non_finite_or_negative_depth_pixels_become_missing_not_an_error(self):
+        raw = payload()
+        depth = np.full((2, 3), 2000.0, dtype=np.float32)
+        depth[0, 0], depth[0, 1], depth[1, 2] = np.nan, -5.0, np.inf
+        raw["head_camera__depth_mm"] = depth
+
+        frames = camera_frames_from_payload(raw, images())
+
+        np.testing.assert_array_equal(frames["head_camera"].depth_m,
+                                      [[0.0, 0.0, 2.0], [2.0, 2.0, 0.0]])
 
     def test_robotwin_three_by_four_cv_extrinsic_is_homogenized(self):
         raw = payload()

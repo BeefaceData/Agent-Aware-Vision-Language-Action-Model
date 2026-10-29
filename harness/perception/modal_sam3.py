@@ -5,6 +5,7 @@ from io import BytesIO
 import numpy as np
 from PIL import Image
 
+from harness.environment.layout import PERCEPTION_CAMERAS
 from .grounding import Detection, DetectionBatch, SEMANTIC_LABELS
 
 _RACK_AMBIGUITY_MARGIN = 0.10
@@ -149,9 +150,13 @@ class ModalSam3Detector:
         return batches[0] if len(batches) == 1 else tuple(batches)
 
     def _mug_fallback_order(self):
-        return {"grasp": ("left_camera",),
-                "handoff": ("left_camera", "right_camera"),
-                "hang": ("right_camera",)}[self.task_phase]
+        # A perception-only camera, when the observation has one, is tried before
+        # the wrist views: its fixed pose sees the mug from the side the
+        # grippers do not cover.
+        wrists = {"grasp": ("left_camera",),
+                  "handoff": ("left_camera", "right_camera"),
+                  "hang": ("right_camera",)}[self.task_phase]
+        return (*PERCEPTION_CAMERAS, *wrists)
 
     @staticmethod
     def _has_confident_mug(batch):

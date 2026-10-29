@@ -57,8 +57,13 @@ def build_task(robotwin_root: str, task_name: str):
     return getattr(module, task_name)(), args
 
 
-def observation_of(task, blank, success):
-    """Return the public RGB (+optional RGB-D) payload, 14-DoF state and success flag."""
+def observation_of(task, blank, success, perception_cameras=None):
+    """Return the public RGB (+optional RGB-D) payload, 14-DoF state and success flag.
+
+    ``perception_cameras`` maps names to fixed cameras added by
+    ``perception_cameras.add_fixed_camera``; they are rendered with depth after
+    RoboTwin's own cameras.
+    """
     raw = task.get_obs()
     cameras = raw.get("observation", {})
     out = {}
@@ -88,6 +93,11 @@ def observation_of(task, blank, success):
             out[f"{camera}__depth_mm"] = np.ascontiguousarray(depth, dtype=np.float32)
             out[f"{camera}__intrinsic_cv"] = np.asarray(intrinsic, dtype=np.float64)
             out[f"{camera}__extrinsic_cv"] = np.asarray(extrinsic, dtype=np.float64)
+
+    if perception_cameras:
+        from .perception_cameras import fixed_camera_payload
+        for name, camera in perception_cameras.items():
+            out.update(fixed_camera_payload(name, camera))
 
     vector = (raw.get("joint_action") or {}).get("vector")
     joints = np.zeros(ACTION_DIM, dtype=np.float32)

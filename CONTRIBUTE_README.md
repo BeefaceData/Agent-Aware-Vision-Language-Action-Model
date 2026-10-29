@@ -69,7 +69,7 @@ modal_apps/                Modal deployments: policy.py (Neotix), sam3.py (SAM 3
 development/               offline developer tools; never runtime evidence
   simulator/               in-process RoboTwin, the opt-in development oracle, rack geometry
   replays/                 perception/planner replays over saved observations (no simulator)
-  capture/                 record policy failures and RGB-D frames; annotate masks
+  capture/                 record policy failures and RGB-D frames; annotate masks; view scene cameras
   checkpoints/             failure checkpoint bank, seeded action replay, source provenance
   recovery/                adapters for the legacy development-only recovery skills
   demos/                   recorded demonstrations and sampled episode video
@@ -114,13 +114,100 @@ python -m development.replays.perception --help
 python -m development.replays.table_plane_lift --help
 ```
 
+To see the scene and every camera RoboTwin renders before working on perception
+(local simulator only; no policy, planner or Modal):
+
+```bash
+python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3
+```
+
+It writes colour and depth PNGs per camera, an `overview.png` contact sheet and
+`cameras.json`. Add `--viewer` for SAPIEN's interactive 3D window. Only
+`head_camera`, `left_camera` and `right_camera` feed the harness;
+`front_camera` and the observer view are rendered but unused.
+
+To build an offline evaluation set, roll out the frozen policy alone (no planner,
+SAM 3 or Opus) and save public frames with separate simulator labels:
+
+```bash
+python -m development.capture.labeled_frames --seed 3 --output data/perception/frames/seed_3
+```
+
+`observations/` holds the public `.npz` frames. `labels.jsonl` holds privileged
+simulator truth (mug and rack poses, mug tilt, contacts, gripper values and a
+derived mug state such as `held_left`, `staged` or `toppled`). It is for offline
+evaluators under `development/` only and must never reach runtime perception or
+the planner. A 900-action rollout saves about 57 frames (about 45 MB).
+
+Locally a rollout takes about 35-40 minutes per seed on a small GPU. On Modal the
+same capture runs in about 7 minutes per seed (L4) and downloads each seed into
+`data/perception/frames/seed_<N>`; seeds run one after another because the policy
+worker keeps a single observation history:
+
+```bash
+SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+```
+
+Then score public perception against those labels offline. Query SAM 3 once per
+capture (three cameras per frame; Modal, no local GPU), then evaluate on CPU as
+often as needed:
+
+```bash
+python -m development.replays.sam3_cache --frames data/perception/frames/seed_3
+python -m development.replays.perception_evaluation \
+  --frames data/perception/frames/seed_3 --output data/perception/reports/baseline
+```
+
+The evaluator replays frames through the same provider an episode builds
+(`assembly.perception_provider_for`) with the real `ModalSam3Detector` answering
+from the cache, so head-first/wrist-fallback rules and thresholds match runtime.
+It reports mug detection rate and 3D offset per mug state, and per predicate a
+confusion table with precision, recall, unknown rate and false-true count.
+`frames.jsonl` keeps every per-frame result. The SAM 3 worker drops scores below
+its floors (mug 0.40, table 0.60), so the cache cannot study lower thresholds.
+
+Each predicate is scored against what it means to the planner
+(`truth_predicates` in `development/replays/perception_evaluation.py`):
+
+| Predicate | True when | Latches |
+|---|---|---|
+| `mug_lifted` | the mug has been lifted at some point | yes |
+| `release_ready` | the mug is upright and touching the table now | no |
+| `mug_staged_on_table` | `release_ready` after an earlier lift | no |
+| `right_mug_lifted` | the right gripper alone has held the mug off the table at some point | yes |
+
+`mug_lifted` and `right_mug_lifted` are milestones: once true, the planner keeps the
+phase they unlock (HANDOFF and HANG) for the rest of the episode, so a later drop
+does not make them wrong.
+
+**Perception-only camera.** `harness/environment/perception_cameras.py` defines an
+optional fixed RGB-D camera, `perception_camera`, on the far side of the table. The
+local simulator adds it right after each reset, so it draws no seeded random numbers
+and every seed keeps its exact scene. The policy never receives it, and Opus prompts
+still use only the three policy cameras. When an observation has it, the SAM 3 client
+tries it after the head camera and before the wrist views. Preview it, then capture
+and score with and without it:
+
+```bash
+python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3_cam --perception-camera default
+SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4 \
+  --perception-camera default --output-root data/perception/frames_cam
+python -m development.replays.perception_evaluation --frames data/perception/frames_cam/seed_3 \
+  --output data/perception/reports/cam_off --ignore-camera perception_camera
+```
+
+Other poses use `--perception-camera=x,y,z/tx,ty,tz/fovy` (metres and degrees; keep
+the `=` when the value starts with `-`). The deployed SAM 3 worker must accept the
+camera name, so redeploy it once after pulling this change:
+`modal deploy modal_apps/sam3.py`.
+
 Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run concurrent live jobs on this workstation; local RoboTwin/CuRobo runs share limited GPU VRAM. A live validation should state its seed, config, evidence mode (public perception or development oracle), Modal workers, timeout, output directory, and completion predicate. Keep evaluation changes separate from exploratory presets, and do not treat simulator-native success alone as verified visual rack contact.
 
 ## Collaboration notes
 
 Keep pull requests focused on one subsystem and include the contract change, one or more CPU/replay checks, and any effect on the public evidence boundary. Runtime prompt files under `harness/prompts/` are executable inputs and should be versioned with the parser/schema they serve. `README.md` is the short setup guide; this file is the technical map. Start with the task-specific guide for your assigned work:
 
-- [Olusola — perception and object grounding](docs/Collaboration/Olusola.md)
+- [Olusola — perception and object grounding](docs/Collaboration/Olusola/Olusola.md)
 - [Boniface — hanging phase](docs/Collaboration/Boniface.md)
 - [Thabo — grasping phase](docs/Collaboration/Thabo.md)
 - [Almond — efficient observation sampling](docs/Collaboration/Almond.md)

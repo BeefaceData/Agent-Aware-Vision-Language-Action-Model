@@ -5,9 +5,12 @@ fills the asset Volume once, measures a GPU (spike), and runs whole
 ``run_skills.py`` episodes remotely with the same arguments as locally.
 
     modal run modal_apps/simulator.py::download_assets   # once; CPU only
-    modal run modal_apps/simulator.py::spike             # default GPU: L4
+    modal run modal_apps/simulator.py::spike             # default GPU: T4
     SIM_GPU=T4 modal run modal_apps/simulator.py::spike
     modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
+    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
+    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
+      --output-root data/perception/frames_cam                              # ... with the perception camera
 
 Episode-only options: ``--time-limit-minutes N`` (default 90) and
 ``--skip-observations`` (leave observations on the Volume, not downloaded).
@@ -43,10 +46,20 @@ EPISODE_INPUTS = "/tmp/episode-inputs"
 SHUTDOWN_GRACE_SECONDS = 5 * 60
 # Covers episode_request.MAX_TIME_LIMIT_MINUTES (210) plus shutdown and Volume commit.
 EPISODE_FUNCTION_TIMEOUT_SECONDS = 4 * 60 * 60
+# One 900-action labelled capture takes roughly 10 minutes on an L4.
+CAPTURE_FUNCTION_TIMEOUT_SECONDS = 60 * 60
+# Files committed inside a container can take seconds to appear in this
+# machine's listing of the Volume; downloads wait up to a minute for them.
+VOLUME_SETTLE_ATTEMPTS = 12
+VOLUME_SETTLE_SECONDS = 5
 
 # T4, A100, A10G, L4. Compiling CuRobo for all of them lets one image serve any GPU.
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
-GPU = os.environ.get("SIM_GPU", "L4")
+# SIM_GPU may list fallbacks, e.g. "L4,A10G,T4": Modal uses the first type with free
+# capacity instead of queueing for one. GPU is the label used in names and messages.
+GPU_CHOICES = tuple(name.strip() for name in os.environ.get("SIM_GPU", "T4").split(",") if name.strip())
+GPU = "-".join(GPU_CHOICES)
+GPU_REQUEST = list(GPU_CHOICES) if len(GPU_CHOICES) > 1 else GPU_CHOICES[0]
 
 # Fallback Vulkan loader entry for when the container runtime mounts NVIDIA's
 # graphics libraries but not their ICD file (ManiSkill's documented fix).
@@ -118,6 +131,7 @@ image = (
     .add_local_dir(REPO / "development", "/root/development", ignore=["**/__pycache__"])
     .add_local_dir(REPO / "configs", "/root/configs")
     .add_local_file(REPO / "run_skills.py", "/root/run_skills.py")
+    .add_local_file(REPO / "modal_apps/episode_request.py", "/root/episode_request.py")
 )
 
 
@@ -165,7 +179,7 @@ def _timed(function, repeats=1):
     return result, (time.perf_counter() - started) * 1000.0 / repeats
 
 
-@app.function(image=image, gpu=GPU, volumes={ASSETS: assets_volume}, timeout=30 * 60)
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume}, timeout=30 * 60)
 def measure(seed: int = 3, observations: int = 20, physics_steps: int = 200):
     """Report driver, Vulkan, render, physics and CuRobo timings for one simulator."""
     import io
@@ -220,15 +234,24 @@ def spike(seed: int = 3):
     print("vulkan summary saved in", output / f"{GPU}.json")
 
 
-@app.function(image=image, gpu=GPU, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
               secrets=[modal.Secret.from_name("anthropic")],
               timeout=EPISODE_FUNCTION_TIMEOUT_SECONDS, single_use_containers=True)
 def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: int) -> dict:
     """Run one run_skills.py episode and keep its artifacts on the runs Volume.
 
     A single-use container replaces the fresh process each local attempt gets, so
-    no CUDA, renderer or planner state survives between episodes.
+    no CUDA, renderer or planner state survives between episodes. If Modal
+    preempted an earlier attempt, its folder is kept beside this one and the
+    episode starts again from reset.
     """
+    from episode_request import set_aside_previous_attempt
+
+    output = Path(argv[argv.index("--output") + 1])
+    set_aside = set_aside_previous_attempt(output)
+    if set_aside is not None:
+        print(f"Earlier attempt was interrupted; kept it as {set_aside.name} and restarting the episode",
+              flush=True)
     inputs = Path(EPISODE_INPUTS)
     inputs.mkdir(parents=True, exist_ok=True)
     for name, content in uploads.items():
@@ -249,9 +272,114 @@ def run_episode(argv: list[str], uploads: dict[str, bytes], time_limit_minutes: 
             exit_code = process.wait()
     runs_volume.commit()
 
-    summary_path = Path(argv[argv.index("--output") + 1]) / "summary.json"
+    summary_path = output / "summary.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else None
-    return {"exit_code": exit_code, "timed_out": timed_out, "summary": summary}
+    return {"exit_code": exit_code, "timed_out": timed_out, "summary": summary,
+            "interrupted_attempt": None if set_aside is None else set_aside.name}
+
+
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              timeout=CAPTURE_FUNCTION_TIMEOUT_SECONDS, single_use_containers=True)
+def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_size: int,
+                   perception_camera: str = "") -> dict:
+    """Run development.capture.labeled_frames in a fresh container; frames go to the runs Volume."""
+    sys.path.insert(0, "/root")
+    from episode_request import set_aside_previous_attempt
+    from development.capture.labeled_frames import capture
+    from harness.environment.perception_cameras import parse_camera_spec
+
+    output = Path(RUNS) / run_id
+    set_aside_previous_attempt(output)  # a preempted attempt restarts the rollout cleanly
+    try:
+        manifest = capture(ROBOTWIN, output, seed, every=every, max_actions=max_actions, chunk_size=chunk_size,
+                           perception_camera=parse_camera_spec(perception_camera) if perception_camera else None)
+        # With GPU fallbacks the type that actually ran is only known here.
+        manifest["gpu"] = _command_output(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]).strip()
+        (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return manifest
+    finally:
+        runs_volume.commit()
+
+
+@app.local_entrypoint()
+def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, chunk_size: int = 16,
+           output_root: str = "data/perception/frames", perception_camera: str = ""):
+    """Capture labelled perception frames on Modal and download each seed to <output_root>/seed_<N>.
+
+    ``--perception-camera default`` (or ``x,y,z/tx,ty,tz/fovy``) adds a
+    perception-only camera to every frame; the policy still gets its three.
+
+    Seeds run one after another: the deployed policy worker keeps a single
+    observation history, so concurrent rollouts would mix their inputs.
+    """
+    seed_list = [int(value) for value in seeds.split(",") if value.strip()]
+    if perception_camera:
+        sys.path.insert(0, str(REPO))
+        from harness.environment.perception_cameras import parse_camera_spec
+        parse_camera_spec(perception_camera)  # reject a typo before any GPU starts
+    root = Path(output_root).resolve()
+    targets = {seed: root / f"seed_{seed}" for seed in seed_list}
+    existing = [str(path) for path in targets.values() if path.exists()]
+    if not seed_list or existing:
+        raise SystemExit("frames: no seeds given" if not seed_list else
+                         "frames: already exist (delete them or pass --output-root): " + ", ".join(existing))
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    failed = {}
+    for seed, target in targets.items():
+        run_id = f"frames_{root.name}_seed{seed}_{stamp}"
+        print(f"Seed {seed}: capturing on {GPU} (up to {max_actions} actions) ...", flush=True)
+        try:
+            manifest = capture_frames.remote(run_id, seed, every, max_actions, chunk_size, perception_camera)
+            print(f"Seed {seed}: {manifest['frames_saved']} frames, {manifest['policy_actions']} actions, "
+                  f"stopped by {manifest['stop_reason']}, on {manifest['gpu']}", flush=True)
+        except Exception as exc:
+            # One failed rollout should not cost the remaining seeds.
+            manifest = None
+            failed[seed] = f"{type(exc).__name__}: {exc}"[:300]
+            print(f"Seed {seed}: FAILED ({failed[seed]}); keeping its partial frames", flush=True)
+        # Keep whatever was saved even if the rollout failed part-way.
+        expected = None if manifest is None else manifest["frames_saved"]
+        if _wait_for_volume(run_id, expected_observations=expected) == 0:
+            print(f"Seed {seed}: nothing saved on the Volume", flush=True)
+            continue
+        count = _download_run(run_id, target, skip_observations=False)
+        frames_downloaded = len(list((target / "observations").glob("observation_*.npz")))
+        print(f"Seed {seed}: downloaded {count} files ({frames_downloaded} frames) to {target}", flush=True)
+        if expected is not None and frames_downloaded < expected:
+            print(f"Seed {seed}: WARNING only {frames_downloaded} of {expected} frames arrived; fetch again with "
+                  f"modal volume get robotwin-runs {run_id} <dir>", flush=True)
+    if failed:
+        raise SystemExit(f"frames: seeds failed: {failed}")
+
+
+def _wait_for_volume(run_id, *, expected_observations=None):
+    """Wait until this machine's view of the runs Volume shows a finished run.
+
+    With ``expected_observations`` wait for that many observation files;
+    otherwise wait until two listings agree. Returns the number of files seen.
+    """
+    previous = None
+    for attempt in range(VOLUME_SETTLE_ATTEMPTS):
+        try:
+            paths = [entry.path for entry in runs_volume.listdir(run_id, recursive=True)]
+        except modal.exception.NotFoundError:
+            paths = []
+        observations = sum("/observations/observation_" in f"/{path}" for path in paths)
+        if expected_observations is not None and observations >= expected_observations:
+            return len(paths)
+        if expected_observations is None and paths and len(paths) == previous:
+            return len(paths)
+        previous = len(paths)
+        if attempt + 1 < VOLUME_SETTLE_ATTEMPTS:
+            time.sleep(VOLUME_SETTLE_SECONDS)
+    return previous or 0
+
+
+def _run_exists_on_volume(run_id):
+    try:
+        return bool(runs_volume.listdir(run_id))
+    except modal.exception.NotFoundError:
+        return False
 
 
 def _download_run(run_id, destination, *, skip_observations):
@@ -280,9 +408,13 @@ def episode(*argv):
     import run_skills
     from modal_apps.episode_request import build_request
 
+    # Without --output, name the run like local runs, marked with where it ran.
+    known, _unknown = run_skills.build_parser(REPO).parse_known_args(list(argv))
+    if known.output is None:
+        argv = (*argv, "--output", str(run_skills.default_output(
+            REPO, known.config, known.seed, where=f"modal-{GPU}")))
     try:
-        request = build_request(argv, stamp=time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
-                                input_dir=EPISODE_INPUTS, runs_dir=RUNS, robotwin_root=ROBOTWIN)
+        request = build_request(argv, input_dir=EPISODE_INPUTS, runs_dir=RUNS, robotwin_root=ROBOTWIN)
     except ValueError as exc:
         raise SystemExit(f"episode: {exc}") from None
     # The same checks run_skills.main makes, before any GPU is allocated.
@@ -290,6 +422,9 @@ def episode(*argv):
     output = request.local_output.resolve()
     if output.exists():
         raise SystemExit(f"episode: {output} already exists; choose a new --output")
+    if _run_exists_on_volume(request.run_id):
+        raise SystemExit(f"episode: {request.run_id} already exists on the robotwin-runs Volume; "
+                         "choose a new --output or delete it with modal volume rm -r")
     uploads = {name: path.read_bytes() for name, path in request.uploads.items()}
 
     print(f"Running {request.run_id} on {GPU} (limit {request.time_limit_minutes} min)")
@@ -299,8 +434,13 @@ def episode(*argv):
     finally:
         # Partial artifacts are still worth having after a failed or interrupted run.
         try:
+            _wait_for_volume(request.run_id)
             count = _download_run(request.run_id, output, skip_observations=request.skip_observations)
             print(f"Downloaded {count} files to {output}")
         except Exception as exc:
             print(f"No artifacts downloaded for {request.run_id}: {type(exc).__name__}: {exc}")
     print(json.dumps(result, indent=2))
+    if result and result.get("interrupted_attempt"):
+        print(f"Modal preempted an earlier attempt; its partial run is on the Volume as "
+              f"{result['interrupted_attempt']} (modal volume get robotwin-runs "
+              f"{result['interrupted_attempt']} data/runs/).")

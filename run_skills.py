@@ -1,6 +1,7 @@
 """Scripted or Anthropic skill runner; baseline inference stays independent."""
 
 import argparse
+from datetime import datetime
 from functools import partial
 import json
 from pathlib import Path
@@ -13,6 +14,14 @@ from harness.planner.prompt_builder import prompt_bundle
 from harness.runtime import assembly
 from harness.runtime.settings import RunSettings
 from harness.exploration.candidates import candidates_from_attempt
+
+RUNS_DIRECTORY = Path("data/runs")
+# Memory candidate ids are "<run name>.observation" and must fit the 80-character
+# memory Name limit (harness/memory/base.py); 3 more characters stay free for a
+# same-minute "-NN" suffix.
+MAX_RUN_NAME_LENGTH = 80 - len(".observation") - 3
+# Dropped first, in order, when a config name would make the run name too long.
+CONFIG_FILLER_WORDS = ("task", "table")
 
 SUCCESSFUL_OUTCOMES = frozenset({
     "acquisition_confirmed", "left_transfer_complete", "handoff_confirmed", "task_success"})
@@ -29,6 +38,39 @@ def validate_evidence_mode(*, development_oracle, perception_factory, planner_pi
         raise ValueError("evidence_provider_required")
     if development_oracle and perception_factory:
         raise ValueError("oracle_and_public_perception_are_mutually_exclusive")
+
+
+def default_output(root, config, seed, *, where, now=None):
+    """Return a new, readable run folder under ``data/runs``.
+
+    The name leads with a sortable date, then weekday and local time, then what
+    ran: ``2026-10-28_Wed_07-55am_opus_full_task_rgbd_table_lift_seed3_local``.
+    A ``-2``, ``-3``... suffix keeps runs started in the same minute apart. Long
+    config names are shortened so the name fits ``MAX_RUN_NAME_LENGTH``.
+    """
+    now = now or datetime.now()
+    when = now.strftime("%Y-%m-%d_%a_%I-%M") + now.strftime("%p").lower()
+    config_name = Path(config).stem
+    if config_name.startswith("skill_runtime_"):
+        config_name = config_name.removeprefix("skill_runtime_")
+    tail = f"_seed{seed}_{where}"
+    config_name = _shorten_config_name(config_name, MAX_RUN_NAME_LENGTH - len(when) - 1 - len(tail))
+    folder = Path(root) / RUNS_DIRECTORY / f"{when}_{config_name}{tail}"
+    candidate, count = folder, 1
+    while candidate.exists():
+        count += 1
+        candidate = folder.with_name(f"{folder.name}-{count}")
+    return candidate
+
+
+def _shorten_config_name(name, room):
+    """Fit ``name`` into ``room`` characters, dropping filler words before truncating."""
+    words = name.split("_")
+    for filler in CONFIG_FILLER_WORDS:
+        if len("_".join(words)) <= room:
+            break
+        words = [word for word in words if word != filler] or words
+    return "_".join(words)[:max(room, 1)].rstrip("_")
 
 
 def option_error(args, settings):
@@ -69,7 +111,9 @@ def option_error(args, settings):
 def build_parser(root):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=3)
-    parser.add_argument("--output", type=Path, required=True, help="New directory for this episode")
+    parser.add_argument("--output", type=Path,
+                        help="New directory for this episode (default: data/runs/<date>_<weekday>_<time>"
+                             "_<config>_seed<N>_local)")
     parser.add_argument("--config", type=Path, default=root / "configs/skill_runtime.yaml")
     parser.add_argument("--robotwin-root", type=Path, default=root / "RoboTwin")
     parser.add_argument("--planner", choices=("scripted", "anthropic"), default="scripted")
@@ -140,8 +184,9 @@ def main(argv=None):
     elif args.evaluation_sha256:
         parser.error("--evaluation-sha256 requires --evaluation-manifest")
 
-    output = args.output.resolve()
+    output = (args.output or default_output(root, args.config, args.seed, where="local")).resolve()
     output.mkdir(parents=True, exist_ok=False)
+    print(f"Run folder: {output}", flush=True)
     write_manifest(output, args, settings, planner_settings=planner_settings,
                    memory=memory, frozen=frozen)
     if memory:
@@ -226,7 +271,8 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
         simulator = LocalSimulator(args.robotwin_root.resolve(),
             rgbd_enabled=settings.perception.rgbd_enabled,
             diagnostics=partial(append_jsonl, output / "simulator_timing.jsonl"))
-        environment = open_environment(simulator, video=video, frozen=frozen)
+        environment = open_environment(simulator, video=video, frozen=frozen,
+                                       render_once_per_step=settings.render_once_per_step)
         initial_observation = environment.reset(args.seed)  # Exactly one reset, owned by this runner.
         if settings.perception.rgbd_enabled:
             from harness.perception.rgbd import require_camera_frames
@@ -278,14 +324,14 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
     return summary
 
 
-def open_environment(simulator, *, video, frozen):
+def open_environment(simulator, *, video, frozen, render_once_per_step=False):
     from harness.environment.local import LocalEnvironmentClient
 
     if video is not None:
         from development.demos.episode_video import RecordingEnvironment
-        environment = RecordingEnvironment(simulator, video)
+        environment = RecordingEnvironment(simulator, video, render_once_per_step=render_once_per_step)
     else:
-        environment = LocalEnvironmentClient(simulator)
+        environment = LocalEnvironmentClient(simulator, render_once_per_step=render_once_per_step)
     if frozen:
         from harness.evaluation.guard import SingleResetEnvironment
         environment = SingleResetEnvironment(environment)

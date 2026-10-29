@@ -13,9 +13,17 @@ from harness.environment.base import vector14
 
 
 class LocalSimulator:
-    def __init__(self, robotwin_root, *, rgbd_enabled=False, diagnostics=None):
+    def __init__(self, robotwin_root, *, rgbd_enabled=False, diagnostics=None, perception_cameras=()):
+        """``perception_cameras``: ``FixedCamera`` specs added to the scene after every reset."""
         if type(rgbd_enabled) is not bool:
             raise ValueError("rgbd_setting_must_be_boolean")
+        from harness.environment.perception_cameras import FixedCamera
+        if (not isinstance(perception_cameras, (tuple, list))
+                or any(not isinstance(spec, FixedCamera) for spec in perception_cameras)
+                or len({spec.name for spec in perception_cameras}) != len(perception_cameras)):
+            raise ValueError("invalid_perception_cameras")
+        self.perception_camera_specs = tuple(perception_cameras)
+        self.perception_cameras = {}
         from harness.environment.robotwin import build_task
         self.task, self.setup = build_task(str(Path(robotwin_root).resolve()), "hanging_mug")
         if rgbd_enabled:
@@ -41,7 +49,6 @@ class LocalSimulator:
 
     def __call__(self, host, port, path, payload):
         import torch
-        from harness.environment.robotwin import observation_of
         start = time.perf_counter()
         step_id = None
         phase = "request"
@@ -57,6 +64,11 @@ class LocalSimulator:
                     self._diagnostic("simulator_phase_failed", phase=phase,
                                      error_type=type(exc).__name__)
                     raise
+                # Added after setup_demo has placed the objects, so no seeded
+                # random numbers are drawn; setup_demo builds a new scene each reset.
+                from harness.environment.perception_cameras import add_fixed_camera
+                self.perception_cameras = {spec.name: add_fixed_camera(self.task.scene, spec)
+                                           for spec in self.perception_camera_specs}
                 # This flag is scoped to the local agentic runner. The frozen
                 # baseline runner and RoboTwin's ordinary evaluation path keep
                 # their native terminal behavior.
@@ -67,23 +79,8 @@ class LocalSimulator:
                 self._diagnostic("simulator_phase_completed", phase=phase,
                                  elapsed_ms=(time.perf_counter() - phase_start) * 1000)
             elif path == "/step" and self.initialized:
-                self._step_count += 1
-                step_id = self._step_count
-                phase = "task_action"
-                self._diagnostic("simulator_phase_started", phase=phase, step_id=step_id)
-                phase_start = time.perf_counter()
-                try:
-                    self.task.take_action(np.asarray(vector14(payload["action"]), dtype=np.float64))
-                    success = (bool(self.task.eval_success)
-                               or bool(getattr(self.task, "harness_native_success_latched", False))
-                               or bool(self.task.check_success()))
-                except Exception as exc:
-                    self._diagnostic("simulator_phase_failed", phase=phase, step_id=step_id,
-                                     error_type=type(exc).__name__)
-                    raise
-                action_finished = time.perf_counter()
-                self._diagnostic("simulator_phase_completed", phase=phase, step_id=step_id,
-                                 elapsed_ms=(action_finished - phase_start) * 1000)
+                step_id = self._step_count + 1
+                success = self.act(payload["action"])
             else:
                 raise ValueError("local simulator requires reset followed by steps")
         after_action = time.perf_counter()
@@ -91,7 +88,7 @@ class LocalSimulator:
         self._diagnostic("simulator_phase_started", phase=phase, step_id=step_id)
         phase_start = time.perf_counter()
         try:
-            observation = observation_of(self.task, self.blank, success)
+            observation = self.observation(success)
         except Exception as exc:
             self._diagnostic("simulator_phase_failed", phase=phase, step_id=step_id,
                              error_type=type(exc).__name__)
@@ -108,7 +105,42 @@ class LocalSimulator:
             "sim_encode_ms": 0.0,
         }
 
+    def act(self, action):
+        """Apply one action without rendering and return the native success flag.
+
+        Rendering every camera with depth costs most of a step (about 80% on a
+        Modal A10, more on a laptop GPU), so a caller that needs only some frames
+        acts here and calls ``observation`` for those.
+        """
+        import torch
+        if not self.initialized:
+            raise ValueError("local simulator requires reset followed by steps")
+        self._step_count += 1
+        step_id = self._step_count
+        phase = "task_action"
+        self._diagnostic("simulator_phase_started", phase=phase, step_id=step_id)
+        phase_start = time.perf_counter()
+        try:
+            with torch.enable_grad():
+                self.task.take_action(np.asarray(vector14(action), dtype=np.float64))
+                success = (bool(self.task.eval_success)
+                           or bool(getattr(self.task, "harness_native_success_latched", False))
+                           or bool(self.task.check_success()))
+        except Exception as exc:
+            self._diagnostic("simulator_phase_failed", phase=phase, step_id=step_id,
+                             error_type=type(exc).__name__)
+            raise
+        self._diagnostic("simulator_phase_completed", phase=phase, step_id=step_id,
+                         elapsed_ms=(time.perf_counter() - phase_start) * 1000)
+        return success
+
+    def observation(self, success):
+        """Render the current observation payload, including any perception cameras."""
+        from harness.environment.robotwin import observation_of
+        return observation_of(self.task, self.blank, success, self.perception_cameras)
+
     def close(self):
         if self.initialized:
             self.task.close_env()
+            self.perception_cameras = {}
             self.initialized = False

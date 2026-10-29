@@ -43,11 +43,11 @@ def _split_assignments(argv):
     return tokens
 
 
-def build_request(argv, *, stamp, input_dir, runs_dir, robotwin_root):
+def build_request(argv, *, input_dir, runs_dir, robotwin_root):
     """Return the ``EpisodeRequest`` for ``argv``; raise ``ValueError`` on unusable options.
 
-    ``stamp`` makes the remote run directory unique, so reusing a local name
-    never collides with an earlier run on the Volume.
+    The remote run folder has the same name as the local ``--output`` folder;
+    the launcher refuses to start when that name already exists on the Volume.
     """
     tokens = _split_assignments(argv)
     local_argv, remote_argv, uploads = [], [], {}
@@ -87,7 +87,7 @@ def build_request(argv, *, stamp, input_dir, runs_dir, robotwin_root):
         raise ValueError("--output is required")
     if not 1 <= time_limit <= MAX_TIME_LIMIT_MINUTES:
         raise ValueError(f"{TIME_LIMIT_OPTION} must be between 1 and {MAX_TIME_LIMIT_MINUTES}")
-    run_id = f"{output.name}-{stamp}"
+    run_id = output.name
     remote_argv.extend(("--output", str(PurePosixPath(runs_dir) / run_id),
                         "--robotwin-root", robotwin_root))
     return EpisodeRequest(run_id=run_id, local_output=output, local_argv=tuple(local_argv),

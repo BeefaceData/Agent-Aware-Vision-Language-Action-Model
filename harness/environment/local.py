@@ -8,6 +8,7 @@ from dataclasses import replace
 
 import numpy as np
 
+from harness.environment.base import vector14
 from harness.perception.geometry import pose7
 from .client import EnvironmentClient
 
@@ -15,10 +16,20 @@ from .client import EnvironmentClient
 class LocalEnvironmentClient(EnvironmentClient):
     supports_analytic = True
 
-    def __init__(self, simulator):
+    def __init__(self, simulator, *, render_once_per_step=False):
+        """``render_once_per_step``: skip ``step``'s render of the pre-action state.
+
+        The base ``step`` calls ``observe()`` for the previous sequence and the
+        terminal check; here ``observe()`` renders every camera, and that frame is
+        discarded. When enabled, both come from this client's own state instead,
+        which ``observe()`` would have reproduced (``tick`` advances ``_sequence``
+        and ``native_success`` reads the task), so the returned observations are
+        the same with one render per action instead of two.
+        """
         super().__init__(simulator)
         self.simulator = simulator
         self._sequence = 0
+        self.render_once_per_step = render_once_per_step
 
     def _accept(self, raw, sequence):
         result = super()._accept(raw, sequence)
@@ -36,9 +47,34 @@ class LocalEnvironmentClient(EnvironmentClient):
     def observe(self):
         if self._observation is None or self._uncertain:
             raise RuntimeError("environment has no confirmed current observation")
-        from harness.environment.robotwin import observation_of
-        return self._accept(observation_of(self.simulator.task, self.simulator.blank,
-                                           self.native_success), self._sequence)
+        return self._accept(self.simulator.observation(self.native_success), self._sequence)
+
+    def _step(self, action, *, allow_after_success):
+        if not self.render_once_per_step:
+            return super()._step(action, allow_after_success=allow_after_success)
+        if self._observation is None or self._uncertain:
+            raise RuntimeError("environment has no confirmed current observation")
+        if self.native_success and not allow_after_success:
+            raise RuntimeError("environment is terminal")
+        action = vector14(action)
+        self._uncertain = True  # A failed response may still have moved the robot.
+        raw, _ = self._transport(self.host, self.port, "/step", {"action": list(action)})
+        observation = self._accept(raw, self._sequence + 1)
+        self._uncertain = False
+        return observation
+
+    def advance(self, action):
+        """Apply one action without rendering; ``observe()`` renders the new state.
+
+        ``step`` renders twice per action (``observe`` for the previous sequence,
+        then the new frame); a caller that reads only some frames uses this.
+        """
+        if self.native_success:
+            raise RuntimeError("environment is terminal")
+        self._uncertain = True  # A failed action may still have moved the robot.
+        self.simulator.act(vector14(action))
+        self._sequence += 1
+        self._uncertain = False
 
     @property
     def native_success(self):

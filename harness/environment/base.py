@@ -7,7 +7,7 @@ import numpy as np
 
 from harness.perception.rgbd import RGBDCamera
 from harness.schemas import StateSummary
-from .layout import CAMERAS
+from .layout import CAMERAS, PERCEPTION_CAMERAS
 
 
 def vector14(value) -> tuple[float, ...]:
@@ -19,10 +19,11 @@ def vector14(value) -> tuple[float, ...]:
 
 
 def copy_images(images: dict) -> dict[str, np.ndarray]:
-    if set(images) != set(CAMERAS):
-        raise ValueError("images must contain exactly the three public RGB cameras")
+    """Copy the three policy cameras plus any perception-only cameras present."""
+    if not set(CAMERAS) <= set(images) <= set(CAMERAS) | set(PERCEPTION_CAMERAS):
+        raise ValueError("images must contain the three public RGB cameras and only known perception cameras")
     copied = {}
-    for camera in CAMERAS:
+    for camera in (*CAMERAS, *(name for name in PERCEPTION_CAMERAS if name in images)):
         image = np.asarray(images[camera])
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3 or min(image.shape) == 0:
             raise ValueError(f"{camera} must be nonempty HxWx3 uint8 RGB")

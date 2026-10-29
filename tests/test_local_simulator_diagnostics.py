@@ -8,6 +8,7 @@ import numpy as np
 
 from development.simulator.local_simulator import LocalSimulator
 from harness.environment.local import LocalEnvironmentClient
+from tests.helpers import images
 
 
 class Task:
@@ -26,6 +27,33 @@ class Task:
         return False
 
 
+def measured_robot():
+    def arm_pose(x):
+        return lambda: np.asarray((x, 0., 0., 0., 0., 0., 1.))
+
+    robot = SimpleNamespace()
+    for side, x in (("left", 0.), ("right", 1.)):
+        setattr(robot, f"get_{side}_arm_real_jointState", lambda: [0.] * 6)
+        setattr(robot, f"get_{side}_gripper_val", lambda: 1.)
+        setattr(robot, f"get_{side}_ee_pose", arm_pose(x))
+    return robot
+
+
+class RenderCountingSimulator:
+    """Answers reset and step like LocalSimulator (one render each) and counts renders."""
+
+    def __init__(self, success=False):
+        self.renders = 0
+        self.task = SimpleNamespace(robot=measured_robot(), eval_success=False, check_success=lambda: success)
+
+    def observation(self, success):
+        self.renders += 1
+        return {**images(), "state": np.zeros(14, dtype=np.float32), "success": np.asarray(success)}
+
+    def __call__(self, host, port, path, payload):
+        return self.observation(False), {}
+
+
 def simulator(task, diagnostics):
     instance = LocalSimulator.__new__(LocalSimulator)
     instance.task = task
@@ -34,22 +62,13 @@ def simulator(task, diagnostics):
     instance.initialized = True
     instance.diagnostics = diagnostics
     instance._step_count = 0
+    instance.perception_cameras = {}
     return instance
 
 
 class LocalSimulatorDiagnosticsTests(unittest.TestCase):
     def test_local_environment_adds_measured_tcp_poses_not_object_state(self):
-        from tests.helpers import images
-
-        def arm_pose(x):
-            return lambda: np.asarray((x, 0., 0., 0., 0., 0., 1.))
-
-        robot = SimpleNamespace()
-        for side, x in (("left", 0.), ("right", 1.)):
-            setattr(robot, f"get_{side}_arm_real_jointState", lambda: [0.] * 6)
-            setattr(robot, f"get_{side}_gripper_val", lambda: 1.)
-            setattr(robot, f"get_{side}_ee_pose", arm_pose(x))
-        environment = LocalEnvironmentClient(SimpleNamespace(task=SimpleNamespace(robot=robot)))
+        environment = LocalEnvironmentClient(SimpleNamespace(task=SimpleNamespace(robot=measured_robot())))
         raw = {**images(), "state": np.zeros(14, dtype=np.float32),
                "success": np.asarray(False)}
 
@@ -107,6 +126,39 @@ class LocalSimulatorDiagnosticsTests(unittest.TestCase):
         self.assertEqual(events[1]["step_id"], 1)
         self.assertIn("elapsed_ms", events[2])
         self.assertIn("elapsed_ms", events[4])
+
+    def test_render_once_per_step_returns_the_same_sequence_with_half_the_renders(self):
+        results = {}
+        for render_once in (False, True):
+            simulator_ = RenderCountingSimulator()
+            environment = LocalEnvironmentClient(simulator_, render_once_per_step=render_once)
+            environment.reset(0)
+            sequences = [environment.step([0.0] * 14).sequence for _ in range(2)]
+            results[render_once] = (sequences, simulator_.renders)
+
+        self.assertEqual(results[False], ([1, 2], 5))  # reset, then two renders per step
+        self.assertEqual(results[True], ([1, 2], 3))
+
+    def test_render_once_per_step_still_refuses_to_step_a_finished_episode(self):
+        environment = LocalEnvironmentClient(RenderCountingSimulator(success=True), render_once_per_step=True)
+        environment.reset(0)
+
+        with self.assertRaisesRegex(RuntimeError, "environment is terminal"):
+            environment.step([0.0] * 14)
+
+    def test_advance_applies_an_action_without_rendering(self):
+        events = []
+        instance = simulator(Task(), events.append)
+        environment = LocalEnvironmentClient(instance)
+        environment._observation = object()  # as after reset
+
+        with patch("harness.environment.robotwin.observation_of") as observe:
+            environment.advance([0.0] * 14)
+
+        observe.assert_not_called()
+        self.assertEqual(len(instance.task.actions), 1)
+        self.assertEqual(environment._sequence, 1)
+        self.assertEqual([e.get("phase") for e in events], ["task_action", "task_action"])
 
     def test_action_exception_is_logged_without_sensitive_exception_text(self):
         events = []

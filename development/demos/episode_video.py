@@ -50,8 +50,8 @@ class EpisodeVideo:
 
 
 class RecordingEnvironment(LocalEnvironmentClient):
-    def __init__(self, simulator, video):
-        super().__init__(simulator)
+    def __init__(self, simulator, video, **options):
+        super().__init__(simulator, **options)
         self.video = video
         self.policy_actions = self.analytic_ticks = 0
         self.policy_kind = "vla_act"

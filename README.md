@@ -161,8 +161,8 @@ What `::episode` does:
    container on the chosen GPU. It calls the policy and SAM 3 inside Modal, and
    Anthropic with the `anthropic` secret.
 3. **Saves and downloads the results.** They are written to the `robotwin-runs`
-   Volume as `<output name>-<UTC timestamp>`, then copied into your `--output`
-   folder. Partial results are copied even after a failure.
+   Volume under the same name as your `--output` folder, then copied into it.
+   Partial results are copied even after a failure.
 
 `::episode` also has two options of its own:
 
@@ -194,7 +194,10 @@ SIM_GPU=L4 modal run modal_apps/simulator.py::episode --config ... --output data
 SIM_GPU=A10G modal run modal_apps/simulator.py::spike    # measure before switching
 ```
 
-`SIM_GPU` is read when `modal run` starts, so it applies to that run only. To
+`SIM_GPU` is read when `modal run` starts, so it applies to that run only. It also
+accepts a ranked list, such as `SIM_GPU=L4,A10G,T4`: Modal starts on the first type
+with free capacity instead of queueing for one. A queued call shows the function as
+*Inactive* with no live containers on the dashboard. To
 change the default, edit `GPU = os.environ.get("SIM_GPU", "T4")` in
 `modal_apps/simulator.py`. The run's `summary.json` does not record the GPU, so
 name the output folder after it when you compare GPUs.
@@ -226,7 +229,21 @@ GPU (mean difference 0.03/255). Still record which GPU produced a result.
 - The A100 has no ray-tracing cores and is untested for RoboTwin's ray-traced
   cameras. Run the spike first.
 
-### M6. Manage remote runs
+### M6. Capture labelled perception frames
+
+For offline perception evaluation (see `CONTRIBUTE_README.md`), roll out the frozen
+policy and save public frames plus simulator labels, one seed after another. The
+L4 suits this job because rendering dominates it (about 7 minutes per 900-action seed):
+
+```bash
+SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+```
+
+The manifest records which GPU actually ran. Each seed is downloaded into `data/perception/frames/seed_<N>`. Options:
+`--every 16`, `--max-actions 900`, `--chunk-size 16`, `--output-root DIR`. Existing
+seed folders are refused, never overwritten.
+
+### M7. Manage remote runs
 
 ```bash
 modal volume ls robotwin-runs                          # list runs
@@ -313,7 +330,35 @@ vulkaninfo --summary | grep deviceName   # should list only the NVIDIA GPU
 To review or remove these environment settings, use
 `conda env config vars list -n robotwin` or `conda env config vars unset -n robotwin NAME`.
 
-### L5. Run episodes
+### L5. Look at the scene (simulator only)
+
+Before running episodes, check that RoboTwin renders and see what each camera
+sees. This resets the simulator once. It starts no policy, planner or Modal
+client, and it never moves the robot.
+
+```bash
+python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3
+xdg-open data/scenes/seed_3/overview.png
+
+# Compare seeds: each seed moves the mug and rack and picks one of 10 mug models
+for s in 0 1 2 4; do python -m development.capture.scene_views --seed $s --output data/scenes/seed_$s; done
+
+# Interactive 3D window (needs a display; close it to exit)
+python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3_viewer --viewer
+```
+
+Each folder gets colour and depth PNGs for every camera RoboTwin renders, an
+`overview.png` contact sheet and `cameras.json` (size, position, depth range).
+
+| Camera | Mounted | Used by the harness and policy? |
+|---|---|---|
+| `head_camera` | fixed, above the table | yes |
+| `left_camera` | left wrist | yes |
+| `right_camera` | right wrist | yes |
+| `front_camera` | fixed, low and in front | no |
+| `observer_camera` | third-person view | no |
+
+### L6. Run episodes
 
 Each run needs a new folder (omit `--output` to get a dated name, see Outputs). `timeout -s INT` acts like Ctrl+C, so
 a stuck run still writes `summary.json` and its video.
@@ -334,7 +379,7 @@ timeout -s INT 75m python run_skills.py \
 Development-oracle mode is for internal debugging. Do not combine it with a
 public perception factory. Run one RoboTwin job at a time on GPUs with little VRAM.
 
-### L6. Campaigns, evaluation and the baseline
+### L7. Campaigns, evaluation and the baseline
 
 ```bash
 # Bounded scripted exploration campaign (one process per attempt)
@@ -349,7 +394,7 @@ python run_inference_chunked.py policy --episodes 1 --steps 900 --chunk-size 8
 RoboTwin's own step limit for `hanging_mug` is 900 policy actions. Frozen
 evaluation (`run_evaluation.py freeze` / `run`) also runs on this route.
 
-### L7. Local GPU
+### L8. Local GPU
 
 Local runs use whichever NVIDIA GPU Vulkan and CUDA select. After changing
 hardware, update `TORCH_CUDA_ARCH_LIST`, reinstall CuRobo (L3), and keep the
@@ -369,7 +414,10 @@ data/runs/2026-10-28_Wed_08-10am_skill_runtime_seed3_local
 
 The parts are: local date, weekday and time; the config (without
 `skill_runtime_`); the seed; and `local` or `modal-<GPU>`. Runs started in the
-same minute get `-2`, `-3`. Pass `--output` to choose your own name instead.
+same minute get `-2`, `-3`. Long config names are shortened (filler words such as
+`task` are dropped) so names stay short enough for memory candidate ids. Pass
+`--output` to choose your own name instead; a Modal run refuses to start if that
+name already exists on the `robotwin-runs` Volume.
 
 Each run folder (both routes) contains:
 
@@ -408,7 +456,7 @@ after as different conditions.
   - Modal: `--time-limit-minutes`.
   - Local: `timeout -s INT`.
   - Opus calls: copy a config and lower `max_turns` / `anthropic.max_calls`.
-- **Storage:** remote runs stay on the `robotwin-runs` Volume until you delete them (M6).
+- **Storage:** remote runs stay on the `robotwin-runs` Volume until you delete them (M7).
 
 ### Troubleshooting
 

@@ -48,7 +48,19 @@ def load_perception_provider(factory_spec, anchors, *, rack_prompt_profile="defa
         raise ValueError("perception_factory_not_found")
     if rack_prompt_profile not in RACK_PROMPT_PROFILES:
         raise ValueError("unsupported_rack_prompt_profile")
-    detector = factory()
+    return perception_provider_for(factory(), anchors, rack_prompt_profile=rack_prompt_profile,
+                                   rack_grounding_camera=rack_grounding_camera)
+
+
+def perception_provider_for(detector, anchors, *, rack_prompt_profile="default",
+                            rack_grounding_camera="head_camera"):
+    """Wrap a detector exactly as an episode does: prompt profile, camera and thresholds.
+
+    Shared by ``load_perception_provider`` and offline evaluation, so both see
+    the same confidence floors and detector configuration.
+    """
+    if rack_prompt_profile not in RACK_PROMPT_PROFILES:
+        raise ValueError("unsupported_rack_prompt_profile")
     if not callable(getattr(detector, "detect", None)):
         raise ValueError("perception_detector_missing_detect")
     _configure_optional(detector, "configure_rack_prompt_profile", rack_prompt_profile,

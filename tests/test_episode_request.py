@@ -9,8 +9,7 @@ from modal_apps.episode_request import (DEFAULT_TIME_LIMIT_MINUTES, build_reques
 
 
 def request(*argv):
-    return build_request(argv, stamp="20261026T120000Z", input_dir="/tmp/in",
-                         runs_dir="/runs", robotwin_root="/opt/RoboTwin")
+    return build_request(argv, input_dir="/tmp/in", runs_dir="/runs", robotwin_root="/opt/RoboTwin")
 
 
 class EpisodeRequestTests(unittest.TestCase):
@@ -23,9 +22,9 @@ class EpisodeRequestTests(unittest.TestCase):
     def test_output_and_robotwin_root_point_into_the_container(self):
         result = request("--output", "data/runs/x")
 
-        self.assertEqual(result.run_id, "x-20261026T120000Z")
+        self.assertEqual(result.run_id, "x")
         self.assertEqual(result.local_output, Path("data/runs/x"))
-        self.assertEqual(result.remote_argv, ("--output", "/runs/x-20261026T120000Z",
+        self.assertEqual(result.remote_argv, ("--output", "/runs/x",
                                               "--robotwin-root", "/opt/RoboTwin"))
 
     def test_other_options_are_forwarded_unchanged(self):

@@ -2,6 +2,10 @@
 
 ## Goal
 
+Current contribution: [offline sampling study and uncertainty fix](Almond-sampling-study.md).
+The 32/16 candidate is evaluated in annotation-based replay; live planner
+integration and measured API cost/latency remain follow-up work.
+
 Measure when the harness needs to inspect task progress and ask the planner for feedback, then design a phase-aware sampling schedule that reduces unnecessary calls without missing failures. Grasp timing is only one example; evaluate the relevant acquisition, handoff, and hanging milestones. Use episode traces to propose a schedule rather than hard-coding a guessed step count.
 
 ## Where to work

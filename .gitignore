@@ -38,6 +38,8 @@ videos/
 !/harness/prompts/*.md
 !/.agents/skills/**/*.md
 !/docs/Collaboration/*.md
+!/docs/Collaboration/*/
+!/docs/Collaboration/*/*.md
 
 # Python and OS caches
 __pycache__/

@@ -207,7 +207,7 @@ Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run c
 
 Keep pull requests focused on one subsystem and include the contract change, one or more CPU/replay checks, and any effect on the public evidence boundary. Runtime prompt files under `harness/prompts/` are executable inputs and should be versioned with the parser/schema they serve. `README.md` is the short setup guide; this file is the technical map. Start with the task-specific guide for your assigned work:
 
-- [Olusola — perception and object grounding](docs/Collaboration/Olusola.md)
+- [Olusola — perception and object grounding](docs/Collaboration/Olusola/Olusola.md)
 - [Boniface — hanging phase](docs/Collaboration/Boniface.md)
 - [Thabo — grasping phase](docs/Collaboration/Thabo.md)
 - [Almond — efficient observation sampling](docs/Collaboration/Almond.md)

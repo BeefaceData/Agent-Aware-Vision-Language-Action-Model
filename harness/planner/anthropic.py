@@ -225,6 +225,9 @@ class AnthropicPlanner:
                     "max_chunks": 1,
                     "max_policy_actions": chunk_actions,
                 })
+                # Keep the uncertainty horizon through final runtime-field normalization.
+                vla_limits = forced_limits
+                metadata["planner_feedback_horizon_actions"] = forced_limits.max_policy_actions
                 command = SkillCommand(action="vla_act", arm="both",
                     parameters=forced_limits, stop="chunk_budget_exhausted",
                     reason="Public scene perception is unavailable during a VLA-owned phase; continue one bounded chunk and reassess.")

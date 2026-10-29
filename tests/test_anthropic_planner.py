@@ -49,6 +49,36 @@ def context(turn=1, previous=None):
 
 
 class AnthropicTests(unittest.TestCase):
+    def test_perception_gap_preserves_one_chunk_after_runtime_normalization(self):
+        from dataclasses import replace
+
+        for phase, initial_window in (("grasp", 64), ("handoff", 128), ("hang", 64)):
+            for missing, remaining in ((True, 800), (True, 5), (False, 800)):
+                with self.subTest(phase=phase, missing=missing, remaining=remaining):
+                    planner, provider = self.planner([response(task_phase=phase)],
+                        task_scope="full_task", planner_feedback_chunks=1,
+                        grasp_initial_feedback_after_actions=64,
+                        handoff_initial_feedback_after_actions=128,
+                        hang_initial_feedback_after_actions=64,
+                        vla={"max_chunks": 32, "chunk_size": 16, "max_policy_actions": 768})
+                    planner.active_phase = phase
+                    public = replace(context(), predicates=(PredicateResult(
+                        name="mug_lifted", value=None if missing else False,
+                        source="perception", observation_sequence=1,
+                        reason="Public perception regression fixture"),),
+                        remaining_budget={"policy_actions": remaining, "vla_chunks": 100},
+                        visual_context={"status": {name: "not_detected" if missing else "grounded"
+                            for name in ("mug", "rack", "table")}})
+                    selected = planner.select(public)
+                    expected = min(16, remaining) if missing else initial_window
+                    self.assertEqual(selected.command.action.value, "vla_act")
+                    self.assertEqual(selected.command.parameters.max_policy_actions, expected)
+                    self.assertEqual(selected.metadata["planner_feedback_horizon_actions"], expected)
+                    self.assertEqual(bool(selected.metadata.get("perception_gap_vla_continuation_applied")), missing)
+                    if missing:
+                        self.assertEqual(selected.command.parameters.max_chunks, 1)
+                    self.assertEqual(len(provider.requests), 1)
+
     def planner(self, replies, **settings):
         provider = Provider(replies)
         require_pixel_grounding = settings.pop("require_pixel_grounding", False)

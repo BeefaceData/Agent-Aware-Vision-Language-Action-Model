@@ -133,6 +133,10 @@ warm versus cold conditions, driver version and any external setup changes in
 your local experiment notes. The manifest does not establish deployed worker
 identity or GPU model by itself. Never run two simulator jobs concurrently.
 
+The default smoke can also stop during analytic staging before making a policy
+request. A report with zero VLA samples therefore does not validate policy timing.
+Use the bounded policy probe below to exercise the new transport measurements.
+
 ### 3. Analyze any saved episode later
 
 ```bash
@@ -236,3 +240,129 @@ outcomes/timeouts, counts, median/p90/total for relevant stages, the controller
 reconciliation, missing measurements, one proposed change with an expected metric
 and tradeoff, and the regression checks. Keep full generated reports under ignored
 `data/`; include only a sanitized result summary in the PR.
+
+## Post-rebase review and real measurement protocol (2026-10-30)
+
+`main` was updated to `ca49175`, including the perception and sampling changes,
+and the latency commit was rebased onto it. The import conflict in
+`harness/vla/modal_client.py` was resolved by retaining both upstream policy-call
+timeouts and latency validation. The combined CPU suite passed **566 tests**;
+42 focused latency/runner/diagnostics/baseline/transport tests also passed. The
+synthetic CLI report was regenerated under
+`data/latency/rebased_validation_20261030_01/`.
+
+A GPU check outside the sandbox succeeded: NVIDIA GeForce RTX 2050, driver
+595.99.02, 4096 MiB. Earlier `nvidia-smi` failures were specific to the sandbox.
+The local RoboTwin checkout/assets are still absent, and no local
+`ANTHROPIC_API_KEY` was configured during this check. No live runs were collected.
+
+The offline reporting contribution is implemented and CPU-tested. The full
+latency-analysis assignment is not complete: no live run has established a
+bottleneck or speedup. Dedicated per-request perception, predicate, analytic-tick,
+artifact-write and full-process timings still need work. Rack/table initialization
+events already carry `latency_seconds` in `assessments.jsonl`, but this analyzer
+does not yet consume those initialization measurements. They occur outside the
+controller reconciliation. Do not call the report a complete end-to-end profile.
+
+### A. Exercise the actual policy, without Opus or SAM 3
+
+After completing the local README setup, create an ignored probe config from the
+existing scripted config. This starts directly with a bounded VLA skill instead
+of analytic staging, permits at most 3 chunks / 24 policy actions, and disables
+video for this particular transport test:
+
+```bash
+conda activate robotwin
+python - <<'PY'
+from pathlib import Path
+import yaml
+
+settings = yaml.safe_load(Path('configs/skill_runtime.yaml').read_text())
+settings['record_video'] = False
+settings['max_turns'] = 1
+settings['recipe'].update(stage_before_first_vla=False, max_retries=0)
+settings['recipe']['vla'].update(max_chunks=3, chunk_size=8, max_policy_actions=24)
+settings['budget'].update(max_skill_calls=1, max_policy_actions=24, max_vla_chunks=3)
+directory = Path('data/latency')
+directory.mkdir(parents=True, exist_ok=True)
+(directory / 'policy_probe.yaml').write_text(yaml.safe_dump(settings, sort_keys=False))
+PY
+
+timeout -s INT 15m python run_skills.py \
+  --config data/latency/policy_probe.yaml --seed 3 --development-oracle \
+  --output data/runs/gabriel_policy_probe_01
+
+python -m development.replays.latency \
+  --episode data/runs/gabriel_policy_probe_01 \
+  --output data/latency/gabriel_policy_probe_01
+```
+
+Run the analysis as a separate command after the episode, even if a budget
+outcome gives a nonzero exit status. Reaching a skill or turn budget is acceptable
+for a bounded latency probe; a setup error or policy timeout does not establish
+completed inference latency.
+
+Check these items in `data/latency/gabriel_policy_probe_01/report.json`:
+
+- `metadata.synthetic` is false; config hash, seed, evidence mode, source revision
+  and outcome describe the actual run. Keep the checkout clean for reproducibility.
+- `vla_request`, `policy_pack`, `policy_rpc`, `policy_server_inference` and
+  `action_round_trip` have at least one sample. Confirm `chunk_received` records
+  in the source trace contain `policy_timing`. Zero counts mean that path was
+  not measured, regardless of whether a video was produced.
+- Reconciliation has a numeric controller elapsed and unexplained duration, or
+  an explicit explanation for their absence. No negative residual or double-counted
+  server inference should appear.
+- Inspect warnings and completion counts. An aborted partial call is not a slow
+  completed sample and must not be dropped silently from the written conclusion.
+
+After the first probe works, repeat serially using new run/report names, for
+example `_02` and `_03`, with the same config and seed. Record first-call cold
+starts separately from warmed calls. The probe verifies real policy round trips;
+it does not evaluate grasp success or public-perception latency.
+
+### B. Measure a public-perception episode
+
+Configure `ANTHROPIC_API_KEY` locally using README L1; ensure your account has
+access to the configured model. Deploy the current policy and SAM 3 apps using
+the README setup, including approved Hugging Face SAM 3 access. Then run:
+
+```bash
+timeout -s INT 75m python run_skills.py \
+  --config configs/skill_runtime_opus_full_task_rgbd_table_lift.yaml \
+  --seed 3 --planner anthropic \
+  --perception-factory harness.perception.modal_sam3:create_detector \
+  --output data/runs/gabriel_public_latency_01
+
+python -m development.replays.latency \
+  --episode data/runs/gabriel_public_latency_01 \
+  --output data/latency/gabriel_public_latency_01
+```
+
+This makes paid remote policy, segmentation and planner calls. Follow the
+local-simulator requirement in this task. Do not compare its times directly with
+the short oracle probe: config, video recording, evidence mode and call mix differ.
+For repeated public runs, retain the same config/seed/deployments and use new
+output names. Keep completed and timed-out episodes separate in the analysis.
+
+The new perception-only camera is available to capture tools, but is not yet
+enabled by a `run_skills.py` episode setting. Describe the actual head/wrist
+camera setup used by these commands; do not claim the capture tool's extra view
+was used. Preserve `render_once_per_step` when comparing runs; its new opt-in
+setting changes rendering cost and defaults to false. Almond's sampling replay
+counts do not establish live API or latency savings, and that scheduler is not
+automatically wired into these episodes.
+
+### C. Decide what the PR can claim
+
+For a reporting/instrumentation PR, provide the passing CPU checks plus at least
+one bounded real probe that confirms nonzero policy timing samples. State which
+stages remain unmeasured and attach a sanitized summary instead of raw artifacts.
+That supports the claim that the instrumentation records real request timings.
+
+To close the broader assignment, additionally collect comparable public episodes,
+measure the missing stages sufficiently to support attribution, and recommend one
+change using direct event evidence. A speedup claim requires a controlled before /
+after comparison with outcomes and action counts as regression checks. The current
+supported conclusion is: **reporting and timing retention are validated on CPU;
+live bottleneck attribution and performance improvements remain unverified.**

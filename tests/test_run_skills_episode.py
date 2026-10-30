@@ -1,6 +1,7 @@
 """End-to-end run_skills wiring with CPU fakes for the simulator, evidence and policy."""
 
 import contextlib
+from hashlib import sha256
 import io
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from development.replays.latency import analyze_episode
 from harness.predicates.hanging_mug import HangingMugPredicates
 from harness.predicates.registry import PredicateRegistry
 from harness.vla.modal_client import ModalVLAClient
@@ -80,6 +82,27 @@ class RunSkillsEpisodeTests(unittest.TestCase):
                          "candidate_catalog.json"):
                 self.assertTrue((output / name).exists(), name)
             self.assertEqual(json.loads((output / "manifest.json").read_text())["seed"], 5)
+            provenance = json.loads((output / "manifest.json").read_text())["latency_provenance"]
+            self.assertEqual(provenance["config_name"], "config.yaml")
+            self.assertEqual(provenance["config_sha256"], sha256(CONFIG.encode()).hexdigest())
+            report = analyze_episode(output)
+            self.assertEqual(report["metadata"]["outcome"], "acquisition_confirmed")
+            self.assertEqual(report["metadata"]["seed"], 5)
+            self.assertEqual(report["reconciliation"]["status"], "partial coverage")
+            self.assertGreaterEqual(report["reconciliation"]["unexplained_seconds"], 0.)
+            measured = {stage["name"]: stage for stage in report["stages"]}
+            self.assertEqual(measured["skill_execution"]["count"], summary["skill_calls"])
+            self.assertEqual(measured["planner_selection"]["count"], summary["planner_turns"])
+
+    def test_manifest_provenance_handles_unavailable_git_without_fabricating_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            config.write_text(CONFIG)
+            with patch.object(run_skills.subprocess, "run", side_effect=FileNotFoundError):
+                provenance = run_skills.latency_provenance(config)
+            self.assertIsNone(provenance["source_commit"])
+            self.assertIsNone(provenance["source_dirty"])
+            self.assertEqual(provenance["config_sha256"], sha256(CONFIG.encode()).hexdigest())
 
 
 if __name__ == "__main__":

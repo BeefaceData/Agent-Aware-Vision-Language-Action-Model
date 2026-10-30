@@ -84,6 +84,28 @@ class SkillTests(unittest.TestCase):
         self.assertTrue(all(event["environment_step_ms"] >= 0 for event in confirmed))
         self.assertTrue(all("requested_at_monotonic_seconds" in event for event in requested))
 
+    def test_policy_timing_details_are_numeric_safe_and_do_not_leak_to_next_chunk(self):
+        runtime, executor, logs = setup_runtime()
+        original = runtime.act_chunk
+
+        def timed_chunk(*args):
+            actions, _ = original(*args)
+            timing = {"pack_ms": 1., "modal_rpc_ms": 8., "cloud_inference_ms": 4.,
+                      "modal_overhead_ms": -1., "modal_compute_ms": float("nan"),
+                      "cloud_postprocess_ms": True, "provider_error": "PRIVATE_PAYLOAD"}
+            return actions, timing if runtime.chunks == 1 else {}
+
+        runtime.act_chunk = timed_chunk
+        executor.execute(COMMAND)
+        executor.execute(COMMAND)
+        received = [row for row in logs if row["event_type"] == "chunk_received"]
+        self.assertEqual(received[0]["policy_timing"],
+                         {"pack_ms": 1., "modal_rpc_ms": 8., "cloud_inference_ms": 4.})
+        self.assertEqual(received[1]["policy_timing"], {})
+        reset = next(row for row in logs if row["event_type"] == "policy_history_reset")
+        self.assertEqual(reset["reset_ms"], 0.)
+        self.assertNotIn("PRIVATE_PAYLOAD", json.dumps(logs, allow_nan=False))
+
     def test_vla_can_hold_one_arm_at_last_confirmed_command(self):
         runtime, executor, logs = setup_runtime()
         command = {"action": "vla_act", "parameters": {

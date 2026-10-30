@@ -3,8 +3,10 @@
 import argparse
 from datetime import datetime
 from functools import partial
+from hashlib import sha256
 import json
 from pathlib import Path
+import subprocess
 import yaml
 
 from harness.jsonl import append_jsonl
@@ -204,6 +206,27 @@ def main(argv=None):
     return 0 if successful_outcome(summary) else 1
 
 
+def latency_provenance(config):
+    """Capture source identity before RoboTwin changes the working directory.
+
+    Modal's uploaded source has no .git checkout; leave revision unknown there.
+    Never infer an old run's revision from the machine analyzing it later.
+    """
+    root = Path(__file__).resolve().parent
+    revision = dirty = None
+    if (root / ".git").exists():
+        try:
+            revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                capture_output=True, text=True, check=True, timeout=5).stdout.strip()
+            status = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                capture_output=True, text=True, check=True, timeout=5).stdout
+            dirty = bool(status.strip())
+        except (OSError, subprocess.SubprocessError):
+            revision = dirty = None
+    return dict(source_commit=revision, source_dirty=dirty, config_name=config.name,
+                config_sha256=sha256(config.read_bytes()).hexdigest())
+
+
 def write_manifest(output, args, settings, *, planner_settings, memory, frozen):
     manifest = dict(schema_version=2, seed=args.seed, mode=f"{args.planner}_development",
                     planner=args.planner, development_oracle=args.development_oracle,
@@ -212,7 +235,8 @@ def write_manifest(output, args, settings, *, planner_settings, memory, frozen):
                     opus_rack_grounding=settings.perception.opus_rack_grounding,
                     completion_predicate=settings.completion_predicate,
                     memory_snapshot_sha256=memory.sha256 if memory else None,
-                    settings=settings.model_dump(mode="json"))
+                    settings=settings.model_dump(mode="json"),
+                    latency_provenance=latency_provenance(args.config))
     if frozen:
         manifest.update(mode="eval", evaluation_sha256=frozen.digest,
                         condition=frozen.settings.condition, remote_policy_weights_verified=False)

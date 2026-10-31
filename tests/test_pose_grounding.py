@@ -42,6 +42,15 @@ class PoseGroundingTests(unittest.TestCase):
             grounded_frame_from_pixels(camera(),
                 [(40., 40.), (40.2, 40.), (40., 42.)])
 
+    def test_median_cannot_hide_background_inside_selected_depth_patch(self):
+        depth = np.ones((80, 80), dtype=np.float32)
+        depth[39, 39] = 5.8
+        rgbd = camera(depth)
+        # The old foreground-gap check passes: median == nearby minimum == 1m.
+        self.assertEqual(rgbd.local_depth_gap(40., 40., search_radius=8), 0.)
+        with self.assertRaisesRegex(ValueError, "keypoint_depth_discontinuity"):
+            grounded_frame_from_pixels(rgbd, [(40., 40.), (50., 40.), (40., 50.)])
+
     def test_tcp_targets_preserve_actual_grasp_and_follow_rack_transform(self):
         tcp = np.array([.2, -.1, 1., 1., 0., 0., 0.])
         mug = np.array([.23, -.1, 1.02, 1., 0., 0., 0.])

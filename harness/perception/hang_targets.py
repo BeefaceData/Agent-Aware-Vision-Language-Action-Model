@@ -53,6 +53,8 @@ class StaticRackFrameCache:
         reference = self._reference
         if reference is None:
             raise ValueError("rack_frame_not_cached")
+        if observation.sequence < reference["sequence"]:
+            raise ValueError("rack_frame_observation_before_reference")
         camera_name = reference["camera"]
         image = observation.images.get(camera_name)
         camera = (observation.camera_frames or {}).get(camera_name)

@@ -206,7 +206,8 @@ class AnalyticSkill:
             final = env.arm_state(arm)
             if target is not None:
                 context.position_error, context.orientation_error = pose_error(final["pose"], target)
-                if context.position_error > 0.015 or context.orientation_error > 0.10:
+                if (stable_samples < SETTLE_STABLE_SAMPLES
+                        or context.position_error > 0.015 or context.orientation_error > 0.10):
                     return "target_not_reached"
             elif abs(final["gripper"]-gripper_target) > 0.01:
                 return "gripper_target_not_reached"

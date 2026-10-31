@@ -18,6 +18,8 @@ from harness.skills.schemas import (SkillCommand, SkillType,
 # grounding choice instead of ending the episode. Initial pixel + two retries.
 MAX_GROUNDING_RESELECTIONS = 2
 HANG_GROUNDING_REJECTIONS = frozenset({
+    "rack_frame_observation_before_reference", "mug_frame_camera_mismatch",
+    "x_axis_baseline_out_of_bounds", "plane_axis_baseline_out_of_bounds", "depth_unavailable",
     "rack_frame_not_cached", "rack_frame_camera_unavailable", "rack_frame_camera_changed",
     "grounding_report_stale_or_wrong_camera", "grounding_confidence_too_low",
     "grounding_mask_missing_or_misaligned", "grounding_keypoint_outside_object_mask",
@@ -335,13 +337,19 @@ class SkillOrchestrator:
                     "task_success": success, "milestone_reached": milestone, **flags})
                 recoverable_failure = any(flags.values())
                 if previous.episode_terminal or (not previous.completed and not recoverable_failure):
-                    if success:
+                    # The benchmark checker can turn positive partway through
+                    # opening. It must not erase a later guarded hang failure.
+                    failed_hang_release = (command.action == SkillType.RELEASE
+                        and command.parameters.authorization == "rack_seat_alignment"
+                        and not confirmed)
+                    completed_success = success and not failed_hang_release
+                    if completed_success:
                         outcome = "task_success"
                     elif previous.completed and executor.calls >= executor.budget.max_skill_calls:
                         outcome = "skill_call_budget_exhausted"
                     else:
                         outcome = failure or previous.stop_reason
-                    phase = "COMPLETE" if success else "FAILED"
+                    phase = "COMPLETE" if completed_success else "FAILED"
                     break
                 if recoverable_failure:
                     # Known motion/contact/perception feedback returns fresh state

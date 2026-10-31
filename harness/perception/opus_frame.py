@@ -4,6 +4,7 @@ from hashlib import sha256
 
 import numpy as np
 
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.prompts import read_prompt
 from .pose_grounding import grounded_frame_from_pixels
 from .vision_request import (bounded_text, image_block, png_bytes, request_tool_input,
@@ -20,8 +21,7 @@ class OpusObjectFrameGrounder:
 
     def __init__(self, client, model, *, target, camera):
         require_messages_client(client, model)
-        if target not in self.PROMPTS or camera not in (
-                "head_camera", "left_camera", "right_camera"):
+        if target not in self.PROMPTS or camera not in (*CAMERAS, *PERCEPTION_CAMERAS):
             raise ValueError("unsupported_frame_grounding_target")
         self.client, self.model = client, model
         self.target, self.camera = target, camera

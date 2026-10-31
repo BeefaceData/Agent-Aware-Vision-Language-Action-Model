@@ -1,6 +1,7 @@
 """CPU tests for episode rack-frame caching and grasp-aware hang targets."""
 
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import numpy as np
@@ -75,6 +76,26 @@ class HangTargetTests(unittest.TestCase):
         np.testing.assert_allclose(self.cache.resolve(later),
                                    self.cache.resolve(self.obs))
         self.assertEqual(self.cache.metadata()["observation_sequence"], 0)
+
+    def test_invalid_seat_does_not_leave_partially_prepared_approach(self):
+        anchors = AnchorRegistry()
+        tcp = (0., 0., 1., 1., 0., 0., 0.)
+        near = (0.1, 0., 1., 1., 0., 0., 0.)
+        far = (0.8, 0., 1., 1., 0., 0., 0.)
+        with patch("harness.perception.hang_targets.tcp_targets_for_mug_alignment",
+                   return_value=(near, far)):
+            with self.assertRaisesRegex(ValueError, "hang_target_out_of_reach"):
+                bind_hang_targets(self.cache, self.obs, report("mug_handle", 0, MUG_POINTS),
+                                  tcp_pose=tcp, anchors=anchors, arm="right")
+        for name in ("rack_approach", "rack_seat"):
+            with self.assertRaisesRegex(ValueError, "anchor_missing_or_stale"):
+                anchors.resolve(name, "right", self.obs)
+
+    def test_explicit_cache_clear_requires_new_episode_grounding(self):
+        self.cache.clear()
+        self.assertFalse(self.cache.metadata()["available"])
+        with self.assertRaisesRegex(ValueError, "rack_frame_not_cached"):
+            self.cache.resolve(make_observation())
 
     def test_camera_calibration_change_invalidates_episode_cache(self):
         with self.assertRaisesRegex(ValueError, "rack_frame_camera_changed"):

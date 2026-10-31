@@ -53,6 +53,8 @@ class StaticRackFrameCache:
         reference = self._reference
         if reference is None:
             raise ValueError("rack_frame_not_cached")
+        if observation.sequence < reference["sequence"]:
+            raise ValueError("rack_frame_observation_before_reference")
         camera_name = reference["camera"]
         image = observation.images.get(camera_name)
         camera = (observation.camera_frames or {}).get(camera_name)
@@ -102,12 +104,15 @@ def bind_hang_targets(cache, observation, mug_report, *, tcp_pose,
     prehang_tcp, seat_tcp = tcp_targets_for_mug_alignment(
         measured_tcp, mug_pose, rack_pose,
         approach_offset_m=approach_offset_m)
+    prepared = {}
     for name, target in (("rack_approach", prehang_tcp), ("rack_seat", seat_tcp)):
         target = pose7(target)
         distance = float(np.linalg.norm(target[:3] - measured_tcp[:3]))
         if distance > max_target_distance_m:
             raise ValueError("hang_target_out_of_reach")
-        anchors.bind(name, arm, Anchor(tuple(target), observation.sequence,
-                                       source="perception"))
+        prepared[name] = Anchor(tuple(target), observation.sequence, source="perception")
+    # Reject the complete target pair before publishing either anchor.
+    for name, anchor in prepared.items():
+        anchors.bind(name, arm, anchor)
     return {"rack_approach": anchors.resolve("rack_approach", arm, observation),
             "rack_seat": anchors.resolve("rack_seat", arm, observation)}

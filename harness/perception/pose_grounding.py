@@ -89,6 +89,15 @@ def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
     for u, v in pixels:
         if camera.local_depth_gap(u, v, search_radius=8) > max_depth_gap_m:
             raise ValueError("keypoint_depth_discontinuity")
+        # Unprojection uses this 3x3 median. A foreground median alone can hide
+        # background pixels at a thin handle/peg edge and fabricate continuity.
+        x, y = map(int, np.rint((u, v)))
+        height, width = camera.depth_m.shape
+        patch = camera.depth_m[max(0, y-1):min(height, y+2),
+                               max(0, x-1):min(width, x+2)]
+        valid = patch[(patch > 0) & np.isfinite(patch)]
+        if valid.size and float(valid.max() - valid.min()) > max_depth_gap_m:
+            raise ValueError("keypoint_depth_discontinuity")
         points.append(np.asarray(camera.unproject(u, v, radius=1), dtype=float))
     origin, x_point, plane_point = points
     x_axis = x_point - origin

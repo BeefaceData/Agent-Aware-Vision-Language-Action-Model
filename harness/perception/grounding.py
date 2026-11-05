@@ -14,6 +14,7 @@ import numpy as np
 
 from .anchors import Anchor, AnchorRegistry
 from .geometry import pose7
+from .object_pose import MUG, UPRIGHT_MAX_TILT_DEG, ObjectPose, masked_surface, object_pose
 from .rgbd import RGBDCamera, calibration_sha256
 from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.predicates.base import PredicateResult
@@ -101,6 +102,8 @@ class GroundingResult:
     mug_lift_seen: bool = False
     mug_staged_on_table: bool | None = None
     mug_staged_reason: str = "not_provable_from_semantic_rgbd_alone"
+    mug_pose: ObjectPose | None = None
+    mug_pose_reason: str = "mug_geometry_unavailable"
 
 
 class RGBDPerceptionProvider:
@@ -487,6 +490,8 @@ class RGBDPerceptionProvider:
                 status[label] = next((reason for reason in priority if reason in reasons), reasons[0])
 
         mug = objects.get("mug")
+        mug_pose, mug_pose_reason = (None, "mug_geometry_unavailable") if mug is None else \
+            self._mug_pose(batches, frames, objects.get("table"), sequence)
         previous_mug_height = self._previous_mug_height
         if mug is not None:
             self._previous_mug_height = mug.position[2]
@@ -497,7 +502,7 @@ class RGBDPerceptionProvider:
                 # support distinguish a completed transfer from the mug's
                 # initial resting pose without consulting simulator state.
                 self._mug_lift_seen = True
-        release_ready, release_reason = self._table_support_evidence(objects)
+        release_ready, release_reason = self._table_support_evidence(objects, mug_pose=mug_pose)
         # A few mug silhouette points can overlap the table mask while the
         # mug is still being carried. A returned mug must also be at roughly
         # its episode-start table height before support can authorize release.
@@ -519,7 +524,7 @@ class RGBDPerceptionProvider:
         else:
             staged, staged_reason = release_ready, release_reason
         result = GroundingResult(sequence, objects, status, release_ready, release_reason,
-                                 self._mug_lift_seen, staged, staged_reason)
+                                 self._mug_lift_seen, staged, staged_reason, mug_pose, mug_pose_reason)
         self._last_result = result
         return result
 
@@ -773,6 +778,17 @@ class RGBDPerceptionProvider:
             return None, "ambiguous_instances"
         return candidates[0], "grounded"
 
+    def _mug_pose(self, batches, frames, table, sequence):
+        """Fit the mug's body in every camera that has an unambiguous mug mask."""
+        surfaces = {}
+        table_height = None if table is None else float(np.median(np.asarray(table.surface_points)[:, 2]))
+        for batch in batches:
+            selected, _reason = self._select(batch.detections, "mug")
+            if selected is not None and selected.mask.shape == frames[batch.camera].depth_m.shape:
+                surfaces[batch.camera] = masked_surface(frames[batch.camera], selected.mask,
+                                                        table_height_m=table_height)
+        return object_pose(surfaces, MUG, table_height_m=table_height, observation_sequence=sequence)
+
     def _estimate(self, detection, frame, sequence, camera, image):
         ys, xs = np.nonzero(detection.mask)
         if not len(xs):
@@ -825,7 +841,7 @@ class RGBDPerceptionProvider:
             boundary_points, normalized_bbox, median_rgb, visible_extent, median_normal_z), "grounded"
 
     @staticmethod
-    def _table_support_evidence(objects, *, neighborhood_m=0.14, tolerance_m=0.025,
+    def _table_support_evidence(objects, *, mug_pose=None, neighborhood_m=0.14, tolerance_m=0.025,
                                 min_local_points=3, min_mug_points=3, upright_max_normal_z=0.25,
                                 support_view_cameras=("head_camera", *PERCEPTION_CAMERAS)):
         """Conservatively detect an upright mug resting on the locally visible tabletop.
@@ -842,6 +858,12 @@ class RGBDPerceptionProvider:
         toppled mug can see only its flat base, which faces sideways too, so
         support is judged only from the elevated fixed views: across two
         five-seed captures every wrist-view release_ready=true (22) was wrong.
+
+        The surface direction cannot tell a toppled mug seen end-on (its flat
+        base faces sideways too) from an upright one, so a fitted body axis,
+        when there is one, must also be upright; either test can veto. Any
+        fitted axis lying down vetoes; only a trusted one can stand in for the
+        surface test when that had too few pixels.
         """
         mug, table = objects.get("mug"), objects.get("table")
         if mug is None or table is None:
@@ -866,8 +888,10 @@ class RGBDPerceptionProvider:
         support_fraction = float(supported.mean())
         if int(supported.sum()) < min_mug_points or support_fraction < 0.05:
             return None, "mug_table_support_not_established"
-        if mug.median_normal_z is None:
-            return None, "mug_orientation_unavailable"
-        if mug.median_normal_z > upright_max_normal_z:
+        if mug_pose is not None and mug_pose.tilt_deg() > UPRIGHT_MAX_TILT_DEG:
+            return False, "mug_axis_tilted_not_upright"
+        if mug.median_normal_z is not None and mug.median_normal_z > upright_max_normal_z:
             return False, "mug_surface_faces_up_not_upright"
+        if mug.median_normal_z is None and (mug_pose is None or not mug_pose.trusted):
+            return None, "mug_orientation_unavailable"
         return True, "mug_silhouette_meets_local_table"

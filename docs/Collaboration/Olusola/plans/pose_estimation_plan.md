@@ -1,6 +1,59 @@
 # Plan: object poses from the depth cameras
 
-Status: **plan, not implemented** (revised 2026-11-05; first draft 2026-10-30).
+Status: **steps 1-5 implemented** (2026-11-05), not yet committed. Plan revised 2026-11-05; first
+draft 2026-10-30.
+
+## Progress (2026-11-05)
+
+Done: the evaluator now scores mug poses against the label (step 1), and
+`harness/perception/object_pose.py` adds the shared point step and the cylinder fit
+(steps 2-3). Fits are combined across cameras with a quality gate (step 4), and
+`release_ready` is vetoed by the fitted axis (step 5).
+
+Tests: `tests/test_object_pose.py` (synthetic depth), plus additions to the grounding and
+scoring tests.
+
+Departures from the plan, found while building it:
+
+- **The label origin is not the body's base centre.** The mesh origin is the centre of a box
+  that includes the handle, so it sits 1.6-2.6 cm off the body axis. The evaluator identifies
+  the episode's mug model from its handle point and moves the truth onto the axis
+  (`MUG_MODELS`). New captures record `mug.model_id`.
+- **Pixel step for normals.** Depth is stored in whole millimetres, so normals use a 2-pixel
+  step, and the depth-jump limit scales with that step.
+- **Whole-cylinder RANSAC.** Each hypothesis fixes axis, centre and radius, and points must lie
+  on the surface. Scoring by normals alone let a horizontal axis explain an upright mug's
+  front wall and rim when seen from above.
+- **Table points removed.** This also removes a shadow that SAM 3 had masked as the mug.
+- **Table height comes from the current table mask**, not `StaticTablePlaneCache`.
+- **Quality is the share of points the closed cylinder explains** (wall plus flat ends).
+  - A pose below 0.60 is kept but marked `trusted=False`.
+  - An untrusted pose can veto a release ("lying down"); it cannot confirm "upright" or place
+    an anchor.
+- **Gripper point removal is not implemented.** The measured TCP sits about 0.2 m behind the
+  fingers, so a box around it would remove the mug. Held mugs rely on the quality gate.
+- **`heading`, `key_points` and `size_m` come with step 6.** `ObjectPose` currently has
+  position, axis, `base_known`, radius, quality and `trusted`.
+
+Results (all frames; median errors):
+
+| Run | Posed | Axis error | Base error | Wrong upright/toppled calls | Confident wrong | `release_ready` precision |
+|---|---|---|---|---|---|---|
+| seeds 0-4, with perception camera | 159/216 | 1.1 deg | 2.6 mm (max 2.3 cm) | 0 | 0 | 1.00 (unchanged) |
+| seeds 0-4, without | 98/216 | 1.5 deg | 2.5 mm | 0 | 0 | 1.00 (unchanged) |
+| seeds 5-9, with perception camera | 188/267 | 0.7 deg | 2.8 mm (max 1.8 cm) | 0 | 0 | 0.81 -> 0.95 (false trues 25 -> 6) |
+| seeds 5-9, without | 157/267 | 0.7 deg | 2.7 mm | 0 | 0 | 0.80 -> 0.94 |
+
+Today's median-of-points position, scored against the same corrected truth for mugs on the
+table (seeds 0-4), is 6.1 cm off: 2.1 cm in xy and 5.7 cm in height.
+
+Caveat: seed 6 was inspected while the untrusted-veto rule was designed, so seeds 5-9 are
+no longer a clean test. Confirm on fresh seeds 10-14 (step 8).
+
+The remaining 6 false trues are all seed 6's end-on mug:
+
+- 4 frames have an untrusted fit that does not read as lying down;
+- 2 frames have a radius out of range, so there is no fit at all.
 Read with `docs/Collaboration/Olusola/perception_guide.pdf` (how perception works today) and
 `docs/Collaboration/Olusola/perception_for_retries.md` (what predicates exist).
 

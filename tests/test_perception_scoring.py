@@ -6,18 +6,34 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 
+import numpy as np
+
 from development.replays.perception_evaluation import (
-    EVALUATED_PREDICATES, detector_phase, evaluate_capture, summarize, truth_predicates)
+    EVALUATED_PREDICATES, MUG_MODELS, detector_phase, evaluate_capture, mug_model_id, pose_errors, summarize,
+    true_mug_base, truth_predicates)
 from harness.environment.base import Observation
+from harness.perception.object_pose import ObjectPose
 from harness.perception.observations import ObservationStore
 from tests.helpers import images
+
+
+# hanging_mug.py spawns mugs turned 90 degrees about x, so the model's +y axis
+# points up and its +z axis (away from the handle) points along world -y.
+SPAWN_QUATERNION = [0.7071068, 0.7071068, 0.0, 0.0]
+
+
+def mug_label(model, origin=(0.1, 0.2, 0.75), quaternion=SPAWN_QUATERNION):
+    handle, _body_offset = MUG_MODELS[model]
+    # Model frame -> world for the spawn rotation: (x, y, z) -> (x, -z, y).
+    point = np.add(origin, (handle[0], -handle[2], handle[1]))
+    return {"pose": [*origin, *quaternion], "functional_point": [*point, 1.0, 0.0, 0.0, 0.0]}
 
 
 def label(state="resting", *, tilt=0.0, height=0.0, lifted_before=False, left=False, right=False,
           table=True, sequence=0):
     return {"sequence": sequence, "policy_actions": sequence, "state": state, "lifted_before": lifted_before,
             "native_success": False,
-            "mug": {"pose": [0.1, 0.2, 0.75, 1, 0, 0, 0], "tilt_deg": tilt, "height_change_m": height},
+            "mug": {**mug_label(0), "tilt_deg": tilt, "height_change_m": height},
             "contacts": {"left_gripper": left, "right_gripper": right, "table": table, "rack": False},
             "observation": f"observations/observation_{sequence:08d}.npz"}
 
@@ -54,6 +70,28 @@ class TruthTests(unittest.TestCase):
         self.assertTrue(truth_predicates(back_on_table, right_lifted_before=True)["right_mug_lifted"])
 
 
+class MugTruthTests(unittest.TestCase):
+    def test_the_mug_model_is_recognised_from_its_handle_point(self):
+        self.assertEqual(mug_model_id({"mug": mug_label(4)}), 4)
+
+    def test_a_recorded_model_id_is_used_as_is(self):
+        self.assertEqual(mug_model_id({"mug": {**mug_label(4), "model_id": 7}}), 7)
+
+    def test_the_true_base_is_on_the_body_axis_not_the_label_origin(self):
+        base = true_mug_base({"mug": mug_label(0)})
+
+        np.testing.assert_allclose(base, (0.1, 0.2 - MUG_MODELS[0][1], 0.75), atol=1e-6)
+
+    def test_an_axis_without_a_known_base_is_compared_as_a_line(self):
+        upside_down = ObjectPose("mug", (0.1, 0.2, 0.8), (0.0, 0.0, -1.0), False, 0.05, 0.9, True,
+                                 "wall_fit_1_camera", ("head_camera",), 0)
+
+        errors = pose_errors(upside_down, {"mug": mug_label(0)})
+
+        self.assertAlmostEqual(errors["axis_error_deg"], 0.0, places=3)
+        self.assertIsNone(errors["base_error_m"])
+
+
 class PhaseTests(unittest.TestCase):
     def test_phase_follows_the_runtime_milestones(self):
         self.assertEqual(detector_phase(label()), "grasp")
@@ -61,10 +99,13 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(detector_phase(label("held_right", right=True, lifted_before=True)), "hang")
 
 
-def record(state, *, grounded=True, camera="head_camera", error=0.04, answers=None, truths=None):
+def record(state, *, grounded=True, camera="head_camera", error=0.04, answers=None, truths=None, pose=None):
     answers, truths = answers or {}, truths or {}
+    pose = {"pose_reason": "too_few_surface_points", "pose_tilt_deg": None, "true_tilt_deg": 0.0,
+            "axis_error_deg": None, "base_error_m": None, "base_xy_error_m": None, "base_z_error_m": None,
+            **(pose or {})}
     return {"capture": "seed_0", "state": state, "mug_status": "grounded" if grounded else "not_detected",
-            "mug_camera": camera if grounded else None,
+            "mug_camera": camera if grounded else None, "pose": pose,
             "mug_xy_error_m": error if grounded else None, "mug_z_offset_m": 0.0 if grounded else None,
             "predicates": {name: {"public": answers.get(name), "truth": truths.get(name, False), "reason": "r"}
                            for name in EVALUATED_PREDICATES}}
@@ -93,6 +134,21 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summarize(rows)["toppled_reported_as_supported"],
                          {"toppled_frames": 1, "reported_supported": 1})
 
+    def test_pose_summary_counts_wrong_upright_calls_and_confident_wrong_poses(self):
+        rows = [record("staged", pose={"pose_reason": "wall_fit_1_camera", "pose_tilt_deg": 2.0,
+                                       "axis_error_deg": 2.0, "base_error_m": 0.004, "base_xy_error_m": 0.004,
+                                       "base_z_error_m": 0.0}),
+                record("toppled", pose={"pose_reason": "wall_fit_1_camera", "pose_tilt_deg": 10.0,
+                                        "true_tilt_deg": 88.0, "axis_error_deg": 78.0}),
+                record("held_right")]
+
+        pose = summarize(rows)["pose_overall"]
+
+        self.assertEqual((pose["posed"], pose["coverage"], pose["with_base"]), (2, 0.667, 1))
+        self.assertEqual((pose["toppled_called_upright"], pose["upright_called_toppled"]), (1, 0))
+        self.assertEqual(pose["confident_wrong"], 1)
+        self.assertEqual(pose["unknown_reasons"], {"too_few_surface_points": 1})
+
     def test_rates_are_none_without_cases(self):
         scores = summarize([record("resting")])["predicates"]["right_mug_lifted"]
 
@@ -111,8 +167,10 @@ class FakeProvider:
 
     def observe(self, observation):
         self.seen.append(observation)
-        mug = SimpleNamespace(position=(0.13, 0.24, 0.80), camera="head_camera")
-        return SimpleNamespace(objects={"mug": mug}, status={"mug": "grounded"})
+        base = true_mug_base({"mug": mug_label(0)})
+        mug = SimpleNamespace(position=tuple(base + (0.03, 0.04, 0.05)), camera="head_camera")
+        return SimpleNamespace(objects={"mug": mug}, status={"mug": "grounded"}, mug_pose=None,
+                               mug_pose_reason="fake")
 
     def predicate_evidence(self, name, observation):
         return {"name": name, "value": None, "reason": "fake"}

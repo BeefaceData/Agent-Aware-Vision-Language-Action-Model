@@ -10,6 +10,7 @@ from harness.perception.anchors import AnchorRegistry
 from harness.perception.grounding import (
     Detection, DetectionBatch, GroundedObject, RGBDPerceptionProvider,
 )
+from harness.perception.object_pose import ObjectPose
 from harness.perception.rgbd import RGBDCamera
 from harness.skills.schemas import SkillCommand
 from tests.helpers import images
@@ -425,6 +426,54 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertEqual(reason, "table_support_not_judged_from_wrist_view")
 
+    def test_a_fitted_axis_lying_down_vetoes_release_even_when_the_surface_faces_sideways(self):
+        # Held-out seed 6: a toppled mug seen end-on shows its flat base, |z| 0.09 like an upright wall.
+        end_on = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=0.09)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+        lying = ObjectPose("mug", (0., 0., 1.05), (1., 0., 0.), False, .045, .9, True, "wall_fit_1_camera",
+                           ("head_camera",), 2)
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": end_on, "table": table},
+                                                                       mug_pose=lying)
+
+        self.assertIs(value, False)
+        self.assertEqual(reason, "mug_axis_tilted_not_upright")
+
+    def test_even_an_untrusted_axis_lying_down_vetoes_release(self):
+        end_on = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=0.09)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+        lying = ObjectPose("mug", (0., 0., 1.05), (1., 0., 0.), False, .045, .5, False, "cylinder_fit_inliers_low",
+                           ("head_camera",), 2)
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": end_on, "table": table},
+                                                                       mug_pose=lying)
+
+        self.assertIs(value, False)
+        self.assertEqual(reason, "mug_axis_tilted_not_upright")
+
+    def test_an_untrusted_upright_axis_does_not_replace_the_surface_test(self):
+        sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+        upright = ObjectPose("mug", (0., 0., 1.0), (0., 0., 1.), True, .045, .5, False, "cylinder_fit_inliers_low",
+                             ("head_camera",), 2)
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": sliver, "table": table},
+                                                                       mug_pose=upright)
+
+        self.assertIsNone(value)
+        self.assertEqual(reason, "mug_orientation_unavailable")
+
+    def test_an_upright_fitted_axis_judges_orientation_when_normals_were_too_few(self):
+        sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+        upright = ObjectPose("mug", (0., 0., 1.0), (0., 0., 1.), True, .045, .9, True, "wall_fit_1_camera",
+                             ("head_camera",), 2)
+
+        value, _reason = RGBDPerceptionProvider._table_support_evidence({"mug": sliver, "table": table},
+                                                                        mug_pose=upright)
+
+        self.assertIs(value, True)
+
     def test_table_support_stays_unknown_when_mug_orientation_was_not_measured(self):
         sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
         table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
@@ -584,7 +633,7 @@ class PerceptionGroundingTests(unittest.TestCase):
             Detection("mug", .99, mask()),)))
         provider = RGBDPerceptionProvider(detector)
         support = {"value": True}
-        provider._table_support_evidence = lambda _objects: (
+        provider._table_support_evidence = lambda _objects, **_options: (
             support["value"], "mug_silhouette_meets_local_table"
             if support["value"] is True else "mug_table_support_not_established")
 
@@ -621,7 +670,7 @@ class PerceptionGroundingTests(unittest.TestCase):
         detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
             Detection("mug", .99, mask()),)))
         provider = RGBDPerceptionProvider(detector)
-        provider._table_support_evidence = lambda _objects: (True, "mug_silhouette_meets_local_table")
+        provider._table_support_evidence = lambda _objects, **_options: (True, "mug_silhouette_meets_local_table")
 
         def release_ready_at(sequence, depth_m):
             obs = observation(sequence, np.full((2, 3), depth_m, dtype=np.float32))

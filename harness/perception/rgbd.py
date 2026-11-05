@@ -116,13 +116,24 @@ class RGBDCamera:
         """Return |z| of the world surface normal at each usable pixel of ``mask``.
 
         0 means the surface faces sideways, 1 that it faces straight up or down.
-        Normals come from central depth differences, so pixels within
-        ``erode_px`` of the mask edge, at the image border, or beside a depth
-        jump (an occluding edge) are left out.
+        """
+        _points, normals = self.surface_points_and_normals(
+            mask, erode_px=erode_px, max_depth_step_m=max_depth_step_m)
+        return np.abs(normals[:, 2])
+
+    def surface_points_and_normals(self, mask, *, erode_px=2, max_depth_step_m=0.01, step_px=1):
+        """Return world points and unit world normals (facing the camera) inside ``mask``.
+
+        Normals come from central depth differences ``step_px`` pixels apart, so
+        pixels within ``erode_px`` of the mask edge, near the image border, or
+        beside a depth jump (an occluding edge) are left out. RoboTwin depth is
+        stored in whole millimetres; a wider step averages that rounding out.
         """
         mask = np.asarray(mask, dtype=bool)
         if mask.shape != self.depth_m.shape:
             raise ValueError("mask_shape_mismatch")
+        if type(step_px) is not int or not 1 <= step_px <= 8:
+            raise ValueError("invalid_normal_step")
         inner = mask.copy()
         for _ in range(erode_px):
             eroded = inner.copy()
@@ -136,17 +147,26 @@ class RGBDCamera:
         u, v = np.meshgrid(np.arange(width), np.arange(height))
         pixels = np.stack((u, v, np.ones_like(u)), axis=-1).astype(np.float64)
         camera_xyz = (pixels @ np.linalg.inv(self.intrinsic).T) * depth[..., None]
-        along_u = camera_xyz[1:-1, 2:] - camera_xyz[1:-1, :-2]
-        along_v = camera_xyz[2:, 1:-1] - camera_xyz[:-2, 1:-1]
-        # Only the rotation matters for a direction; world_to_camera is rigid.
-        normals = np.cross(along_u, along_v) @ self.world_to_camera[:3, :3]
+        s = step_px
+        centre = (slice(s, -s), slice(s, -s))
+        along_u = camera_xyz[s:-s, 2*s:] - camera_xyz[s:-s, :-2*s]
+        along_v = camera_xyz[2*s:, s:-s] - camera_xyz[:-2*s, s:-s]
+        normals = np.cross(along_u, along_v)
+        # Point every normal back towards the camera, so the sign is consistent.
+        normals *= np.where(np.sum(normals * camera_xyz[centre], axis=-1) > 0, -1.0, 1.0)[..., None]
         length = np.linalg.norm(normals, axis=-1)
-        neighbours = (depth[1:-1, 2:], depth[1:-1, :-2], depth[2:, 1:-1], depth[:-2, 1:-1])
-        usable = (inner[1:-1, 1:-1] & (depth[1:-1, 1:-1] > 0) & (length > 1e-12)
+        neighbours = (depth[s:-s, 2*s:], depth[s:-s, :-2*s], depth[2*s:, s:-s], depth[:-2*s, s:-s])
+        # The limit is per pixel of separation, so a wider step does not reject sloped surfaces.
+        max_step = max_depth_step_m * s
+        usable = (inner[centre] & (depth[centre] > 0) & (length > 1e-12)
                   & np.all([value > 0 for value in neighbours], axis=0)
-                  & (np.abs(neighbours[0] - neighbours[1]) <= max_depth_step_m)
-                  & (np.abs(neighbours[2] - neighbours[3]) <= max_depth_step_m))
-        return np.abs(normals[usable, 2] / length[usable])
+                  & (np.abs(neighbours[0] - neighbours[1]) <= max_step)
+                  & (np.abs(neighbours[2] - neighbours[3]) <= max_step))
+        rotation, translation = self.world_to_camera[:3, :3], self.world_to_camera[:3, 3]
+        # Row-vector form of R^T (x - t); a direction only needs the rotation.
+        points = (camera_xyz[centre][usable] - translation) @ rotation
+        normals = (normals[usable] / length[usable][:, None]) @ rotation
+        return points, normals
 
 
 def intrinsic_sha256(camera) -> str:

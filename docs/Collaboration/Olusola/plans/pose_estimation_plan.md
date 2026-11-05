@@ -1,7 +1,8 @@
 # Plan: object poses from the depth cameras
 
-Status: **steps 1-5 implemented** (2026-11-05), not yet committed. Plan revised 2026-11-05; first
-draft 2026-10-30.
+Status: **steps 1-7 implemented** (2026-11-05). Steps 1-5 committed in `b2658f1`; steps 6-7
+not yet committed. Next: step 8 (fresh seeds 10-14, needs GPU) and step 9 (wiring into anchors).
+Plan revised 2026-11-05; first draft 2026-10-30.
 
 ## Progress (2026-11-05)
 
@@ -32,8 +33,8 @@ Departures from the plan, found while building it:
     an anchor.
 - **Gripper point removal is not implemented.** The measured TCP sits about 0.2 m behind the
   fingers, so a box around it would remove the mug. Held mugs rely on the quality gate.
-- **`heading`, `key_points` and `size_m` come with step 6.** `ObjectPose` currently has
-  position, axis, `base_known`, radius, quality and `trusted`.
+- **`size_m` was dropped.** `ObjectPose` reports `radius_m` (None for the rack) and no height:
+  the visible length of a mug is rarely its full height.
 
 Results (all frames; median errors):
 
@@ -54,6 +55,53 @@ The remaining 6 false trues are all seed 6's end-on mug:
 
 - 4 frames have an untrusted fit that does not read as lying down;
 - 2 frames have a radius out of range, so there is no fit at all.
+
+### Steps 6-7 (2026-11-05)
+
+**Step 6: handle heading and the base end of a mug that is not standing on the table.**
+
+- **Heading.** Points 0.8-3.5 cm outside the fitted radius, all on one side of the axis, are
+  the handle. Their mean direction is `heading`; their median point is
+  `key_points["handle"]`.
+- **Base end.** Two cues, which must agree when both answer:
+  - *Inner wall.* Wall points whose normals face the axis are the inside of the cup, seen
+    through the opening, so the opening is the end nearer the camera. On seeds 0-4 this held
+    in all 221 views where at least 10% of the wall faced inwards.
+  - *Flat end.* Flat surfaces facing along the axis (the outside of the base, or the floor
+    inside the cup) cluster at the base end.
+- `Surface` now carries the camera position (`viewpoint`), which the inner-wall cue needs.
+- New evaluator metrics: `heading_error_deg` (truth is the label's handle point around the
+  body axis) and `base_end_wrong`.
+
+**Step 7: rack pole and peg from depth.**
+
+- `pole_with_peg_pose` with `PoleSpec`/`RACK` takes the rack mask's points above the base
+  plate and fits two robust lines:
+  1. a RANSAC line for the pole (must be within 15 deg of vertical);
+  2. a RANSAC line for the points clear of the pole: the peg.
+- The far end of the peg line is `key_points["peg_tip"]`; the pole's foot on the table is
+  `position`; `heading` points along the peg.
+- Cameras with a complete fit must agree on the tip within 2 cm.
+- The provider fits the rack until the first success, then keeps that pose for the episode
+  (`GroundingResult.rack_pose`).
+- The right wrist camera sees the whole rack at reset.
+- Not done: comparing against the Opus keypoint frame. Both are scored against the label
+  instead, and the hang targets still use Opus (step 9).
+
+Results (with the perception camera):
+
+| | Seeds 0-4 | Seeds 5-9 |
+|---|---|---|
+| Base known: all posed frames / toppled frames | 146/159 / 25 of 28 | 177/188 / 28 of 28 |
+| Base error, median (max) | 4.5 mm (2.3 cm) | 5.6 mm (1.8 cm) |
+| Base at the wrong end | 0 | 0 |
+| Frames with a heading; median error (max) | 66; 2.8 deg (11.9) | 117; 2.8 deg (5.5) |
+| Rack pose: episodes; peg tip error median (max) | 5 of 5; 2.9 mm (1.25 cm) | 5 of 5; 4.1 mm (4.3 mm) |
+| Confident wrong poses | 0 | 0 |
+| Predicates | unchanged | unchanged |
+
+Seeds 5-9 were not looked at while building steps 6-7. Toppled mugs rarely get a heading:
+their handle tends to lie close to the table, and the points near the table are removed.
 Read with `docs/Collaboration/Olusola/guides/perception/perception_guide.pdf` (how perception works today) and
 `docs/Collaboration/Olusola/handover/perception_for_retries.md` (what predicates exist).
 

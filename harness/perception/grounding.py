@@ -14,7 +14,8 @@ import numpy as np
 
 from .anchors import Anchor, AnchorRegistry
 from .geometry import pose7
-from .object_pose import MUG, UPRIGHT_MAX_TILT_DEG, ObjectPose, masked_surface, object_pose
+from .object_pose import (MUG, RACK, UPRIGHT_MAX_TILT_DEG, ObjectPose, masked_surface, object_pose,
+                          pole_with_peg_pose)
 from .rgbd import RGBDCamera, calibration_sha256
 from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.predicates.base import PredicateResult
@@ -104,6 +105,9 @@ class GroundingResult:
     mug_staged_reason: str = "not_provable_from_semantic_rgbd_alone"
     mug_pose: ObjectPose | None = None
     mug_pose_reason: str = "mug_geometry_unavailable"
+    # The rack is static: its first complete fit is kept for the episode.
+    rack_pose: ObjectPose | None = None
+    rack_pose_reason: str = "rack_geometry_unavailable"
 
 
 class RGBDPerceptionProvider:
@@ -180,6 +184,7 @@ class RGBDPerceptionProvider:
         self._static_rack_frame_cache = None
         self._mug_lift_tracker = None
         self._mug_lift_tracker_enabled = False
+        self._rack_pose = None
         self._last_batches = ()
 
     def set_mug_lift_evidence_tracker(self, tracker):
@@ -490,8 +495,12 @@ class RGBDPerceptionProvider:
                 status[label] = next((reason for reason in priority if reason in reasons), reasons[0])
 
         mug = objects.get("mug")
+        table_height = self._table_height(objects.get("table"))
         mug_pose, mug_pose_reason = (None, "mug_geometry_unavailable") if mug is None else \
-            self._mug_pose(batches, frames, objects.get("table"), sequence)
+            self._mug_pose(batches, frames, table_height, sequence)
+        rack_pose_reason = "fitted_earlier_this_episode"
+        if self._rack_pose is None:
+            self._rack_pose, rack_pose_reason = self._fit_rack(batches, frames, table_height, sequence)
         previous_mug_height = self._previous_mug_height
         if mug is not None:
             self._previous_mug_height = mug.position[2]
@@ -524,7 +533,8 @@ class RGBDPerceptionProvider:
         else:
             staged, staged_reason = release_ready, release_reason
         result = GroundingResult(sequence, objects, status, release_ready, release_reason,
-                                 self._mug_lift_seen, staged, staged_reason, mug_pose, mug_pose_reason)
+                                 self._mug_lift_seen, staged, staged_reason, mug_pose, mug_pose_reason,
+                                 self._rack_pose, rack_pose_reason)
         self._last_result = result
         return result
 
@@ -778,16 +788,30 @@ class RGBDPerceptionProvider:
             return None, "ambiguous_instances"
         return candidates[0], "grounded"
 
-    def _mug_pose(self, batches, frames, table, sequence):
-        """Fit the mug's body in every camera that has an unambiguous mug mask."""
+    @staticmethod
+    def _table_height(table):
+        return None if table is None else float(np.median(np.asarray(table.surface_points)[:, 2]))
+
+    def _surfaces(self, label, batches, frames, table_height):
+        """Each camera's surface of ``label``, from its unambiguous, confident mask."""
         surfaces = {}
-        table_height = None if table is None else float(np.median(np.asarray(table.surface_points)[:, 2]))
         for batch in batches:
-            selected, _reason = self._select(batch.detections, "mug")
+            selected, _reason = self._select(batch.detections, label)
             if selected is not None and selected.mask.shape == frames[batch.camera].depth_m.shape:
                 surfaces[batch.camera] = masked_surface(frames[batch.camera], selected.mask,
                                                         table_height_m=table_height)
-        return object_pose(surfaces, MUG, table_height_m=table_height, observation_sequence=sequence)
+        return surfaces
+
+    def _mug_pose(self, batches, frames, table_height, sequence):
+        """Fit the mug's body in every camera that has an unambiguous mug mask."""
+        return object_pose(self._surfaces("mug", batches, frames, table_height), MUG,
+                           table_height_m=table_height, observation_sequence=sequence)
+
+    def _fit_rack(self, batches, frames, table_height, sequence):
+        # The rack's base plate is part of the mask, so table points stay in;
+        # the pole fit drops the plate itself.
+        return pole_with_peg_pose(self._surfaces("rack", batches, frames, None), RACK,
+                                  table_height_m=table_height, observation_sequence=sequence)
 
     def _estimate(self, detection, frame, sequence, camera, image):
         ys, xs = np.nonzero(detection.mask)

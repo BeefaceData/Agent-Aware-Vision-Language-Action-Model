@@ -217,9 +217,9 @@ def fit_on_frame(ax, seed, sequence, camera, title):
     frame = frame_obs.camera_frames[camera]
     mask = best_mask(seed, sequence, camera, "mug")
     table_z = table_height(seed, sequence, frame_obs)
-    points, normals = masked_surface(frame, mask, table_height_m=table_z)
-    fit, _reason = fit_cylinder(points, normals, MUG)
-    pose, reason = object_pose({camera: (points, normals)}, MUG, table_height_m=table_z,
+    surface = masked_surface(frame, mask, table_height_m=table_z)
+    fit, _reason = fit_cylinder(surface.points, surface.normals, MUG)
+    pose, reason = object_pose({camera: surface}, MUG, table_height_m=table_z,
                                observation_sequence=sequence)
     ax.imshow(overlay(frame_obs.images[camera], mask, ORANGE, 0.35))
     color = GREEN if pose.trusted else ORANGE
@@ -271,15 +271,16 @@ def quality_gap():
                 mask = best_mask(seed, label["sequence"], camera, "mug")
                 if mask is None:
                     continue
-                fit, _reason = fit_cylinder(*masked_surface(frame, mask, table_height_m=table_z), MUG)
+                surface = masked_surface(frame, mask, table_height_m=table_z)
+                fit, _reason = fit_cylinder(surface.points, surface.normals, MUG)
                 if fit is None:
                     continue
                 error = np.degrees(np.arccos(min(1.0, abs(float(fit.axis @ truth)))))
                 (bad if error > 20 else good).append(fit.inlier_fraction)
     frame_obs = observation(6, 640)
-    seed6, _reason = fit_cylinder(*masked_surface(frame_obs.camera_frames["head_camera"],
-                                                  best_mask(6, 640, "head_camera", "mug"),
-                                                  table_height_m=table_height(6, 640, frame_obs)), MUG)
+    surface = masked_surface(frame_obs.camera_frames["head_camera"], best_mask(6, 640, "head_camera", "mug"),
+                             table_height_m=table_height(6, 640, frame_obs))
+    seed6, _reason = fit_cylinder(surface.points, surface.normals, MUG)
     fig, ax = plt.subplots(figsize=(8, 3.2))
     bins = np.linspace(0.3, 1.0, 36)
     ax.hist(good, bins=bins, color=GREEN, alpha=0.85, label=f"axis within 20 deg ({len(good)} fits)")

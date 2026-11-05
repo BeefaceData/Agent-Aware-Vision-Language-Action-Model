@@ -83,7 +83,7 @@ class MugTruthTests(unittest.TestCase):
         np.testing.assert_allclose(base, (0.1, 0.2 - MUG_MODELS[0][1], 0.75), atol=1e-6)
 
     def test_an_axis_without_a_known_base_is_compared_as_a_line(self):
-        upside_down = ObjectPose("mug", (0.1, 0.2, 0.8), (0.0, 0.0, -1.0), False, 0.05, 0.9, True,
+        upside_down = ObjectPose("mug", (0.1, 0.2, 0.8), (0.0, 0.0, -1.0), False, 0.05, None, 0.9, True,
                                  "wall_fit_1_camera", ("head_camera",), 0)
 
         errors = pose_errors(upside_down, {"mug": mug_label(0)})
@@ -170,7 +170,7 @@ class FakeProvider:
         base = true_mug_base({"mug": mug_label(0)})
         mug = SimpleNamespace(position=tuple(base + (0.03, 0.04, 0.05)), camera="head_camera")
         return SimpleNamespace(objects={"mug": mug}, status={"mug": "grounded"}, mug_pose=None,
-                               mug_pose_reason="fake")
+                               mug_pose_reason="fake", rack_pose=None, rack_pose_reason="fake")
 
     def predicate_evidence(self, name, observation):
         return {"name": name, "value": None, "reason": "fake"}

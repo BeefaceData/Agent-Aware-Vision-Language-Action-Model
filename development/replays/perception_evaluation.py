@@ -60,6 +60,9 @@ MUG_MODELS = {
 # A confident pose further off than this would send the arm to the wrong place.
 POSE_WRONG_AXIS_DEG = 20.0
 POSE_WRONG_BASE_M = 0.03
+POSE_WRONG_HEADING_DEG = 40.0
+# A peg tip further off than this would make the hang miss the peg.
+RACK_WRONG_PEG_TIP_M = 0.02
 
 
 def lifted_so_far(label):
@@ -143,6 +146,18 @@ def true_mug_base(label):
     return transform[:3, 3] + transform[:3, :3] @ np.array((0.0, 0.0, body_offset))
 
 
+def true_handle_heading(label):
+    """Unit vector across the true axis, from the body axis towards the handle point."""
+    axis = true_mug_axis(label)
+    offset = np.asarray(label["mug"]["functional_point"][:3]) - true_mug_base(label)
+    radial = offset - (offset @ axis) * axis
+    return radial / np.linalg.norm(radial)
+
+
+def angle_between_deg(first, second):
+    return float(np.degrees(np.arccos(np.clip(float(np.dot(first, second)), -1.0, 1.0))))
+
+
 def tilt_from_up_deg(axis):
     return float(np.degrees(np.arccos(min(1.0, abs(float(axis[2]))))))
 
@@ -151,7 +166,8 @@ def pose_errors(pose, label):
     """Compare a fitted mug pose with the label; None fields where the pose has no answer."""
     truth_axis = true_mug_axis(label)
     errors = {"pose_tilt_deg": None, "true_tilt_deg": tilt_from_up_deg(truth_axis),
-              "axis_error_deg": None, "base_error_m": None, "base_xy_error_m": None, "base_z_error_m": None}
+              "axis_error_deg": None, "base_error_m": None, "base_xy_error_m": None, "base_z_error_m": None,
+              "heading_error_deg": None}
     if pose is None:
         return errors
     axis = np.asarray(pose.axis, dtype=float)
@@ -159,11 +175,23 @@ def pose_errors(pose, label):
     alignment = axis @ truth_axis if pose.base_known else abs(axis @ truth_axis)
     errors.update(pose_tilt_deg=pose.tilt_deg(),
                   axis_error_deg=float(np.degrees(np.arccos(np.clip(alignment, -1.0, 1.0)))))
+    if pose.heading is not None:
+        errors["heading_error_deg"] = angle_between_deg(pose.heading, true_handle_heading(label))
     if pose.base_known:
         offset = np.asarray(pose.position) - true_mug_base(label)
         errors.update(base_error_m=float(np.linalg.norm(offset)), base_xy_error_m=float(np.linalg.norm(offset[:2])),
                       base_z_error_m=float(offset[2]))
     return errors
+
+
+def rack_errors(pose, label):
+    """Peg tip and pole direction errors of a rack pose; Nones without one."""
+    if pose is None:
+        return {"peg_tip_error_m": None, "pole_axis_error_deg": None}
+    truth_up = pose_matrix(label["rack"]["pose"])[:3, :3] @ np.array((0.0, 1.0, 0.0))  # the 040_rack mesh stands on +y
+    tip = np.asarray(pose.key_points["peg_tip"]) - np.asarray(label["rack"]["functional_point"][:3])
+    return {"peg_tip_error_m": float(np.linalg.norm(tip)),
+            "pole_axis_error_deg": angle_between_deg(pose.axis, truth_up)}
 
 
 def without_cameras(observation, cameras):
@@ -203,6 +231,7 @@ def evaluate_capture(frames_dir, provider, *, ignore_cameras=()):
         # Only trusted poses are answers; an untrusted one can only veto a release.
         trusted = result.mug_pose if result.mug_pose is not None and result.mug_pose.trusted else None
         record["pose"] = {"pose_reason": result.mug_pose_reason, **pose_errors(trusted, label)}
+        record["rack"] = {"rack_reason": result.rack_pose_reason, **rack_errors(result.rack_pose, label)}
         truth = truth_predicates(label, right_lifted_before=right_lifted_before)
         right_lifted_before = truth["right_mug_lifted"]
         for name in EVALUATED_PREDICATES:
@@ -265,6 +294,7 @@ def summarize(records):
                          or record["predicates"]["mug_staged_on_table"]["public"] is True]
     return {"frames": len(records), "captures": sorted({record["capture"] for record in records}),
             "by_state": states, "pose_by_state": poses, "pose_overall": pose_summary(records),
+            "rack": rack_summary(records),
             "predicates": predicates,
             "toppled_reported_as_supported": {"toppled_frames": len(toppled),
                                               "reported_supported": len(toppled_supported)}}
@@ -275,7 +305,9 @@ def pose_summary(rows):
     fitted = [row["pose"] for row in rows if row["pose"]["axis_error_deg"] is not None]
     based = [pose for pose in fitted if pose["base_error_m"] is not None]
     wrong = [pose for pose in fitted if pose["axis_error_deg"] > POSE_WRONG_AXIS_DEG
-             or (pose["base_error_m"] is not None and pose["base_error_m"] > POSE_WRONG_BASE_M)]
+             or (pose["base_error_m"] is not None and pose["base_error_m"] > POSE_WRONG_BASE_M)
+             or (pose.get("heading_error_deg") or 0.0) > POSE_WRONG_HEADING_DEG]
+    headed = [pose["heading_error_deg"] for pose in fitted if pose.get("heading_error_deg") is not None]
 
     def toppled(tilt):
         return tilt > TOPPLED_TILT_DEG
@@ -290,9 +322,30 @@ def pose_summary(rows):
                                           for pose in fitted),
             "toppled_called_upright": sum(not toppled(pose["pose_tilt_deg"]) and toppled(pose["true_tilt_deg"])
                                           for pose in fitted),
+            "with_heading": len(headed), "heading_error_deg": _distribution(headed),
+            # A known base at the wrong end turns the axis round: about 180 degrees off.
+            "base_end_wrong": sum(pose["base_error_m"] is not None and pose["axis_error_deg"] > 90 for pose in fitted),
             "confident_wrong": len(wrong),
             "unknown_reasons": dict(Counter(row["pose"]["pose_reason"] for row in rows
                                             if row["pose"]["axis_error_deg"] is None))}
+
+
+def rack_summary(records):
+    """How soon each episode had a rack pose, and how far its peg tip was from the label."""
+    by_capture = defaultdict(list)
+    for record in records:
+        by_capture[record["capture"]].append(record)
+    first = {}
+    for capture, rows in sorted(by_capture.items()):
+        posed = [row for row in rows if (row.get("rack") or {}).get("peg_tip_error_m") is not None]
+        rack = posed[0]["rack"] if posed else None
+        first[capture] = None if rack is None else {"sequence": posed[0]["sequence"],
+                                                    "peg_tip_error_m": round(rack["peg_tip_error_m"], 4),
+                                                    "pole_axis_error_deg": round(rack["pole_axis_error_deg"], 2)}
+    errors = [item["peg_tip_error_m"] for item in first.values() if item is not None]
+    return {"episodes": len(first), "with_rack_pose": len(errors), "first_pose": first,
+            "peg_tip_error_m": _distribution(errors),
+            "confident_wrong": sum(error > RACK_WRONG_PEG_TIP_M for error in errors)}
 
 
 def markdown_report(summary):
@@ -307,14 +360,27 @@ def markdown_report(summary):
                      f"{row['mug_camera']} | {error} | {row['mug_miss_reasons']} |")
     lines += ["", "## Mug pose by state", "",
               "| State | Frames | Posed | Median axis error (deg) | With base | Median base error (m) | "
+              "Base end wrong | With heading | Median heading error (deg) | "
               "Upright called toppled | Toppled called upright | Confident wrong | Unknown |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for state, row in [*summary["pose_by_state"].items(), ("all", summary["pose_overall"])]:
         axis = row["axis_error_deg"]["median"] if row["axis_error_deg"] else "-"
         base = row["base_error_m"]["median"] if row["base_error_m"] else "-"
+        heading = row["heading_error_deg"]["median"] if row["heading_error_deg"] else "-"
         lines.append(f"| {state} | {row['frames']} | {row['posed']} | {axis} | {row['with_base']} | {base} | "
+                     f"{row['base_end_wrong']} | {row['with_heading']} | {heading} | "
                      f"{row['upright_called_toppled']} | {row['toppled_called_upright']} | "
                      f"{row['confident_wrong']} | {row['unknown_reasons']} |")
+    rack = summary["rack"]
+    lines += ["", "## Rack pose (fitted once per episode)", "",
+              f"Episodes with a rack pose: {rack['with_rack_pose']} of {rack['episodes']}; "
+              f"peg tip error {rack['peg_tip_error_m']}; wrong by more than {RACK_WRONG_PEG_TIP_M} m: "
+              f"{rack['confident_wrong']}.", "",
+              "| Episode | First frame | Peg tip error (m) | Pole axis error (deg) |", "|---|---|---|---|"]
+    for capture, item in rack["first_pose"].items():
+        cells = ("-", "-", "-") if item is None else (item["sequence"], item["peg_tip_error_m"],
+                                                      item["pole_axis_error_deg"])
+        lines.append(f"| {capture} | {cells[0]} | {cells[1]} | {cells[2]} |")
     lines += ["", "## Predicates", "",
               "| Predicate | Precision | Recall | Unknown rate | False true | Truth true: t/f/? | Truth false: t/f/? |",
               "|---|---|---|---|---|---|---|"]

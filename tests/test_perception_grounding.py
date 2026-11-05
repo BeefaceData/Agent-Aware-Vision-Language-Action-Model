@@ -430,7 +430,7 @@ class PerceptionGroundingTests(unittest.TestCase):
         # Held-out seed 6: a toppled mug seen end-on shows its flat base, |z| 0.09 like an upright wall.
         end_on = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=0.09)
         table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
-        lying = ObjectPose("mug", (0., 0., 1.05), (1., 0., 0.), False, .045, .9, True, "wall_fit_1_camera",
+        lying = ObjectPose("mug", (0., 0., 1.05), (1., 0., 0.), False, .045, None, .9, True, "wall_fit_1_camera",
                            ("head_camera",), 2)
 
         value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": end_on, "table": table},
@@ -442,7 +442,8 @@ class PerceptionGroundingTests(unittest.TestCase):
     def test_even_an_untrusted_axis_lying_down_vetoes_release(self):
         end_on = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=0.09)
         table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
-        lying = ObjectPose("mug", (0., 0., 1.05), (1., 0., 0.), False, .045, .5, False, "cylinder_fit_inliers_low",
+        lying = ObjectPose("mug", (0., 0., 1.05), (1., 0., 0.), False, .045, None, .5, False,
+                           "cylinder_fit_inliers_low",
                            ("head_camera",), 2)
 
         value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": end_on, "table": table},
@@ -454,7 +455,8 @@ class PerceptionGroundingTests(unittest.TestCase):
     def test_an_untrusted_upright_axis_does_not_replace_the_surface_test(self):
         sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
         table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
-        upright = ObjectPose("mug", (0., 0., 1.0), (0., 0., 1.), True, .045, .5, False, "cylinder_fit_inliers_low",
+        upright = ObjectPose("mug", (0., 0., 1.0), (0., 0., 1.), True, .045, None, .5, False,
+                             "cylinder_fit_inliers_low",
                              ("head_camera",), 2)
 
         value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": sliver, "table": table},
@@ -466,7 +468,7 @@ class PerceptionGroundingTests(unittest.TestCase):
     def test_an_upright_fitted_axis_judges_orientation_when_normals_were_too_few(self):
         sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
         table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
-        upright = ObjectPose("mug", (0., 0., 1.0), (0., 0., 1.), True, .045, .9, True, "wall_fit_1_camera",
+        upright = ObjectPose("mug", (0., 0., 1.0), (0., 0., 1.), True, .045, None, .9, True, "wall_fit_1_camera",
                              ("head_camera",), 2)
 
         value, _reason = RGBDPerceptionProvider._table_support_evidence({"mug": sliver, "table": table},

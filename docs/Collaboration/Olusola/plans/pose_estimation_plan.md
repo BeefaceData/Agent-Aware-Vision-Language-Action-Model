@@ -54,8 +54,8 @@ The remaining 6 false trues are all seed 6's end-on mug:
 
 - 4 frames have an untrusted fit that does not read as lying down;
 - 2 frames have a radius out of range, so there is no fit at all.
-Read with `docs/Collaboration/Olusola/perception_guide.pdf` (how perception works today) and
-`docs/Collaboration/Olusola/perception_for_retries.md` (what predicates exist).
+Read with `docs/Collaboration/Olusola/guides/perception/perception_guide.pdf` (how perception works today) and
+`docs/Collaboration/Olusola/handover/perception_for_retries.md` (what predicates exist).
 
 This plan turns today's "rough mug position" into object poses (position, main axis, heading,
 key points, with a quality score or `unknown`) for the mug, the rack and the table. It uses

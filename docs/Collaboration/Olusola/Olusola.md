@@ -1,5 +1,17 @@
 # Olusola — perception and object grounding
 
+## This folder
+
+| Path | What it is |
+|---|---|
+| `guides/perception/perception_guide.pdf` | How perception, predicates, providers and planners fit together, and what the grounding-evaluation branch changed. Built from `.tex` and `figures/` by `make_figures.py`. |
+| `guides/pose_estimation/pose_estimation_guide.pdf` | Mug poses from the depth cameras (pose plan steps 1–5): what was built, why, and the results. Same build setup. |
+| `plans/pose_estimation_plan.md` | The full pose-estimation plan, its decisions and progress notes. |
+| `handover/perception_for_retries.md` | For the teammate building perception-driven retries: what is available and how to use it. |
+| `slides/perception_slides.pptx` | Three-slide summary of the perception work. |
+
+Each `make_figures.py` lists the data and reports it needs at the top. Nothing under `data/` is committed.
+
 ## Goal
 
 Evaluate and improve public perception of the mug, rack, table support, and relevant poses. Focus on whether RGB-D evidence can ground useful 3D targets and support phase predicates across reset, grasp, handoff, and hanging views. Do not use simulator object poses as planner input or as a substitute for perception evidence.

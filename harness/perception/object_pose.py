@@ -6,7 +6,9 @@ new cylindrical object needs a spec, not new fitting code. A fit that cannot be
 trusted returns ``None`` with a searchable reason instead of a guess.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import NamedTuple
 
 import numpy as np
@@ -51,8 +53,12 @@ class ObjectPose:
     cameras: tuple[str, ...]
     observation_sequence: int
     # Named world points: "handle" (median of the handle's visible points),
-    # "peg_tip" (the far end of the rack's peg).
-    key_points: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    # "peg_tip" (the far end of the rack's peg). Read-only: a cached rack pose
+    # is shared by every later observation.
+    key_points: Mapping[str, tuple[float, float, float]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        object.__setattr__(self, "key_points", MappingProxyType(dict(self.key_points)))
 
     def tilt_deg(self):
         """Angle between the axis line and world up (0 upright, 90 lying down)."""
@@ -471,7 +477,7 @@ def pole_with_peg_pose(surfaces, spec, *, table_height_m, observation_sequence):
         return None, max(set(failures), key=failures.count) if failures else "object_not_seen"
     best_camera = max(fits, key=lambda camera: fits[camera]["explained"])
     best = fits[best_camera]
-    if any(np.linalg.norm(fit["peg_tip"] - best["peg_tip"]) > SAME_PEG_TIP_M for fit in fits.values()):
+    if any(not _same_point(fit["peg_tip"], best["peg_tip"]) for fit in fits.values()):
         return None, "cameras_disagree"
     reason = f"pole_and_peg_fit_{len(fits)}_camera" + ("s" if len(fits) > 1 else "")
     return ObjectPose(spec.label, _floats(best["foot"]), _floats(best["axis"]), True, None,
@@ -479,10 +485,22 @@ def pole_with_peg_pose(surfaces, spec, *, table_height_m, observation_sequence):
                       observation_sequence, {"peg_tip": _floats(best["peg_tip"])}), reason
 
 
+def same_peg(first, second):
+    """Whether two rack poses put the peg tip in the same place."""
+    return _same_point(first.key_points["peg_tip"], second.key_points["peg_tip"])
+
+
+def _same_point(first, second):
+    return float(np.linalg.norm(np.subtract(first, second))) <= SAME_PEG_TIP_M
+
+
 def _fit_pole_with_peg(points, spec, table_height_m):
     """The pole's centre line, its foot on the table, and the peg's direction and tip."""
-    if table_height_m is not None:
-        points = points[points[:, 2] > table_height_m + spec.base_plate_clearance_m]
+    # Without the table top the base plate cannot be removed, and its edge can
+    # pass for the peg.
+    if table_height_m is None:
+        return None, "table_height_unavailable"
+    points = points[points[:, 2] > table_height_m + spec.base_plate_clearance_m]
     if len(points) < MIN_POLE_POINTS:
         return None, "too_few_surface_points"
     rng = np.random.default_rng(0)
@@ -512,8 +530,7 @@ def _fit_pole_with_peg(points, spec, table_height_m):
     heading = peg_axis - (peg_axis @ pole_axis) * pole_axis
     if np.linalg.norm(heading) < 1e-6:
         return None, "peg_parallel_to_pole"
-    foot = (pole_centre if table_height_m is None else
-            pole_centre + (table_height_m - pole_centre[2]) / pole_axis[2] * pole_axis)
+    foot = pole_centre + (table_height_m - pole_centre[2]) / pole_axis[2] * pole_axis
     explained = float((on_pole.sum() + on_peg.sum()) / len(points))
     return {"foot": foot, "axis": pole_axis, "heading": heading / np.linalg.norm(heading), "peg_tip": tip,
             "explained": explained}, "pole_and_peg"

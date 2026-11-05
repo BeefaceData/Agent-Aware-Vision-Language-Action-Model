@@ -134,7 +134,16 @@ class RGBDCamera:
             raise ValueError("mask_shape_mismatch")
         if type(step_px) is not int or not 1 <= step_px <= 8:
             raise ValueError("invalid_normal_step")
-        inner = mask.copy()
+        s = step_px
+        rows, columns = np.nonzero(mask)
+        if not len(rows):
+            return np.empty((0, 3)), np.empty((0, 3))
+        # Work only on the mask's box, padded by the step so every neighbour is
+        # inside it; padding pixels are outside the mask, so nothing is lost.
+        top, left = max(rows.min() - s, 0), max(columns.min() - s, 0)
+        bottom = min(rows.max() + s + 1, mask.shape[0])
+        right = min(columns.max() + s + 1, mask.shape[1])
+        inner = mask[top:bottom, left:right].copy()
         for _ in range(erode_px):
             eroded = inner.copy()
             eroded[1:] &= inner[:-1]
@@ -142,12 +151,10 @@ class RGBDCamera:
             eroded[:, 1:] &= inner[:, :-1]
             eroded[:, :-1] &= inner[:, 1:]
             inner = eroded
-        depth = self.depth_m.astype(np.float64)
-        height, width = depth.shape
-        u, v = np.meshgrid(np.arange(width), np.arange(height))
+        depth = self.depth_m[top:bottom, left:right].astype(np.float64)
+        u, v = np.meshgrid(np.arange(left, right), np.arange(top, bottom))
         pixels = np.stack((u, v, np.ones_like(u)), axis=-1).astype(np.float64)
         camera_xyz = (pixels @ np.linalg.inv(self.intrinsic).T) * depth[..., None]
-        s = step_px
         centre = (slice(s, -s), slice(s, -s))
         along_u = camera_xyz[s:-s, 2*s:] - camera_xyz[s:-s, :-2*s]
         along_v = camera_xyz[2*s:, s:-s] - camera_xyz[:-2*s, s:-s]

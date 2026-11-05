@@ -525,6 +525,28 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertEqual(reason, "mug_table_support_not_established")
 
+    @staticmethod
+    def rack_pose(tip, cameras=("right_camera",)):
+        return ObjectPose("rack", (0., 0., .75), (0., 0., 1.), True, None, (1., 0., 0.), .9, True,
+                          "pole_and_peg_fit_1_camera", cameras, 0, {"peg_tip": tip})
+
+    def test_a_single_camera_rack_fit_waits_for_a_second_observation_to_agree(self):
+        provider = RGBDPerceptionProvider(FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ())))
+
+        first = provider._confirmed_rack(self.rack_pose((.1, .2, .9)), "pole_and_peg_fit_1_camera")
+        moved = provider._confirmed_rack(self.rack_pose((.1, .3, .9)), "pole_and_peg_fit_1_camera")
+        agreed = provider._confirmed_rack(self.rack_pose((.1, .305, .9)), "pole_and_peg_fit_1_camera")
+
+        self.assertEqual(first, (None, "rack_fit_awaiting_confirmation"))
+        self.assertEqual(moved, (None, "rack_fit_awaiting_confirmation"))
+        self.assertEqual(agreed[1], "pole_and_peg_fit_confirmed_by_a_second_observation")
+
+    def test_two_agreeing_cameras_confirm_the_rack_at_once(self):
+        provider = RGBDPerceptionProvider(FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ())))
+        pose = self.rack_pose((.1, .2, .9), cameras=("head_camera", "right_camera"))
+
+        self.assertIs(provider._confirmed_rack(pose, "pole_and_peg_fit_2_cameras")[0], pose)
+
     def test_right_lift_requires_arm_association_not_height_alone(self):
         detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
             Detection("mug", .99, mask()),)))

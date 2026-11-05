@@ -54,25 +54,36 @@ def cylinder_hits(origin, rays, base, axis, radius, height, *, open_top=False):
     return hits
 
 
-def render(world_to_camera, base, axis, *, radius=RADIUS, height=HEIGHT, open_top=False, handle_towards=None):
-    """Depth (whole millimetres, like RoboTwin) and mask of a cylinder, optionally hollow and with a handle.
+def render_cylinders(world_to_camera, cylinders):
+    """Depth (whole millimetres, like RoboTwin) and mask of a scene made of cylinders.
 
-    The handle is a thin rod beside the body, parallel to the axis, on the side of ``handle_towards``.
+    Each cylinder is ``(base, axis, radius, height, open_top)``.
     """
     rotation, translation = world_to_camera[:3, :3], world_to_camera[:3, 3]
     origin = -rotation.T @ translation
     v, u = np.mgrid[:IMAGE_HW[0], :IMAGE_HW[1]]
     rays_camera = np.stack((u, v, np.ones_like(u)), -1).reshape(-1, 3) @ np.linalg.inv(INTRINSIC).T
     rays = rays_camera @ rotation  # camera directions to world
-    hits = cylinder_hits(origin, rays, base, axis, radius, height, open_top=open_top)
-    if handle_towards is not None:
-        unit_axis = np.asarray(axis, float) / np.linalg.norm(axis)
-        rod_base = np.asarray(base, float) + (radius + 0.015) * np.asarray(handle_towards, float) + 0.02 * unit_axis
-        hits = np.minimum(hits, cylinder_hits(origin, rays, rod_base, axis, 0.006, 0.06))
+    hits = np.full(len(rays), np.inf)
+    for base, axis, radius, height, open_top in cylinders:
+        hits = np.minimum(hits, cylinder_hits(origin, rays, base, axis, radius, height, open_top=open_top))
     hit = np.isfinite(hits)
     depth = np.zeros(len(rays))
     depth[hit] = np.round(hits[hit] * rays_camera[hit, 2] * 1000) / 1000  # metres along the optical axis
     return depth.reshape(IMAGE_HW).astype(np.float32), hit.reshape(IMAGE_HW)
+
+
+def render(world_to_camera, base, axis, *, radius=RADIUS, height=HEIGHT, open_top=False, handle_towards=None):
+    """A mug-like cylinder, optionally hollow, with an optional handle.
+
+    The handle is a thin rod beside the body, parallel to the axis, on the side of ``handle_towards``.
+    """
+    cylinders = [(base, axis, radius, height, open_top)]
+    if handle_towards is not None:
+        unit_axis = np.asarray(axis, float) / np.linalg.norm(axis)
+        rod_base = np.asarray(base, float) + (radius + 0.015) * np.asarray(handle_towards, float) + 0.02 * unit_axis
+        cylinders.append((rod_base, axis, 0.006, 0.06, False))
+    return render_cylinders(world_to_camera, cylinders)
 
 
 def view(eye, target, base, axis, **shape):
@@ -220,20 +231,12 @@ PEG_LENGTH = 0.10
 def rack_view(eye, *, with_peg=True):
     """Surface of a rack: base plate, pole and an angled peg, like RoboTwin's 040_rack."""
     world_to_camera = looking_at(np.asarray(eye, float), PEG_ROOT)
-    rotation, translation = world_to_camera[:3, :3], world_to_camera[:3, 3]
-    origin = -rotation.T @ translation
-    v, u = np.mgrid[:IMAGE_HW[0], :IMAGE_HW[1]]
-    rays_camera = np.stack((u, v, np.ones_like(u)), -1).reshape(-1, 3) @ np.linalg.inv(INTRINSIC).T
-    rays = rays_camera @ rotation
-    hits = np.minimum(cylinder_hits(origin, rays, POLE_FOOT, (0, 0, 1), 0.06, 0.008),
-                      cylinder_hits(origin, rays, POLE_FOOT, (0, 0, 1), 0.01, 0.23))
+    cylinders = [(POLE_FOOT, (0, 0, 1), 0.06, 0.008, False),   # base plate
+                 (POLE_FOOT, (0, 0, 1), 0.01, 0.23, False)]    # pole
     if with_peg:
-        hits = np.minimum(hits, cylinder_hits(origin, rays, PEG_ROOT, PEG_DIRECTION, 0.006, PEG_LENGTH))
-    hit = np.isfinite(hits)
-    depth = np.zeros(len(rays))
-    depth[hit] = np.round(hits[hit] * rays_camera[hit, 2] * 1000) / 1000
-    frame = RGBDCamera(depth.reshape(IMAGE_HW).astype(np.float32), INTRINSIC, world_to_camera)
-    return masked_surface(frame, hit.reshape(IMAGE_HW))
+        cylinders.append((PEG_ROOT, PEG_DIRECTION, 0.006, PEG_LENGTH, False))
+    depth, mask = render_cylinders(world_to_camera, cylinders)
+    return masked_surface(RGBDCamera(depth, INTRINSIC, world_to_camera), mask)
 
 
 RACK_EYE = (0.05, -0.4, TABLE_Z + 0.25)  # in front of the peg's side, like the right wrist camera at reset
@@ -257,6 +260,22 @@ class RackPoseTests(unittest.TestCase):
 
         self.assertIsNone(pose)
         self.assertEqual(reason, "peg_not_seen")
+
+
+    def test_no_table_height_means_no_rack_pose(self):
+        # The base plate could not be removed, and its edge could pass for the peg.
+        pose, reason = pole_with_peg_pose({"right_camera": rack_view(RACK_EYE)}, RACK, table_height_m=None,
+                                          observation_sequence=0)
+
+        self.assertIsNone(pose)
+        self.assertEqual(reason, "table_height_unavailable")
+
+    def test_key_points_cannot_be_changed_after_the_fit(self):
+        pose, _reason = pole_with_peg_pose({"right_camera": rack_view(RACK_EYE)}, RACK, table_height_m=TABLE_Z,
+                                           observation_sequence=0)
+
+        with self.assertRaises(TypeError):
+            pose.key_points["peg_tip"] = (0.0, 0.0, 0.0)
 
 
 class CameraAgreementTests(unittest.TestCase):

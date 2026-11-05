@@ -100,6 +100,17 @@ Results (with the perception camera):
 | Confident wrong poses | 0 | 0 |
 | Predicates | unchanged | unchanged |
 
+Review fixes (2026-11-05):
+
+- A rack pose is kept only once two views agree on the peg tip: two cameras in one
+  observation, or a single-camera fit matched by the next observation. It now arrives at
+  frame 0 or 16 in 9 of 10 episodes (seed 8: frame 256). Peg tip error is unchanged in
+  practice (median 2.9 / 4.2 mm, worst 1.4 cm).
+- No table height means no rack pose, because the base plate's edge could pass for the peg.
+- `ObjectPose.key_points` is read-only.
+- `surface_points_and_normals` works on the mask's bounding box only. It gives identical
+  output on 320 real masks and is about 1.8 times faster.
+
 Seeds 5-9 were not looked at while building steps 6-7. Toppled mugs rarely get a heading:
 their handle tends to lie close to the table, and the points near the table are removed.
 Read with `docs/Collaboration/Olusola/guides/perception/perception_guide.pdf` (how perception works today) and

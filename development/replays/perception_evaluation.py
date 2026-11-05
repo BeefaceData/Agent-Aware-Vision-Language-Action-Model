@@ -129,6 +129,8 @@ def true_mug_axis(label):
 def mug_model_id(label):
     """The episode's mug model: recorded by newer captures, else matched by its handle point."""
     if "model_id" in label["mug"]:
+        if label["mug"]["model_id"] not in MUG_MODELS:
+            raise ValueError("unmeasured_mug_model")
         return label["mug"]["model_id"]
     transform = pose_matrix(label["mug"]["pose"])
     handle = transform[:3, :3].T @ (np.asarray(label["mug"]["functional_point"][:3]) - transform[:3, 3])

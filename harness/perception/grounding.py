@@ -15,7 +15,7 @@ import numpy as np
 from .anchors import Anchor, AnchorRegistry
 from .geometry import pose7
 from .object_pose import (MUG, RACK, UPRIGHT_MAX_TILT_DEG, ObjectPose, masked_surface, object_pose,
-                          pole_with_peg_pose)
+                          pole_with_peg_pose, same_peg)
 from .rgbd import RGBDCamera, calibration_sha256
 from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.predicates.base import PredicateResult
@@ -185,6 +185,7 @@ class RGBDPerceptionProvider:
         self._mug_lift_tracker = None
         self._mug_lift_tracker_enabled = False
         self._rack_pose = None
+        self._rack_candidate = None
         self._last_batches = ()
 
     def set_mug_lift_evidence_tracker(self, tracker):
@@ -500,7 +501,8 @@ class RGBDPerceptionProvider:
             self._mug_pose(batches, frames, table_height, sequence)
         rack_pose_reason = "fitted_earlier_this_episode"
         if self._rack_pose is None:
-            self._rack_pose, rack_pose_reason = self._fit_rack(batches, frames, table_height, sequence)
+            self._rack_pose, rack_pose_reason = self._confirmed_rack(
+                *self._fit_rack(batches, frames, table_height, sequence))
         previous_mug_height = self._previous_mug_height
         if mug is not None:
             self._previous_mug_height = mug.position[2]
@@ -790,7 +792,9 @@ class RGBDPerceptionProvider:
 
     @staticmethod
     def _table_height(table):
-        return None if table is None else float(np.median(np.asarray(table.surface_points)[:, 2]))
+        if table is None or not table.surface_points:
+            return None
+        return float(np.median(np.asarray(table.surface_points)[:, 2]))
 
     def _surfaces(self, label, batches, frames, table_height):
         """Each camera's surface of ``label``, from its unambiguous, confident mask."""
@@ -806,6 +810,23 @@ class RGBDPerceptionProvider:
         """Fit the mug's body in every camera that has an unambiguous mug mask."""
         return object_pose(self._surfaces("mug", batches, frames, table_height), MUG,
                            table_height_m=table_height, observation_sequence=sequence)
+
+    def _confirmed_rack(self, pose, reason):
+        """Keep a rack pose for the episode only once two views agree on the peg tip.
+
+        Two cameras in one observation agree inside ``pole_with_peg_pose``. A
+        single-camera fit waits for the next observation's fit to match it, so
+        one bad view (an arm across the peg, a stray mask) cannot fix a wrong
+        hang target for the whole episode.
+        """
+        if pose is None:
+            return None, reason
+        if len(pose.cameras) > 1:
+            return pose, reason
+        candidate, self._rack_candidate = self._rack_candidate, pose
+        if candidate is not None and same_peg(candidate, pose):
+            return pose, "pole_and_peg_fit_confirmed_by_a_second_observation"
+        return None, "rack_fit_awaiting_confirmation"
 
     def _fit_rack(self, batches, frames, table_height, sequence):
         # The rack's base plate is part of the mask, so table points stay in;

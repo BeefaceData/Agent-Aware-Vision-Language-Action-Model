@@ -5,7 +5,7 @@
 | Path | What it is |
 |---|---|
 | `guides/perception/perception_guide.pdf` | How perception, predicates, providers and planners fit together, and what the grounding-evaluation branch changed. Built from `.tex` and `figures/` by `make_figures.py`. |
-| `guides/pose_estimation/pose_estimation_guide.pdf` | Mug poses from the depth cameras (pose plan steps 1–5): what was built, why, and the results. Same build setup. |
+| `guides/pose_estimation/pose_estimation_guide.pdf` | Mug and rack poses from the depth cameras (pose plan steps 1–9): what was built, why, the fresh-seed results, and what it means for supervising the task. Same build setup. |
 | `plans/pose_estimation_plan.md` | The full pose-estimation plan, its decisions and progress notes. |
 | `handover/perception_for_retries.md` | For the teammate building perception-driven retries: what is available and how to use it. |
 | `slides/perception_slides.pptx` | Three-slide summary of the perception work. |

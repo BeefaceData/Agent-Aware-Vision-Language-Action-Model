@@ -22,6 +22,11 @@ Nothing under data/ is committed. A figure whose inputs are missing is skipped w
          --output data/perception/reports/pose_dev_with_camera
    and likewise pose_holdout_with_camera (frames_holdout/seed_5..9). The before-numbers come
    from the earlier with_camera and holdout_with_camera reports.
+4. Steps 6-9: review_dev / review_holdout (frames_cam, frames_holdout scored at commit 4257459),
+   step9_dev / step9_holdout (the same, at the step 9 code), and for the fresh seeds
+   data/perception/frames_fresh/seed_10..14: fresh_with_camera and fresh_without_camera
+   (commit 4257459), fresh_before_pose (commit aa6a0b1, before any pose code) and fresh_step9
+   (step 9 code).
 """
 
 import base64
@@ -40,7 +45,7 @@ from PIL import Image
 
 from harness.perception.object_pose import MIN_INLIER_FRACTION, MUG, fit_cylinder, masked_surface, object_pose
 from harness.perception.replay import load_public_observation
-from harness.runtime.assembly import MUG_MASK_MIN_CONFIDENCE
+from harness.runtime.assembly import EXPLORE_RACK_MASK_MIN_CONFIDENCE, MUG_MASK_MIN_CONFIDENCE
 
 ROOT = Path(__file__).resolve().parents[5]  # the repository root
 DATA = ROOT / "data" / "perception"
@@ -52,14 +57,16 @@ INK, MUTED, BLUE, ORANGE, GREEN, RED, GRID = "#1f2937", "#6b7280", "#2563eb", "#
 plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10, "axes.edgecolor": MUTED,
                      "axes.labelcolor": INK, "xtick.color": INK, "ytick.color": INK,
                      "axes.spines.top": False, "axes.spines.right": False})
-# The episode's provider keeps SAM 3 masks at or above these scores (harness/runtime/assembly.py).
-MIN_MASK_CONFIDENCE = {"mug": MUG_MASK_MIN_CONFIDENCE, "table": 0.60}
+# The episode's provider keeps SAM 3 masks at or above these scores (harness/runtime/assembly.py);
+# the caches use the explore_mug_rack prompt profile, with its own rack floor.
+MIN_MASK_CONFIDENCE = {"mug": MUG_MASK_MIN_CONFIDENCE, "table": 0.60, "rack": EXPLORE_RACK_MASK_MIN_CONFIDENCE}
 ON_TABLE_STATES = ("resting", "gripped_on_table", "staged")
 
 
 # ---------------------------------------------------------------- inputs
 def capture_dir(seed):
-    return DATA / ("frames_holdout" if seed >= 5 else "frames_cam") / f"seed_{seed}"
+    folder = "frames_fresh" if seed >= 10 else "frames_holdout" if seed >= 5 else "frames_cam"
+    return DATA / folder / f"seed_{seed}"
 
 
 def observation(seed, sequence):
@@ -369,8 +376,239 @@ def release_results():
     save(fig, "release_results.png")
 
 
+def mug_surface(seed, sequence, camera):
+    frame_obs = observation(seed, sequence)
+    table_z = table_height(seed, sequence, frame_obs)
+    surface = masked_surface(frame_obs.camera_frames[camera], best_mask(seed, sequence, camera, "mug"),
+                             table_height_m=table_z)
+    pose, _reason = object_pose({camera: surface}, MUG, table_height_m=table_z, observation_sequence=sequence)
+    fit, _reason = fit_cylinder(surface.points, surface.normals, MUG)
+    return frame_obs, surface, fit, pose
+
+
+def handle_band(surface, fit):
+    """Points 0.8-3.5 cm outside the fitted radius: what the pose reads as the handle."""
+    offsets = surface.points - fit.centre
+    radial = offsets - np.outer(offsets @ fit.axis, fit.axis)
+    distance = np.linalg.norm(radial, axis=1)
+    return (distance >= fit.radius_m + 0.008) & (distance <= fit.radius_m + 0.035)
+
+
+def handle_and_base():
+    """Step 6 on real frames: the handle beside an upright mug, and the inside wall of a lying one."""
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2))
+    # Upright: handle points sit just outside the fitted radius, on one side.
+    seed, sequence, camera = 0, 0, "head_camera"
+    frame_obs, surface, fit, pose = mug_surface(seed, sequence, camera)
+    frame = frame_obs.camera_frames[camera]
+    mask = best_mask(seed, sequence, camera, "mug")
+    axes[0].imshow(overlay(frame_obs.images[camera], mask, ORANGE, 0.25))
+    draw_cylinder(axes[0], frame, fit, *fit.extent, GREEN)
+    uv = project(frame, surface.points[handle_band(surface, fit)])
+    axes[0].scatter(uv[:, 0], uv[:, 1], s=5, color=BLUE, label="points just outside the radius: the handle")
+    middle = np.asarray(pose.key_points["handle"])
+    on_axis = np.asarray(fit.centre) + float((middle - fit.centre) @ fit.axis) * fit.axis
+    start, end = project(frame, np.array([on_axis, on_axis + 0.07 * np.asarray(pose.heading)]))
+    axes[0].annotate("", xy=end, xytext=start, arrowprops=dict(arrowstyle="-|>", color=RED, lw=2.4))
+    axes[0].set_title("Upright (seed 0, head camera)\nred arrow = heading, from the axis to the handle",
+                      fontsize=9.5)
+    axes[0].legend(frameon=False, fontsize=8, loc="lower left")
+    crop_to(axes[0], mask)
+    # Lying down: wall normals that face the axis are the inside, seen through the opening.
+    seed, sequence, camera = 1, 720, "perception_camera"
+    frame_obs, surface, fit, pose = mug_surface(seed, sequence, camera)
+    frame = frame_obs.camera_frames[camera]
+    mask = best_mask(seed, sequence, camera, "mug")
+    axes[1].imshow(np.asarray(frame_obs.images[camera]) / 255 * 0.55 + 0.45)
+    offsets = surface.points - fit.centre
+    radial = offsets - np.outer(offsets @ fit.axis, fit.axis)
+    distance = np.linalg.norm(radial, axis=1)
+    wall = (np.abs(surface.normals @ fit.axis) < np.sin(np.radians(12))) & (distance > 0.25 * fit.radius_m)
+    inward = wall & (np.sum(surface.normals * radial, axis=1) < -0.5 * distance)
+    for chosen, color, name in ((wall & ~inward, MUTED, "outside wall"), (inward, BLUE, "inside wall (faces the axis)")):
+        uv = project(frame, surface.points[chosen])
+        axes[1].scatter(uv[:, 0], uv[:, 1], s=4, color=color, label=name)
+    low, high = fit.extent
+    base = np.asarray(pose.position)
+    opening = base + (high - low) * np.asarray(pose.axis)
+    for point, color, name in ((base, GREEN, "base (away from the opening)"), (opening, ORANGE, "opening")):
+        u, v = project(frame, point[None])[0]
+        axes[1].plot(u, v, "o", ms=11, color=color, mec="white", mew=1.5, label=name)
+    axes[1].set_title(f"Lying down (seed 1, perception camera), tilt {pose.tilt_deg():.0f} deg\n"
+                      "we see inside, so the opening faces us", fontsize=9.5)
+    axes[1].legend(frameon=False, fontsize=8, loc="lower left")
+    crop_to(axes[1], mask)
+    save(fig, "handle_and_base.png")
+
+
+def rack_fit():
+    """Step 7 and 9 on a real frame: pole line, peg line, peg tip, seat, and RoboTwin's success target."""
+    from development.replays.perception_evaluation import hang_success_target
+    from harness.perception.object_pose import RACK, pole_with_peg_pose
+
+    seed, sequence = 0, 0
+    frame_obs = observation(seed, sequence)
+    table_z = table_height(seed, sequence, frame_obs)
+    surfaces = {camera: masked_surface(frame, best_mask(seed, sequence, camera, "rack"))
+                for camera, frame in frame_obs.camera_frames.items()
+                if best_mask(seed, sequence, camera, "rack") is not None}
+    pose, reason = pole_with_peg_pose(surfaces, RACK, table_height_m=table_z, observation_sequence=sequence)
+    label = labels(seed)[0]
+    # RoboTwin checks only the target's xy (and a height floor), so draw it at the seat's height.
+    target = np.r_[hang_success_target(label)[:2], pose.key_points["peg_seat"][2]]
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2))
+    for ax, camera in zip(axes, ("right_camera", "head_camera")):
+        frame = frame_obs.camera_frames[camera]
+        mask = best_mask(seed, sequence, camera, "rack")
+        ax.imshow(overlay(frame_obs.images[camera], mask, ORANGE, 0.3))
+        foot, tip, seat = (np.asarray(pose.position), np.asarray(pose.key_points["peg_tip"]),
+                           np.asarray(pose.key_points["peg_seat"]))
+        top = foot + 0.22 * np.asarray(pose.axis)
+        for start, end, color, name in ((foot, top, BLUE, "pole line"), (seat, tip, GREEN, "peg line")):
+            uv = project(frame, np.array([start, end]))
+            ax.plot(uv[:, 0], uv[:, 1], color=color, lw=2.6, label=name)
+        for point, marker, color, name in ((tip, "o", RED, "peg tip"), (seat, "o", GREEN, "peg seat (step 9)"),
+                                           (target, "x", INK, "success target xy (label, offline)")):
+            u, v = project(frame, point[None])[0]
+            ax.plot(u, v, marker, ms=10, mew=2.5, color=color, mec="white" if marker == "o" else color,
+                    label=name)
+        ax.set_title(camera.replace("_", " "), fontsize=10)
+        crop_to(ax, mask, 20)
+    axes[1].legend(frameon=False, fontsize=8, loc="center left", bbox_to_anchor=(1.0, 0.5))
+    fig.suptitle(f"Rack from depth, seed 0 frame 0 ({reason.replace('_', ' ')})", x=0.02, ha="left", fontsize=11)
+    save(fig, "rack_fit.png")
+
+
+# (name, report before the pose work, report at the frozen commit 4257459) per seed set.
+SEED_SETS = (("seeds 0-4\n(tuning)", "with_camera", "review_dev"),
+             ("seeds 5-9\n(seen once)", "holdout_with_camera", "review_holdout"),
+             ("seeds 10-14\n(fresh)", "fresh_before_pose", "fresh_with_camera"))
+
+
+def fresh_results():
+    """Step 8: the frozen code on fresh seeds 10-14, beside the seeds it was built on."""
+    fig, axes = plt.subplots(1, 4, figsize=(14, 3.5), gridspec_kw={"width_ratios": [1.9, 1, 1, 1]})
+    x = np.arange(len(SEED_SETS))
+    for offset, index, color, name in ((-0.2, 1, MUTED, "before the pose work"), (0.2, 2, GREEN, "with the fitted axis")):
+        scores = [summary(seed_set[index])["predicates"]["release_ready"] for seed_set in SEED_SETS]
+        drawn = axes[0].bar(x + offset, [score["precision"] for score in scores], 0.36, color=color, label=name)
+        for bar, score in zip(drawn, scores):
+            axes[0].text(bar.get_x() + bar.get_width() / 2, score["precision"] + 0.01,
+                         f"{score['precision']:.2f}\n{score['false_true']} wrong", ha="center", fontsize=7.5)
+    axes[0].set_ylim(0.5, 1.18)
+    axes[0].set_title("release_ready precision", loc="left", fontsize=10.5)
+    axes[0].legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=1)
+    overall = [summary(seed_set[2])["pose_overall"] for seed_set in SEED_SETS]
+    # Medians share an axis; the worst frame goes in the label, because one 173-degree frame would flatten the bars.
+    for ax, key, scale, unit, title in ((axes[1], "axis_error_deg", 1, "deg", "Mug axis error, median"),
+                                        (axes[2], "base_error_m", 1000, "mm", "Mug base error, median")):
+        medians = [scale * pose[key]["median"] for pose in overall]
+        ax.bar(x, medians, 0.5, color=BLUE)
+        for position, value, pose in zip(x, medians, overall):
+            ax.text(position, value, f"{value:.1f}\nworst {scale * pose[key]['max']:.0f}", ha="center", va="bottom", fontsize=8)
+        ax.set_ylim(0, max(medians) * 1.5)
+        ax.set_ylabel(unit)
+        ax.set_title(title, loc="left", fontsize=10.5)
+    wrong = [pose["confident_wrong"] for pose in overall]
+    drawn = axes[3].bar(x, wrong, 0.5, color=RED)
+    axes[3].bar_label(drawn, fontsize=9)
+    axes[3].axhline(0, color=INK, lw=1)
+    axes[3].set_ylim(0, 5.5)
+    axes[3].set_ylabel("frames")
+    axes[3].set_title("Confident wrong poses (target: 0)", loc="left", fontsize=10.5)
+    for ax in axes:
+        ax.set_xticks(x, [seed_set[0] for seed_set in SEED_SETS], fontsize=8)
+        ax.yaxis.grid(True, color=GRID)
+        ax.set_axisbelow(True)
+    save(fig, "fresh_results.png")
+
+
+def fresh_failures():
+    """Step 8's confident wrong poses: a rim read as a handle, and an upside-down mug read as upright."""
+    from development.replays.perception_evaluation import true_handle_heading, true_mug_base
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2))
+    seed, sequence, camera = 11, 208, "head_camera"
+    frame_obs, surface, fit, pose = mug_surface(seed, sequence, camera)
+    frame = frame_obs.camera_frames[camera]
+    mask = best_mask(seed, sequence, camera, "mug")
+    label = next(item for item in labels(seed) if item["sequence"] == sequence)
+    axes[0].imshow(overlay(frame_obs.images[camera], mask, ORANGE, 0.2))
+    band = surface.points[handle_band(surface, fit)]
+    uv = project(frame, band)
+    axes[0].scatter(uv[:, 0], uv[:, 1], s=5, color=BLUE, label="band read as the handle")
+    on_axis = np.asarray(fit.centre) + float((np.median(band, axis=0) - fit.centre) @ fit.axis) * fit.axis
+    for direction, color, name in ((pose.heading, RED, "fitted heading"), (true_handle_heading(label), GREEN, "true heading (label, offline)")):
+        start, end = project(frame, np.array([on_axis, on_axis + 0.08 * np.asarray(direction)]))
+        axes[0].annotate("", xy=end, xytext=start, arrowprops=dict(arrowstyle="-|>", color=color, lw=2.4))
+        axes[0].plot([], [], color=color, lw=2.4, label=name)
+    axes[0].set_title("Rim read as a handle (seed 11, frame 208)\nthe real handle is out of view, behind the mug", fontsize=9.5)
+    axes[0].legend(frameon=False, fontsize=8, loc="lower left")
+    crop_to(axes[0], mask, 42)
+    seed, sequence, camera = 13, 464, "head_camera"
+    frame_obs, surface, fit, pose = mug_surface(seed, sequence, camera)
+    frame = frame_obs.camera_frames[camera]
+    mask = best_mask(seed, sequence, camera, "mug")
+    label = next(item for item in labels(seed) if item["sequence"] == sequence)
+    axes[1].imshow(overlay(frame_obs.images[camera], mask, ORANGE, 0.3))
+    for point, color, name in ((pose.position, RED, "base we reported (the rim end)"), (true_mug_base(label), GREEN, "true base (label, offline)")):
+        u, v = project(frame, np.asarray(point, dtype=float)[None])[0]
+        axes[1].plot(u, v, "o", ms=11, color=color, mec="white", mew=1.5, label=name)
+    axes[1].set_title(f"Upside down while tipping (seed 13, frame 464)\ntrue tilt {label['mug']['tilt_deg']:.0f} deg; the axis is within 45 deg of vertical, so it was read as 'up'", fontsize=9.5)
+    axes[1].legend(frameon=False, fontsize=8, loc="lower left")
+    crop_to(axes[1], mask, 42)
+    save(fig, "fresh_failures.png")
+
+
+def camera_coverage():
+    """Live runs have no perception camera: frames with a trusted pose with and without it."""
+    sets = (("seeds 0-4", "pose_dev_with_camera", "pose_dev_without_camera"),
+            ("seeds 5-9", "pose_holdout_with_camera", "pose_holdout_without_camera"),
+            ("seeds 10-14", "fresh_with_camera", "fresh_without_camera"))
+    fig, ax = plt.subplots(figsize=(7, 3.1))
+    x = np.arange(len(sets))
+    for offset, index, color, name in ((-0.2, 2, BLUE, "head and wrists (what live runs have today)"),
+                                       (0.2, 1, ORANGE, "plus the perception camera")):
+        values = [100 * summary(item[index])["pose_overall"]["coverage"] for item in sets]
+        drawn = ax.bar(x + offset, values, 0.36, color=color, label=name)
+        ax.bar_label(drawn, fmt="%.0f", fontsize=9)
+    ax.set_xticks(x, [item[0] for item in sets])
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("frames with a trusted pose (%)")
+    ax.yaxis.grid(True, color=GRID)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, fontsize=9, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2)
+    save(fig, "camera_coverage.png")
+
+
+def seat_results():
+    """Step 9: the depth peg seat against RoboTwin's hang target, every episode, beside the peg tip."""
+    episodes = {}
+    for report in ("step9_dev", "step9_holdout", "fresh_step9"):
+        episodes.update(summary(report)["rack"]["first_pose"])
+    names = sorted(episodes, key=lambda name: int(name.split("_")[1]))
+    fig, ax = plt.subplots(figsize=(11, 3.4))
+    x = np.arange(len(names))
+    for offset, key, color, name in ((-0.2, "peg_tip_error_m", MUTED, "peg tip vs the label's peg end (3D)"),
+                                     (0.2, "seat_xy_error_m", GREEN, "peg seat vs the hang target (xy)")):
+        values = [100 * episodes[name][key] if episodes[name] else np.nan for name in names]
+        ax.bar(x + offset, values, 0.38, color=color, label=name)
+    ax.axhline(2.0, color=RED, lw=1.6, ls="--")
+    ax.text(len(names) - 0.5, 2.05, "RoboTwin's hang tolerance: 2 cm", color=INK, fontsize=8.5, ha="right", va="bottom")
+    ax.axvspan(9.5, len(names) - 0.5, color=GREEN, alpha=0.06)
+    ax.text(12, 2.6, "fresh seeds", ha="center", fontsize=8.5, color=INK)
+    ax.set_xticks(x, [name.replace("seed_", "") for name in names])
+    ax.set_xlabel("seed (first confirmed rack pose)")
+    ax.set_ylabel("error (cm)")
+    ax.set_ylim(0, 3.0)
+    ax.yaxis.grid(True, color=GRID)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, fontsize=8.5, loc="upper left")
+    save(fig, "seat_results.png")
+
+
 FIGURES = (mesh_offset, depth_steps, fits_on_frames, shadow, quality_gap, position_results, axis_results,
-           release_results)
+           release_results, handle_and_base, rack_fit, fresh_results, fresh_failures, camera_coverage, seat_results)
 
 
 def main():

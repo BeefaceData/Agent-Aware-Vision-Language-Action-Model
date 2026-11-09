@@ -1,7 +1,8 @@
 # Plan: object poses from the depth cameras
 
-Status: **steps 1-7 implemented** (2026-11-05). Steps 1-5 committed in `b2658f1`; steps 6-7
-not yet committed. Next: step 8 (fresh seeds 10-14, needs GPU) and step 9 (wiring into anchors).
+Status: **steps 1-9 done** (2026-11-09). Committed: steps 1-5 `b2658f1`, steps 6-7 `ade0763`,
+review fixes `4257459`. Step 9 is not yet committed. Step 8 (fresh seeds 10-14, scored at
+`4257459`) met 5 of its 6 targets; the "no confident wrong poses" target failed (see below).
 Plan revised 2026-11-05; first draft 2026-10-30.
 
 ## Progress (2026-11-05)
@@ -62,7 +63,8 @@ The remaining 6 false trues are all seed 6's end-on mug:
 
 - **Heading.** Points 0.8-3.5 cm outside the fitted radius, all on one side of the axis, are
   the handle. Their mean direction is `heading`; their median point is
-  `key_points["handle"]`.
+  `key_points["handle"]`. Toppled mugs rarely get a heading: their handle tends to lie close
+  to the table, and the points near the table are removed.
 - **Base end.** Two cues, which must agree when both answer:
   - *Inner wall.* Wall points whose normals face the axis are the inside of the cup, seen
     through the opening, so the opening is the end nearer the camera. On seeds 0-4 this held
@@ -111,8 +113,46 @@ Review fixes (2026-11-05):
 - `surface_points_and_normals` works on the mask's bounding box only. It gives identical
   output on 320 real masks and is about 1.8 times faster.
 
-Seeds 5-9 were not looked at while building steps 6-7. Toppled mugs rarely get a heading:
-their handle tends to lie close to the table, and the points near the table are removed.
+Seeds 5-9 were not looked at while building steps 6-7.
+
+### Step 9 (2026-11-05): wiring, behind `perception.depth_pose_anchors` (off by default)
+
+This changes where the arm goes, which offline frames cannot test, so it is opt-in until a
+live A/B. It requires `rgbd_enabled` and `--perception-factory`. With it on:
+
+- **`mug_pregrasp`** aims at the mask's median point moved onto the trusted mug axis. It
+  keeps the median's height but drops the pull towards the camera. With no trusted pose it
+  falls back to the median.
+- **`rack_approach`** (semantic path) aims at the depth rack pose's `peg_seat`. With no rack
+  pose it falls back to today's target.
+- **Hang targets.** The rack frame comes from the depth rack pose (`DepthRackFrame`,
+  `rack_frame_from_pose`), so no Opus rack call is needed. The frame follows the Opus
+  keypoint convention:
+  - origin at the seat;
+  - +x along the peg to its tip;
+  - +y up the pole.
+
+  This applies only with the Anthropic planner, which still grounds the **mug-handle frame
+  with Opus**.
+- **Why the handle stays with Opus.** The depth handle point is 1.7-2.1 cm (median) from the
+  label's handle point, and a hang must land within 2 cm.
+- **The new `peg_seat` key point.** It is the point on the peg over the middle of the pole's
+  foot and the peg tip. That matches RoboTwin's success target (handle over the midpoint of
+  the rack base and peg end) within a median of 3.2 / 4.5 mm on seeds 0-4 / 5-9, worst 1.0 cm.
+- **Not done:** `toppled_mug_pregrasp` and `stage_pose` anchors. They need new skill targets
+  and prompt changes, so they wait for the recovery work.
+- **Evaluator additions:** `seat_xy_error_m` (rack) and `handle_point_error_m` (mug,
+  informational).
+- **Measured with `rack_prompt_profile: explore_mug_rack`.** The default profile has not been
+  tested for rack poses, so set that profile together with `depth_pose_anchors`.
+- **Follow-up (supervisor side):** a live comparison with the setting on and off (anchor reach,
+  hang success). It tests the task, not pose accuracy, and is not needed for the perception work.
+- Review fixes:
+  - `DepthRackFrame` reads the provider's episode rack pose (`episode_rack_pose`), so a
+    detector failure on the current frame no longer hides a rack pose already confirmed.
+  - The pose-based `mug_pregrasp` needs the mug to be `grounded`, as the default target does;
+    an ambiguous mask falls back.
+
 Read with `docs/Collaboration/Olusola/guides/perception/perception_guide.pdf` (how perception works today) and
 `docs/Collaboration/Olusola/handover/perception_for_retries.md` (what predicates exist).
 
@@ -124,6 +164,50 @@ The design is **category-level**. Nothing at runtime knows which mug mesh the si
 loaded. Each object is described by a small spec: a prompt, a shape primitive and size ranges.
 Adding a new object (a bottle, a bowl, a second rack) means adding a spec, not new code paths.
 Section 13 records the decisions that follow from this.
+
+### Step 8 (2026-11-09): fresh seeds 10-14, frozen at `4257459`
+
+Nothing was changed after seeing these seeds. 290 frames, 71 of them toppled (seed 10: 19,
+seed 13: 29, seed 14: 23). Reports: `fresh_with_camera`, `fresh_without_camera`,
+`fresh_before_pose`, `fresh_before_pose_without_camera`, `fresh_step9`.
+
+| Metric | Target | With perception camera | Without | Met |
+|---|---|---|---|---|
+| Posed frames | - | 248/290 | 217/290 | - |
+| Base error, median / p90 | 1.5 / 3 cm | 0.44 / 1.66 cm | median 0.35 cm | yes |
+| Axis error, median | 10 deg | 0.9 deg | 0.9 deg | yes |
+| Upright/toppled mix-ups | 0 | 0 | 0 | yes |
+| Heading error, median | 20 deg | 2.9 deg | 3.1 deg | yes |
+| Rack peg tip, median (worst) | 1 cm | 3.1 mm (3.6 mm), 5 of 5 episodes | same | yes |
+| Confident wrong poses | **0** | **4** | **4** | **no** |
+
+Also: seat xy to the hang target 3.8 mm median (`fresh_step9`); the handle point is 2.9 cm off,
+so it stays unused. Predicates have precision 1.00 and no false trues, before and after the
+pose work; `release_ready` recall went 0.61 -> 0.62 with the camera and stayed 0.52 without it.
+
+The fresh seeds held no end-on mug that fools the old surface test (0 false trues before the
+pose work too), so they **neither confirm nor refute** the 25 -> 6 gain on seeds 5-9.
+
+The four failures, not patched because that would spoil these seeds as a test:
+
+- **Rim read as a handle** (3 frames: seed 11 frame 208, seed 13 frames 208 and 256; mug model
+  4; heading 145-168 deg off, axis and base correct). With the handle hidden, a band of points
+  near the rim sits just outside the fitted radius on the camera side. Traced directly on seeds
+  11/208 and 13/208. Proposed fix: require handle points to span part of the mug's height.
+- **Upside-down mug near vertical** (seed 13 frame 464, true tilt 146 deg, axis 173 deg off, base
+  12 cm off). `_placement` assumes an axis within 45 deg of vertical points up. Proposed fix: use
+  the base-end cues on tilted mugs too, and report base unknown when they disagree with "up".
+
+Neither affects a decision today: nothing reads the heading, the frame was not called safe to
+release, and the mug approach uses the axis line, which a flip does not change. Tune fixes on
+seeds 0-4 and confirm on a new set.
+
+Live runs have no perception camera: only the capture tools add it, and SAM 3 otherwise queries
+the head camera and falls back to a wrist. The "without" column is what live runs get. On seeds
+0-9 a perception-first order finds the mug in 82% of frames against 61% today, at 1.62 against
+1.69 SAM 3 calls per frame, so it would add coverage rather than save calls.
+
+`sam3_cache` now saves after each frame and resumes, because a laptop suspend lost whole seeds.
 
 ---
 

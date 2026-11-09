@@ -53,7 +53,8 @@ class ObjectPose:
     cameras: tuple[str, ...]
     observation_sequence: int
     # Named world points: "handle" (median of the handle's visible points),
-    # "peg_tip" (the far end of the rack's peg). Read-only: a cached rack pose
+    # "peg_tip" (the far end of the rack's peg), "peg_seat" (where a hung
+    # handle should come to rest on the peg). Read-only: a cached rack pose
     # is shared by every later observation.
     key_points: Mapping[str, tuple[float, float, float]] = field(default_factory=dict)
 
@@ -482,7 +483,8 @@ def pole_with_peg_pose(surfaces, spec, *, table_height_m, observation_sequence):
     reason = f"pole_and_peg_fit_{len(fits)}_camera" + ("s" if len(fits) > 1 else "")
     return ObjectPose(spec.label, _floats(best["foot"]), _floats(best["axis"]), True, None,
                       _floats(best["heading"]), best["explained"], True, reason, tuple(sorted(fits)),
-                      observation_sequence, {"peg_tip": _floats(best["peg_tip"])}), reason
+                      observation_sequence,
+                      {"peg_tip": _floats(best["peg_tip"]), "peg_seat": _floats(best["peg_seat"])}), reason
 
 
 def same_peg(first, second):
@@ -533,7 +535,21 @@ def _fit_pole_with_peg(points, spec, table_height_m):
     foot = pole_centre + (table_height_m - pole_centre[2]) / pole_axis[2] * pole_axis
     explained = float((on_pole.sum() + on_peg.sum()) / len(points))
     return {"foot": foot, "axis": pole_axis, "heading": heading / np.linalg.norm(heading), "peg_tip": tip,
+            "peg_seat": _peg_seat(foot, tip, peg_centre, peg_axis),
             "explained": explained}, "pole_and_peg"
+
+
+def _peg_seat(foot, tip, peg_centre, peg_axis):
+    """The point on the peg above the middle of the pole's foot and the peg tip.
+
+    RoboTwin counts a hang as done when the handle sits over the midpoint of
+    the rack's base and peg end; on seeds 0-4 this point lay 0.3-1.3 cm from
+    that target, the peg tip 2.4-3.5 cm.
+    """
+    middle = (np.asarray(foot) + np.asarray(tip)) / 2
+    horizontal = peg_axis[:2]
+    along = float((middle[:2] - peg_centre[:2]) @ horizontal / max(float(horizontal @ horizontal), 1e-9))
+    return peg_centre + along * peg_axis
 
 
 def _robust_line(points, tolerance_m, rng):

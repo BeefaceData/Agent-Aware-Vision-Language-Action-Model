@@ -353,6 +353,11 @@ class RGBDPerceptionProvider:
                                             "perception"))
         return self.anchors.resolve(name, arm, observation)
 
+    @property
+    def episode_rack_pose(self):
+        """The depth rack pose kept for the episode once two views agreed, else None."""
+        return self._rack_pose
+
     def static_rack_world_anchor_available(self, observation):
         reference = self._static_rack_reference
         available = bool(reference is not None
@@ -638,19 +643,48 @@ class RGBDPerceptionProvider:
         """
         labels = {"mug_pregrasp": "mug", "rack_approach": "rack",
                   "table_approach": "table"}
+        result = self._fresh_result_for_anchor(name, arm, observation, offset_m)
+        target = result.objects.get(labels[name])
+        if target is None or result.status.get(labels[name]) != "grounded":
+            raise ValueError("grounded_target_unavailable")
+        return self._bind_standoff(name, arm, observation, np.asarray(target.position, dtype=float),
+                                   measured_tcp_pose, offset_m)
+
+    def bind_pose_approach_anchor(self, name, arm, observation, *, measured_tcp_pose,
+                                  offset_m=0.12):
+        """Like ``bind_approach_anchor``, but aimed with the depth-fitted poses.
+
+        ``mug_pregrasp``: the mask's median point moved onto the trusted mug
+        axis, which keeps its height but removes the pull towards the camera.
+        ``rack_approach``: the rack pose's peg seat. Raises
+        ``pose_target_unavailable`` when there is no such pose.
+        """
+        result = self._fresh_result_for_anchor(name, arm, observation, offset_m)
+        mug, mug_pose, rack_pose = result.objects.get("mug"), result.mug_pose, result.rack_pose
+        mug_grounded = mug is not None and result.status.get("mug") == "grounded"
+        if name == "mug_pregrasp" and mug_grounded and mug_pose is not None and mug_pose.trusted:
+            on_axis, axis = np.asarray(mug_pose.position, dtype=float), np.asarray(mug_pose.axis, dtype=float)
+            point = on_axis + float((np.asarray(mug.position) - on_axis) @ axis) * axis
+        elif name == "rack_approach" and rack_pose is not None:
+            point = np.asarray(rack_pose.key_points["peg_seat"], dtype=float)
+        else:
+            raise ValueError("pose_target_unavailable")
+        return self._bind_standoff(name, arm, observation, point, measured_tcp_pose, offset_m)
+
+    def _fresh_result_for_anchor(self, name, arm, observation, offset_m):
         if name not in SYMBOLIC_ANCHORS or arm not in ("left", "right"):
             raise ValueError("unsupported_symbolic_anchor")
         if (isinstance(offset_m, bool) or not np.isfinite(offset_m)
                 or not 0 <= offset_m <= self.max_approach_offset_m):
             raise ValueError("approach_offset_out_of_bounds")
-        start = pose7(measured_tcp_pose)
         result = self._last_result
         if result is None or result.observation_sequence != observation.sequence:
             raise ValueError("grounding_missing_or_stale")
-        target = result.objects.get(labels[name])
-        if target is None or result.status.get(labels[name]) != "grounded":
-            raise ValueError("grounded_target_unavailable")
-        point = np.asarray(target.position, dtype=float)
+        return result
+
+    def _bind_standoff(self, name, arm, observation, point, measured_tcp_pose, offset_m):
+        """Bind a waypoint ``offset_m`` short of ``point`` on the line from the measured TCP."""
+        start = pose7(measured_tcp_pose)
         delta = point - start[:3]
         distance = float(np.linalg.norm(delta))
         if distance <= 1e-6 or distance > self.max_anchor_distance_m:

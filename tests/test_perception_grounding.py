@@ -796,6 +796,66 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertIsNone(prepare(current_ee, observation(22)))
         self.assertEqual(len(detector.calls), 1)
 
+    @staticmethod
+    def provider_with_mug_pose(sequence, *, trusted, mug_status="grounded"):
+        """A provider whose current result has a mug median at (0.53, 0, 0.8) and a vertical axis at x=0.5."""
+        from harness.perception.grounding import GroundingResult
+
+        anchors = AnchorRegistry()
+        provider = RGBDPerceptionProvider(FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ())),
+                                          anchors)
+        mug = GroundedObject("mug", (.53, 0., .8), .99, sequence, "head_camera", 1.)
+        pose = ObjectPose("mug", (.5, 0., .75), (0., 0., 1.), True, .045, None, .9, trusted,
+                          "wall_fit_1_camera", ("head_camera",), sequence)
+        provider._last_sequence = sequence
+        provider._last_result = GroundingResult(sequence, {"mug": mug}, {"mug": mug_status}, mug_pose=pose)
+        return provider, anchors
+
+    def test_pose_anchor_aims_at_the_mug_axis_at_the_median_height(self):
+        provider, _anchors = self.provider_with_mug_pose(5, trusted=True)
+
+        anchor = provider.bind_pose_approach_anchor("mug_pregrasp", "left", observation(5),
+                                                    measured_tcp_pose=(.5, -.5, .8, 1., 0., 0., 0.),
+                                                    offset_m=.1)
+
+        np.testing.assert_allclose(anchor.pose[:3], (.5, -.1, .8), atol=1e-9)  # 0.1 m short of (0.5, 0, 0.8)
+
+    def test_pose_anchor_needs_a_trusted_pose(self):
+        provider, _anchors = self.provider_with_mug_pose(5, trusted=False)
+
+        with self.assertRaisesRegex(ValueError, "pose_target_unavailable"):
+            provider.bind_pose_approach_anchor("mug_pregrasp", "left", observation(5),
+                                               measured_tcp_pose=(.5, -.5, .8, 1., 0., 0., 0.))
+
+    def test_pose_anchor_needs_a_grounded_mug(self):
+        provider, _anchors = self.provider_with_mug_pose(5, trusted=True, mug_status="ambiguous")
+
+        with self.assertRaisesRegex(ValueError, "pose_target_unavailable"):
+            provider.bind_pose_approach_anchor("mug_pregrasp", "left", observation(5),
+                                               measured_tcp_pose=(.5, -.5, .8, 1., 0., 0., 0.))
+
+    def test_preparer_uses_pose_anchors_only_when_enabled_and_falls_back_without_a_pose(self):
+        from harness.perception.preparation import PerceptionAnchorPreparer
+
+        command = SkillCommand.model_validate({"action": "move_to", "arm": "left",
+                                               "parameters": {"target": "mug_pregrasp"}})
+        environment = SimpleNamespace(arm_state=lambda arm: {"pose": (.5, -.5, .8, 1., 0., 0., 0.)})
+        def standoff(target):
+            tcp = np.array((.5, -.5, .8))
+            return np.asarray(target) - (np.asarray(target) - tcp) / np.linalg.norm(np.subtract(target, tcp)) * .1
+
+        bound = {}
+        for enabled, trusted in ((False, True), (True, True), (True, False)):
+            provider, anchors = self.provider_with_mug_pose(5, trusted=trusted)
+            prepare = PerceptionAnchorPreparer(provider, environment, anchors, approach_offset_m=.1,
+                                               depth_pose_anchors=enabled)
+            bound[enabled, trusted] = prepare(command, observation(5)).pose[:3]
+
+        median, on_axis = (.53, 0., .8), (.5, 0., .8)
+        np.testing.assert_allclose(bound[False, True], standoff(median))  # as before
+        np.testing.assert_allclose(bound[True, True], standoff(on_axis))
+        np.testing.assert_allclose(bound[True, False], standoff(median))  # untrusted pose: the default target
+
     def test_anchor_preparer_rejects_registry_mismatch_and_unapproved_symbols(self):
         from types import SimpleNamespace
         from harness.perception.preparation import perception_anchor_preparer

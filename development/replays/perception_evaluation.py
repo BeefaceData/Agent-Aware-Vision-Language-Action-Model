@@ -169,7 +169,7 @@ def pose_errors(pose, label):
     truth_axis = true_mug_axis(label)
     errors = {"pose_tilt_deg": None, "true_tilt_deg": tilt_from_up_deg(truth_axis),
               "axis_error_deg": None, "base_error_m": None, "base_xy_error_m": None, "base_z_error_m": None,
-              "heading_error_deg": None}
+              "heading_error_deg": None, "handle_point_error_m": None}
     if pose is None:
         return errors
     axis = np.asarray(pose.axis, dtype=float)
@@ -179,6 +179,9 @@ def pose_errors(pose, label):
                   axis_error_deg=float(np.degrees(np.arccos(np.clip(alignment, -1.0, 1.0)))))
     if pose.heading is not None:
         errors["heading_error_deg"] = angle_between_deg(pose.heading, true_handle_heading(label))
+    if "handle" in pose.key_points:
+        offset = np.asarray(pose.key_points["handle"]) - np.asarray(label["mug"]["functional_point"][:3])
+        errors["handle_point_error_m"] = float(np.linalg.norm(offset))
     if pose.base_known:
         offset = np.asarray(pose.position) - true_mug_base(label)
         errors.update(base_error_m=float(np.linalg.norm(offset)), base_xy_error_m=float(np.linalg.norm(offset[:2])),
@@ -186,13 +189,19 @@ def pose_errors(pose, label):
     return errors
 
 
+def hang_success_target(label):
+    """Where RoboTwin wants the hung handle: over the midpoint of the rack's base and peg end."""
+    return (np.asarray(label["rack"]["pose"][:3]) + np.asarray(label["rack"]["functional_point"][:3])) / 2
+
+
 def rack_errors(pose, label):
-    """Peg tip and pole direction errors of a rack pose; Nones without one."""
+    """Peg tip, peg seat and pole direction errors of a rack pose; Nones without one."""
     if pose is None:
-        return {"peg_tip_error_m": None, "pole_axis_error_deg": None}
+        return {"peg_tip_error_m": None, "seat_xy_error_m": None, "pole_axis_error_deg": None}
     truth_up = pose_matrix(label["rack"]["pose"])[:3, :3] @ np.array((0.0, 1.0, 0.0))  # the 040_rack mesh stands on +y
     tip = np.asarray(pose.key_points["peg_tip"]) - np.asarray(label["rack"]["functional_point"][:3])
-    return {"peg_tip_error_m": float(np.linalg.norm(tip)),
+    seat = np.asarray(pose.key_points["peg_seat"]) - hang_success_target(label)
+    return {"peg_tip_error_m": float(np.linalg.norm(tip)), "seat_xy_error_m": float(np.linalg.norm(seat[:2])),
             "pole_axis_error_deg": angle_between_deg(pose.axis, truth_up)}
 
 
@@ -310,6 +319,7 @@ def pose_summary(rows):
              or (pose["base_error_m"] is not None and pose["base_error_m"] > POSE_WRONG_BASE_M)
              or (pose.get("heading_error_deg") or 0.0) > POSE_WRONG_HEADING_DEG]
     headed = [pose["heading_error_deg"] for pose in fitted if pose.get("heading_error_deg") is not None]
+    handles = [pose["handle_point_error_m"] for pose in fitted if pose.get("handle_point_error_m") is not None]
 
     def toppled(tilt):
         return tilt > TOPPLED_TILT_DEG
@@ -325,6 +335,8 @@ def pose_summary(rows):
             "toppled_called_upright": sum(not toppled(pose["pose_tilt_deg"]) and toppled(pose["true_tilt_deg"])
                                           for pose in fitted),
             "with_heading": len(headed), "heading_error_deg": _distribution(headed),
+            # Informational: the handle key point is not yet used for hanging.
+            "handle_point_error_m": _distribution(handles),
             # A known base at the wrong end turns the axis round: about 180 degrees off.
             "base_end_wrong": sum(pose["base_error_m"] is not None and pose["axis_error_deg"] > 90 for pose in fitted),
             "confident_wrong": len(wrong),
@@ -343,10 +355,12 @@ def rack_summary(records):
         rack = posed[0]["rack"] if posed else None
         first[capture] = None if rack is None else {"sequence": posed[0]["sequence"],
                                                     "peg_tip_error_m": round(rack["peg_tip_error_m"], 4),
+                                                    "seat_xy_error_m": round(rack["seat_xy_error_m"], 4),
                                                     "pole_axis_error_deg": round(rack["pole_axis_error_deg"], 2)}
     errors = [item["peg_tip_error_m"] for item in first.values() if item is not None]
+    seats = [item["seat_xy_error_m"] for item in first.values() if item is not None]
     return {"episodes": len(first), "with_rack_pose": len(errors), "first_pose": first,
-            "peg_tip_error_m": _distribution(errors),
+            "peg_tip_error_m": _distribution(errors), "seat_xy_error_m": _distribution(seats),
             "confident_wrong": sum(error > RACK_WRONG_PEG_TIP_M for error in errors)}
 
 
@@ -378,11 +392,12 @@ def markdown_report(summary):
               f"Episodes with a rack pose: {rack['with_rack_pose']} of {rack['episodes']}; "
               f"peg tip error {rack['peg_tip_error_m']}; wrong by more than {RACK_WRONG_PEG_TIP_M} m: "
               f"{rack['confident_wrong']}.", "",
-              "| Episode | First frame | Peg tip error (m) | Pole axis error (deg) |", "|---|---|---|---|"]
+              "| Episode | First frame | Peg tip error (m) | Seat xy error to the hang target (m) | "
+              "Pole axis error (deg) |", "|---|---|---|---|---|"]
     for capture, item in rack["first_pose"].items():
-        cells = ("-", "-", "-") if item is None else (item["sequence"], item["peg_tip_error_m"],
-                                                      item["pole_axis_error_deg"])
-        lines.append(f"| {capture} | {cells[0]} | {cells[1]} | {cells[2]} |")
+        cells = ("-",) * 4 if item is None else (item["sequence"], item["peg_tip_error_m"],
+                                                 item["seat_xy_error_m"], item["pole_axis_error_deg"])
+        lines.append(f"| {capture} | {' | '.join(str(cell) for cell in cells)} |")
     lines += ["", "## Predicates", "",
               "| Predicate | Precision | Recall | Unknown rate | False true | Truth true: t/f/? | Truth false: t/f/? |",
               "|---|---|---|---|---|---|---|"]

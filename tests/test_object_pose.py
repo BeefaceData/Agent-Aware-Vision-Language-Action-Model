@@ -253,6 +253,9 @@ class RackPoseTests(unittest.TestCase):
         tip = PEG_ROOT + PEG_LENGTH * PEG_DIRECTION
         self.assertLess(np.linalg.norm(np.subtract(pose.key_points["peg_tip"], tip)), 0.015)
         self.assertLess(np.linalg.norm(np.subtract(pose.position[:2], POLE_FOOT[:2])), 0.015)
+        # The seat is on the peg, over the middle of the foot and the tip.
+        middle = (POLE_FOOT + tip) / 2
+        self.assertLess(np.linalg.norm(np.subtract(pose.key_points["peg_seat"][:2], middle[:2])), 0.015)
 
     def test_a_pole_without_a_visible_peg_is_unknown(self):
         pose, reason = pole_with_peg_pose({"right_camera": rack_view(RACK_EYE, with_peg=False)}, RACK,

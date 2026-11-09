@@ -8,6 +8,7 @@
 | `guides/pose_estimation/pose_estimation_guide.pdf` | Mug and rack poses from the depth cameras (pose plan steps 1–9): what was built, why, the fresh-seed results, and what it means for supervising the task. Same build setup. |
 | `plans/pose_estimation_plan.md` | The full pose-estimation plan, its decisions and progress notes. |
 | `handover/perception_for_retries.md` | For the teammate building perception-driven retries: what is available and how to use it. |
+| `handover/pose_estimation_for_retries.md` | For teammates building retries or supervisor logic: reading mug and rack poses, how far to trust them, and known failures. Read after the note above. |
 | `slides/perception_slides.pptx` | Three-slide summary of the perception work. |
 
 Each `make_figures.py` lists the data and reports it needs at the top. Nothing under `data/` is committed.

@@ -68,6 +68,25 @@ def _matrix_pose(transform):
     return np.concatenate((transform[:3, 3], q))
 
 
+def frame_from_axes(origin, x_direction, plane_direction):
+    """A right-handed frame at ``origin`` as a pose: +x along ``x_direction``,
+    +y towards ``plane_direction`` within their plane, +z = x cross y."""
+    x_axis = np.asarray(x_direction, dtype=float)
+    y_axis = np.asarray(plane_direction, dtype=float)
+    if np.linalg.norm(x_axis) < 1e-9:
+        raise ValueError("degenerate_frame_axes")
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = y_axis - x_axis * float(y_axis @ x_axis)
+    if np.linalg.norm(y_axis) < 1e-6:
+        raise ValueError("degenerate_frame_axes")
+    y_axis /= np.linalg.norm(y_axis)
+    z_axis = np.cross(x_axis, y_axis)
+    return _matrix_pose(np.block([
+        [np.column_stack((x_axis, y_axis, z_axis)), np.asarray(origin, dtype=float).reshape(3, 1)],
+        [np.zeros((1, 3)), np.ones((1, 1))],
+    ]))
+
+
 def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
                                min_axis_length_m=0.008, max_axis_length_m=0.30):
     """Build a 3D frame from ordered ``origin, x-axis, xy-plane`` RGB pixels.
@@ -101,14 +120,7 @@ def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
     y_length = float(np.linalg.norm(y_axis))
     if not min_axis_length_m <= y_length <= max_axis_length_m:
         raise ValueError("plane_axis_baseline_out_of_bounds")
-    y_axis /= y_length
-    z_axis = np.cross(x_axis, y_axis)
-    z_axis /= np.linalg.norm(z_axis)
-    y_axis = np.cross(z_axis, x_axis)
-    return _matrix_pose(np.block([
-        [np.column_stack((x_axis, y_axis, z_axis)), origin.reshape(3, 1)],
-        [np.zeros((1, 3)), np.ones((1, 1))],
-    ]))
+    return frame_from_axes(origin, x_axis, y_axis)
 
 
 def tcp_targets_for_mug_alignment(tcp_pose, mug_function_pose, rack_function_pose,

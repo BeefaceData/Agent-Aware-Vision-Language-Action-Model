@@ -57,6 +57,19 @@ class Sam3CacheTests(unittest.TestCase):
         self.assertEqual(len(worker.calls), 2 * len(CAMERAS))
         self.assertTrue(all(include_rack for _sequence, _camera, include_rack in worker.calls))
 
+    def test_an_interrupted_run_continues_without_querying_done_frames_again(self):
+        directory = capture_with([0, 16])
+        first = build_cache(directory.name, FakeWorker(), log=lambda message: None)
+        worker, saved = FakeWorker(), []
+
+        cache = build_cache(directory.name, worker, log=lambda message: None,
+                            done_frames={"0": first["frames"]["0"]}, save_progress=saved.append)
+        directory.cleanup()
+
+        self.assertEqual({sequence for sequence, _camera, _rack in worker.calls}, {16})
+        self.assertEqual(cache, first)
+        self.assertEqual(len(saved), 1)
+
     def test_a_captured_perception_camera_is_cached_too(self):
         directory = tempfile.TemporaryDirectory()
         store = ObservationStore(Path(directory.name) / "observations")

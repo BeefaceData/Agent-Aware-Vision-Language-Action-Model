@@ -40,6 +40,8 @@ videos/
 !/docs/Collaboration/*.md
 !/docs/Collaboration/*/
 !/docs/Collaboration/*/*.md
+!/docs/Collaboration/*/*/
+!/docs/Collaboration/*/*/*.md
 
 # Python and OS caches
 __pycache__/

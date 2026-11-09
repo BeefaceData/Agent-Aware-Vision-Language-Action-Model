@@ -7,7 +7,10 @@ import numpy as np
 
 from harness.environment.base import Observation
 from harness.perception.anchors import AnchorRegistry
-from harness.perception.hang_targets import StaticRackFrameCache, bind_hang_targets
+from harness.perception.hang_targets import (DepthRackFrame, StaticRackFrameCache, bind_hang_targets,
+                                            rack_frame_from_pose)
+from harness.perception.object_pose import ObjectPose
+from harness.perception.pose_grounding import _pose_matrix
 from harness.perception.grounding import (Detection, DetectionBatch,
                                           RGBDPerceptionProvider)
 from harness.perception.preparation import PerceptionAnchorPreparer
@@ -184,6 +187,34 @@ class HangTargetTests(unittest.TestCase):
         summary = provider.planner_summary(self.obs)
         self.assertTrue(summary["rack_static_reference"]["world_anchor_available"])
         self.assertNotIn("world_position_xyz", summary["rack_static_reference"])
+
+
+
+def depth_rack_pose():
+    return ObjectPose("rack", (0.2, 0.15, 0.75), (0., 0., 1.), True, None, (1., 0., 0.), .9, True,
+                      "pole_and_peg_fit_2_cameras", ("head_camera", "right_camera"), 0,
+                      {"peg_seat": (0.25, 0.15, 0.90), "peg_tip": (0.29, 0.15, 0.93)})
+
+
+class DepthRackFrameTests(unittest.TestCase):
+    def test_the_depth_rack_frame_follows_the_opus_keypoint_convention(self):
+        transform = _pose_matrix(rack_frame_from_pose(depth_rack_pose()))
+
+        np.testing.assert_allclose(transform[:3, 3], (0.25, 0.15, 0.90))  # origin at the seat
+        np.testing.assert_allclose(transform[:3, 0], (0.8, 0., 0.6), atol=1e-6)  # along the peg to its tip
+        self.assertGreater(transform[2, 1], 0.7)  # +y up the rack's vertical plane
+
+    def test_the_depth_rack_frame_is_unavailable_until_the_provider_has_a_rack_pose(self):
+        provider = SimpleNamespace(observe=lambda _observation: None, episode_rack_pose=None)
+
+        with self.assertRaisesRegex(ValueError, "depth_rack_pose_unavailable"):
+            DepthRackFrame(provider).resolve(object())
+
+    def test_the_depth_rack_frame_resolves_from_the_provider_pose(self):
+        provider = SimpleNamespace(observe=lambda _observation: None, episode_rack_pose=depth_rack_pose())
+
+        np.testing.assert_allclose(DepthRackFrame(provider).resolve(object()),
+                                   rack_frame_from_pose(depth_rack_pose()))
 
 
 if __name__ == "__main__":

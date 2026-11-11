@@ -38,9 +38,11 @@ class ResettableEnvironment(AcquisitionEnvironment):
 class FakeSimulator:
     instances = []
 
-    def __init__(self, robotwin_root, *, rgbd_enabled=False, diagnostics=None):
+    def __init__(self, robotwin_root, *, rgbd_enabled=False, diagnostics=None,
+                 perception_cameras=()):
         self.task = None
         self.closed = False
+        self.perception_cameras = perception_cameras
         FakeSimulator.instances.append(self)
 
     def close(self):
@@ -51,19 +53,34 @@ class RunSkillsEpisodeTests(unittest.TestCase):
     def setUp(self):
         FakeSimulator.instances = []
 
-    def run_main(self, directory, environment):
+    def run_main(self, directory, environment, *, config_text=CONFIG):
         config = directory / "config.yaml"
-        config.write_text(CONFIG)
+        config.write_text(config_text)
         oracle = PredicateRegistry(HangingMugPredicates(environment.evidence,
                                                         source="development_oracle"))
         with patch("development.simulator.local_simulator.LocalSimulator", FakeSimulator), \
              patch.object(run_skills, "open_environment", lambda *_, **__: environment), \
              patch.object(run_skills, "build_evidence", lambda *_, **__: (oracle, None)), \
+             patch("harness.perception.rgbd.require_camera_frames"), \
              patch("harness.vla.modal_client.ModalVLAClient",
                    lambda: ModalVLAClient(Runtime())), \
              contextlib.redirect_stdout(io.StringIO()):
             return run_skills.main(["--config", str(config), "--output", str(directory / "out"),
                                     "--seed", "5", "--development-oracle"])
+
+    def test_hanging_diagnostic_does_not_downgrade_native_success(self):
+        summary = {"outcome": "task_success", "task_success": True,
+                   "milestone_reached": True, "phase": "COMPLETE"}
+        diagnostic = {"stable_hanging": False, "supported_window_samples": 0}
+
+        result = run_skills.attach_hanging_diagnostic(summary, diagnostic)
+
+        self.assertEqual(result["outcome"], "task_success")
+        self.assertTrue(result["task_success"])
+        self.assertEqual(result["hanging_verification"]["stable_hanging"], False)
+        self.assertEqual(result["hanging_verification"]["interpretation"], "diagnostic_only")
+        self.assertEqual(result["hanging_verification"]["episode_outcome_source"],
+                         "robotwin_native_task_success")
 
     def test_scripted_acquisition_episode_writes_complete_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -80,6 +97,16 @@ class RunSkillsEpisodeTests(unittest.TestCase):
                          "candidate_catalog.json"):
                 self.assertTrue((output / name).exists(), name)
             self.assertEqual(json.loads((output / "manifest.json").read_text())["seed"], 5)
+
+    def test_public_camera_setting_reaches_simulator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            config = CONFIG + "perception: {rgbd_enabled: true, perception_camera: default}\n"
+            self.assertEqual(self.run_main(directory, ResettableEnvironment(),
+                                           config_text=config), 0)
+            cameras = FakeSimulator.instances[0].perception_cameras
+            self.assertEqual(len(cameras), 1)
+            self.assertEqual(cameras[0].name, "perception_camera")
 
 
 if __name__ == "__main__":

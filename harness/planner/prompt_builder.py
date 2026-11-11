@@ -14,7 +14,8 @@ def prompt_bundle(task_scope="acquisition"):
     if task_scope not in ("acquisition", "full_task"):
         raise ValueError("unsupported_task_scope")
     scope_prompt = "acquisition.md" if task_scope == "acquisition" else "full_task.md"
-    prompt = "\n\n".join(read_prompt(name) for name in ("common.md", scope_prompt))
+    prompt = "\n\n".join(read_prompt(name) for name in (
+        "common.md", "hanging_mug_sop.md", scope_prompt))
     return prompt, sha256(prompt.encode()).hexdigest()
 
 
@@ -26,7 +27,7 @@ def public_result(result):
     data = {name: getattr(result, name, None) for name in (
         "call_id", "completed", "executed_policy_actions", "vla_chunks_requested",
         "executed_physics_ticks", "discarded_actions", "execution_uncertain",
-        "controlled_arms", "policy_history_reset", "arm_overlap_detected")}
+        "controlled_arms", "policy_history_reset")}
     data["skill"] = result.skill.value
     data["motion_accounting"] = {
         "policy_actions_confirmed": result.executed_policy_actions,
@@ -50,6 +51,10 @@ def public_result(result):
 def user_content(context, *, limits, history, pixel_grounding=False):
     from PIL import Image
     observation = context.observation.copy()
+    # The supervisor model gets the fixed scene view instead of the policy's two wrist views.
+    # The frozen VLA client still receives its original three camera keys.
+    supervisor_cameras = ("head_camera", "perception_camera") \
+        if "perception_camera" in observation.images else CAMERAS
     available_targets = ["current_ee", "mug_pregrasp"]
     cached_rack_target = False
     if limits.get("task_scope") == "full_task":
@@ -83,19 +88,22 @@ def user_content(context, *, limits, history, pixel_grounding=False):
                                       "for a mug choose its solid outer wall or rim, never its hollow opening; "
                                       "for a rack choose a visible solid hanger or support bar, not empty space")
             if pixel_grounding else None,
-        image_sizes_px={name: list(observation.images[name].shape[:2]) for name in CAMERAS},
+        image_sizes_px={name: list(observation.images[name].shape[:2])
+                        for name in supervisor_cameras},
         memory_retrieved=context.memory.planner_payload() if context.memory else [],
         memory_snapshot_sha256=context.memory.snapshot_sha256 if context.memory else None,
         grounding_feedback=context.grounding_feedback,
         grounding_camera_to_avoid=context.grounding_camera_to_avoid)
     content = []
-    for name in CAMERAS:
+    for name in supervisor_cameras:
         with BytesIO() as stream:
             picture = Image.fromarray(observation.images[name])
             picture.thumbnail((640, 480))
             picture.save(stream, format="PNG")
             encoded = base64.b64encode(stream.getvalue()).decode("ascii")
-        content.extend([{"type": "text", "text": name},
+        label = "supervisor_camera (fixed perception_camera)" \
+            if name == "perception_camera" else name
+        content.extend([{"type": "text", "text": label},
             {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": encoded}}])
     content.append({"type": "text", "text": json.dumps(data, allow_nan=False)})
     return content

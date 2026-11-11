@@ -36,7 +36,9 @@ def observation():
 class OpusFrameGroundingTests(unittest.TestCase):
     def test_reports_normalized_context_and_three_ordered_pixels(self):
         client = FakeClient({"visible": True,
-            "keypoints_px": [[0, 0], [1, 0], [2, 1]],
+            "keypoints_px": [{"x_px": 0, "y_px": 0},
+                             {"x_px": 1, "y_px": 0},
+                             {"x_px": 2, "y_px": 1}],
             "description": "visible peg frame", "confidence": .8})
         grounder = OpusObjectFrameGrounder(client, "claude-test-model",
             target="rack_peg", camera="head_camera")
@@ -48,6 +50,10 @@ class OpusFrameGroundingTests(unittest.TestCase):
         request = client.messages.requests[0]
         self.assertEqual(request["tool_choice"], {
             "type": "tool", "name": "report_object_frame_keypoints"})
+        pixel_schema = request["tools"][0]["input_schema"]["properties"]["keypoints_px"]
+        point_schema = pixel_schema["anyOf"][0]["items"]["properties"]
+        self.assertEqual(point_schema["x_px"]["maximum"], 2)
+        self.assertEqual(point_schema["y_px"]["maximum"], 1)
         self.assertIn("rack_frame_grounding.md", grounder.PROMPTS["rack_peg"])
 
     def test_empty_image_is_rejected_before_any_provider_request(self):

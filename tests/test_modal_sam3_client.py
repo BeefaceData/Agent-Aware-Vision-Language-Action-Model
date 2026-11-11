@@ -37,6 +37,26 @@ def png_mask(mask):
 
 
 class ModalSam3ClientTests(unittest.TestCase):
+    def test_all_scripted_handoff_phases_map_to_perception_phases(self):
+        detector = ModalSam3Detector(FakeWorker([]))
+        for phase in ("RIGHT_GRASP", "RIGHT_GRASP_RETRY", "RETRY_OPEN",
+                      "RETRY_RETREAT", "RETRY_RESTAGE_FALLBACK", "RIGHT_RETRY_OPEN",
+                      "RIGHT_RETRY_RETREAT", "RIGHT_RETRY_REORIENT",
+                      "RIGHT_RETRY_RESTAGE_FALLBACK"):
+            with self.subTest(phase=phase):
+                detector.set_task_phase(phase)
+                self.assertEqual(detector.task_phase, "grasp")
+
+        for phase in ("LEFT_TRANSFER",):
+            with self.subTest(phase=phase):
+                detector.set_task_phase(phase)
+                self.assertEqual(detector.task_phase, "handoff")
+
+        for phase in ("RACK_STAGING", "RACK_HANG"):
+            with self.subTest(phase=phase):
+                detector.set_task_phase(phase)
+                self.assertEqual(detector.task_phase, "hang")
+
     @staticmethod
     def response(sequence, camera, detections=()):
         return {"observation_sequence": sequence, "camera": camera,
@@ -108,6 +128,18 @@ class ModalSam3ClientTests(unittest.TestCase):
         self.assertEqual(detector.camera, "head_camera")
         self.assertEqual(detector.rack_grounding_camera, "right_camera")
         self.assertEqual(detector.rack_fallback_camera, "right_camera")
+
+    def test_fixed_scene_camera_can_be_selected_for_rack_grounding(self):
+        worker = FakeWorker([
+            self.response(4, "head_camera"), self.response(4, "perception_camera")])
+        detector = ModalSam3Detector(worker)
+        detector.configure_rack_grounding_camera("perception_camera")
+        images = {name: np.zeros((4, 5, 3), dtype=np.uint8)
+                  for name in ("head_camera", "perception_camera")}
+        detector.detect(images, observation_sequence=4)
+        self.assertEqual(detector.rack_fallback_camera, "perception_camera")
+        self.assertEqual([call[2] for call in worker.detect.calls],
+                         ["head_camera", "perception_camera"])
 
     def test_mug_score_at_new_cutoff_suppresses_unneeded_wrist_fallback(self):
         mask = np.ones((4, 5), dtype=bool)

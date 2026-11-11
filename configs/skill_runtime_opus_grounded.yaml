@@ -11,7 +11,9 @@ recipe:
     target: mug_pregrasp
   retreat:
     target: current_ee
-    offset_xyz: [0.0, 0.0, 0.05]
+    path_mode: reverse_approach
+    retreat_distance_m: 0.065
+    orientation_mode: preserve_current
   vla:
     max_chunks: 32
     chunk_size: 8

@@ -19,7 +19,6 @@ class InvalidPlannerResponse(ValueError):
         "vla_attempt_budget_exhausted", "vla_call_outside_acquisition_limits",
         "invalid_phase_assessment",
         "phase_outside_task_scope", "vla_call_outside_task_phase_limits",
-        "inter_arm_recovery_requires_right_retreat", "inter_arm_retreat_outside_bounds",
         "release_not_publicly_authorized",
         "analytic_skill_not_recovery_eligible",
     })

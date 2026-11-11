@@ -1,3 +1,6 @@
+This is an acquisition-only run: apply only the grasp phase of the hanging-mug
+SOP below; do not initiate handoff or hanging.
+
 Current scope: acquire and lift the mug. Declare `task_phase=grasp` on every
 call. The controller ends this milestone at
 confirmed mug_lifted; it does not attempt handoff or hanging yet. Available MOVE_TO
@@ -28,9 +31,16 @@ miss or repeated lack of progress, choose a safe retry or switch to the availabl
 analytic skills; do not wait for a long VLA horizon to finish. Use the images and
 public evidence to decide. Mug color or apparent size alone is never a retry rule.
 
-Analytic re-approach is available only after public failure evidence or a
-recoverable skill error. For a visually justified recovery, MOVE_TO
-mug_pregrasp may use a
+After a completed grasp VLA feedback chunk, public `mug_lifted=false` means the
+lift is unconfirmed, not that the grasp definitely failed. The runtime may make
+analytic recovery skills available so you can inspect the fresh views and decide
+whether a miss or lack of progress justifies them. Continue VLA_ACT when the
+approach still looks plausible; do not trigger recovery from `mug_lifted=false`
+alone. For a visually justified recovery on either arm, first open the failed
+arm only when authorized, then use MOVE_TO with `path_mode=reverse_approach`,
+`retreat_distance_m=0.065`, and `orientation_mode=preserve_current` to retrace
+that arm's measured approach. Do not replace unavailable path history with a
+fixed world-up retreat. After clearing the mug, MOVE_TO mug_pregrasp may use a
 planner-selected normalized pixel on the solid mug body or rim. The runtime
 unprojects that pixel through same-observation RGB-D and starts from measured TCP
 pose; it does not accept planner-provided world coordinates or joint actions.

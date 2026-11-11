@@ -24,7 +24,8 @@ class ModalSam3Detector:
                 or not isinstance(camera, str) or not camera
                 or type(max_image_bytes) is not int or not 1024 <= max_image_bytes <= 16_000_000
                 or rack_prompt_profile not in ("default", "explore_mug_rack")
-                or rack_fallback_camera not in (None, "head_camera", "left_camera", "right_camera")
+                or rack_fallback_camera not in (None, "head_camera", "left_camera", "right_camera",
+                                                *PERCEPTION_CAMERAS)
                 or rack_fallback_camera == camera):
             raise ValueError("invalid_modal_sam3_settings")
         if worker is None:
@@ -43,10 +44,18 @@ class ModalSam3Detector:
 
     def set_task_phase(self, phase):
         """Select wrist-view fallback order without changing the head primary."""
-        aliases = {"APPROACH_MUG": "grasp", "GRASP": "grasp",
-                   "TRANSFER": "handoff", "HANDOFF": "handoff",
-                   "APPROACH_RACK": "hang", "RIGHT_PICK_AND_HANG": "hang",
-                   "HANG": "hang", "COMPLETE": "hang"}
+        aliases = {
+            "APPROACH_MUG": "grasp", "GRASP": "grasp", "GRASP_MUG": "grasp",
+            "RETRY_OPEN": "grasp", "RETRY_RETREAT": "grasp",
+            "RETRY_RESTAGE_FALLBACK": "grasp",
+            "RIGHT_GRASP": "grasp", "RIGHT_GRASP_RETRY": "grasp",
+            "RIGHT_RETRY_OPEN": "grasp", "RIGHT_RETRY_RETREAT": "grasp",
+            "RIGHT_RETRY_REORIENT": "grasp", "RIGHT_RETRY_RESTAGE_FALLBACK": "grasp",
+            "TRANSFER": "handoff", "HANDOFF": "handoff", "LEFT_TRANSFER": "handoff",
+            "APPROACH_RACK": "hang", "RIGHT_PICK_AND_HANG": "hang",
+            "RACK_STAGING": "hang", "RACK_HANG": "hang", "HANG": "hang",
+            "COMPLETE": "hang",
+        }
         value = aliases.get(phase, phase)
         if value not in ("grasp", "handoff", "hang"):
             raise ValueError("unsupported_perception_task_phase")
@@ -66,7 +75,7 @@ class ModalSam3Detector:
             fallback if profile == "explore_mug_rack" else None)
 
     def configure_rack_grounding_camera(self, camera):
-        if camera not in ("head_camera", "left_camera", "right_camera"):
+        if camera not in ("head_camera", "left_camera", "right_camera", *PERCEPTION_CAMERAS):
             raise ValueError("unsupported_sam3_grounding_camera")
         # Mug/table evidence remains on the primary camera. The selected rack
         # view is queried separately while the one-shot rack cache is built.

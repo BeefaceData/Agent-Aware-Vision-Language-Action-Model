@@ -43,7 +43,7 @@ class AnalyticParameters(Model):
 class GroundingPixel(Model):
     """Planner-selected RGB pixel normalized to its full source camera view."""
 
-    camera: Literal["head_camera", "left_camera", "right_camera"]
+    camera: Literal["head_camera", "left_camera", "right_camera", "perception_camera"]
     uv: tuple[Annotated[StrictFloat, Field(ge=0.0, le=1.0)],
               Annotated[StrictFloat, Field(ge=0.0, le=1.0)]]
 
@@ -51,12 +51,22 @@ class GroundingPixel(Model):
 class MoveParameters(AnalyticParameters):
     target: Annotated[StrictStr, Field(min_length=1, max_length=80)] = "current_ee"
     offset_xyz: tuple[StrictFloat, StrictFloat, StrictFloat] = (0.0, 0.0, 0.0)
+    minimum_translation_m: Annotated[StrictFloat, Field(ge=0.0, le=0.20)] = 0.0
+    path_mode: Literal["target", "reverse_approach"] = "target"
+    retreat_distance_m: Annotated[StrictFloat, Field(ge=0.05, le=0.15)] = 0.05
+    position_mode: Literal["target", "preserve_current"] = "target"
+    orientation_mode: Literal["target", "preserve_current"] = "target"
     grounding: GroundingPixel | None = None
 
     @model_validator(mode="after")
     def bounded_offset(self):
         if sum(x*x for x in self.offset_xyz) > 0.20**2:
             raise ValueError("offset exceeds 20cm")
+        if (self.path_mode == "reverse_approach"
+                and (self.target != "current_ee" or self.offset_xyz != (0.0, 0.0, 0.0)
+                     or self.position_mode != "target"
+                     or self.orientation_mode != "preserve_current")):
+            raise ValueError("invalid_reverse_approach_parameters")
         return self
 
 
@@ -155,8 +165,6 @@ class SkillResult(Model):
     observation_before: NonnegativeInt
     observation_after: NonnegativeInt | None
     episode_terminal: StrictBool
-    # Public contact feedback; None when the active environment cannot measure it.
-    arm_overlap_detected: StrictBool | None = None
     task_success: StrictBool | None
     native_success_seen: StrictBool = False
     post_success_actions: NonnegativeInt = 0
@@ -216,24 +224,66 @@ def is_recoverable_executed_motion_failure(result: SkillResult | None) -> bool:
     )
 
 
+def is_recoverable_trajectory_limit(result: SkillResult | None) -> bool:
+    """Return a measured partial trajectory-limit stop for planner reassessment."""
+    return bool(
+        result is not None
+        and result.skill == SkillType.MOVE_TO
+        and not result.completed
+        and result.stop_reason == "trajectory_limits"
+        and not result.episode_terminal
+        and not result.execution_uncertain
+        and result.executed_physics_ticks > 0
+        and result.executed_policy_actions == 0
+        and result.vla_chunks_requested == 0
+        and result.state_after is not None
+        and result.observation_after is not None
+        and result.observation_after > result.observation_before
+    )
+
+
+def is_recoverable_controlled_tracking_error(result: SkillResult | None) -> bool:
+    """Return a measured MOVE_TO tracking stop only when the controlled arm is known."""
+    diagnostic = result.tracking_error if result is not None else None
+    return bool(
+        result is not None
+        and result.skill == SkillType.MOVE_TO
+        and not result.completed
+        and result.stop_reason == "tracking_error"
+        and not result.episode_terminal
+        and not result.execution_uncertain
+        and result.executed_physics_ticks > 0
+        and result.state_after is not None
+        and result.observation_after is not None
+        and result.observation_after > result.observation_before
+        and diagnostic is not None
+        and diagnostic.comparison == "controlled_arm"
+        and diagnostic.arm == result.controlled_arms
+    )
+
+
+def is_recoverable_partial_planning_failure(result: SkillResult | None) -> bool:
+    """Return a certain partial MOVE_TO planning stop with a fresh measured state."""
+    return bool(
+        result is not None
+        and result.skill == SkillType.MOVE_TO
+        and not result.completed
+        and result.stop_reason == "planning_failure"
+        and not result.episode_terminal
+        and not result.execution_uncertain
+        and result.executed_physics_ticks > 0
+        and result.executed_policy_actions == 0
+        and result.vla_chunks_requested == 0
+        and result.state_after is not None
+        and result.observation_after is not None
+        and result.observation_after > result.observation_before
+    )
+
+
 def is_recoverable_move_feedback(result: SkillResult | None) -> bool:
     """Known MOVE_TO failures with sufficient state for a fresh planner turn."""
     return (is_retryable_pre_motion_planning_failure(result)
             or is_recoverable_executed_motion_failure(result))
-
-
-def is_recoverable_arm_overlap(result: SkillResult | None) -> bool:
-    """A confirmed contact stop with fresh state may be handed to the planner."""
-    return bool(
-        result is not None and result.skill == SkillType.VLA_ACT
-        and not result.completed and result.stop_reason == "arm_overlap_detected"
-        and result.information_source == "public" and not result.episode_terminal
-        and not result.execution_uncertain and result.executed_policy_actions > 0
-        and result.state_after is not None
-        and result.observation_after is not None
-        and result.observation_after > result.observation_before
-        and result.arm_overlap_detected is True
-    )
 
 
 def is_recoverable_predicate_unavailable(result: SkillResult | None) -> bool:
@@ -274,15 +324,17 @@ def is_recoverable_predicate_unavailable(result: SkillResult | None) -> bool:
 
 
 def is_recoverable_release_support_gap(result: SkillResult | None) -> bool:
-    """Return known mid-release evidence loss/alignment drift for reassessment.
+    """Return known support-evidence loss during an open-gripper action.
 
-    Release must have started with authorization and execution must be known.
+    Opening must have started with authorization and execution must be known.
+    Both RELEASE and SET_GRIPPER(open) can stop after fresh support evidence
+    drops out; the planner gets that state and decides whether to retry.
     Rack-seat alignment is measured pose feedback, not physical contact proof.
     """
     predicate = result.predicate if result is not None else None
     return bool(
         result is not None
-        and result.skill == SkillType.RELEASE
+        and result.skill in (SkillType.RELEASE, SkillType.SET_GRIPPER)
         and not result.completed
         and result.stop_reason in {"release_support_lost", "rack_seat_alignment_lost"}
         and not result.episode_terminal

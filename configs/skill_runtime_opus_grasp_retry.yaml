@@ -1,0 +1,33 @@
+# Recorded acquisition-only run for public-evidence grasp recovery.
+# Run through modal_apps/simulator.py::episode with the Modal SAM 3 detector.
+record_video: true
+render_once_per_step: true
+max_turns: 24
+perception:
+  rgbd_enabled: true
+  perception_camera: default
+  opus_mug_lift_grounding: false
+  mug_lift_first_check_after_actions: 0
+recipe:
+  arm: left
+  vla:
+    max_chunks: 16
+    chunk_size: 16
+    max_policy_actions: 256
+budget:
+  max_skill_calls: 24
+  max_analytic_ticks: 4000
+  max_policy_actions: 256
+  max_vla_chunks: 16
+anthropic:
+  model: claude-opus-5
+  task_scope: acquisition
+  max_tokens: 2048
+  timeout_seconds: 45.0
+  max_calls: 24
+  planner_feedback_chunks: 1
+  grasp_initial_feedback_after_actions: 0
+  vla:
+    max_chunks: 16
+    chunk_size: 16
+    max_policy_actions: 256

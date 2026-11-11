@@ -16,12 +16,14 @@ class PlannerContext:
     predicates: tuple[PredicateResult, ...]
     previous: SkillResult | None
     remaining_budget: dict[str, int] = field(default_factory=dict)
+    policy_actions_executed: int = 0
     memory: MemorySelection | None = None
     # Public, view-dependent visual descriptors; never simulator coordinates.
     visual_context: dict | None = None
     # Allow-listed, non-geometric feedback from trusted anchor preparation.
     grounding_feedback: str | None = None
-    grounding_camera_to_avoid: Literal["head_camera", "left_camera", "right_camera"] | None = None
+    grounding_camera_to_avoid: Literal["head_camera", "left_camera", "right_camera",
+                                      "perception_camera"] | None = None
 
     def value(self, name):
         return next((p.value for p in self.predicates if p.name == name), None)

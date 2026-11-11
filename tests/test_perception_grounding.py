@@ -68,6 +68,49 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertEqual(tracker.calls, [4])
         self.assertEqual(detector.calls, [])
 
+    def test_mug_workspace_loss_requires_repeated_static_scene_coverage(self):
+        from unittest.mock import patch
+
+        frame = camera()
+        images_by_camera = {name: np.zeros((2, 3, 3), dtype=np.uint8)
+                            for name in ("head_camera", "left_camera", "right_camera",
+                                         "perception_camera")}
+        table_mask = mask()
+
+        class SceneDetector(FakeDetector):
+            def detect(self, image_map, *, observation_sequence):
+                return DetectionBatch(observation_sequence, "perception_camera", (
+                    Detection("table", 0.95, table_mask),))
+
+        provider = RGBDPerceptionProvider(SceneDetector(lambda _: None),
+            camera_order=("perception_camera",))
+        provider._estimate = lambda selected, frame, sequence, camera_name, image: (
+            GroundedObject("table", (0.0, 0.0, 0.74), 0.95, sequence,
+                           camera_name, 1.0), None)
+
+        def scene_observation(sequence):
+            return Observation(sequence, images_by_camera, (0.0,) * 14,
+                {"perception_camera": frame})
+
+        first = scene_observation(1)
+        provider.observe(first)
+        self.assertIsNone(provider.predicate_evidence("mug_in_workspace", first)["value"])
+        second = scene_observation(2)
+        provider.observe(second)
+        result = provider.predicate_evidence("mug_in_workspace", second)
+        self.assertFalse(result["value"])
+        self.assertEqual(result["reason"], "mug_absent_from_repeatedly_observed_workspace")
+
+    def test_scene_perception_failure_keeps_mug_workspace_unknown(self):
+        provider = RGBDPerceptionProvider(FakeDetector(
+            lambda sequence: DetectionBatch(sequence, "head_camera", ())),
+            camera_order=("head_camera",))
+        obs = observation(1)
+        provider.observe(obs)
+        result = provider.predicate_evidence("mug_in_workspace", obs)
+        self.assertIsNone(result["value"])
+        self.assertEqual(result["reason"], "scene_coverage_or_mug_detection_unavailable")
+
     def test_configured_table_plane_lift_tracker_overrides_sam_centroid_latch(self):
         class Tracker:
             def evaluate(self, obs):

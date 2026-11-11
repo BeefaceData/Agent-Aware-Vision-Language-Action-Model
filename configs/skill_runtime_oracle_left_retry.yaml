@@ -1,0 +1,25 @@
+# Development-only: replay the controlled empty-grasp boundary, then test
+# open -> measured backoff -> fresh pregrasp -> frozen VLA retry with oracle gates.
+record_video: true
+max_turns: 12
+recipe:
+  arm: left
+  max_retries: 2
+  stage_before_first_vla: false
+  stage:
+    max_physics_ticks: 2000
+    target: mug_pregrasp
+  retreat:
+    target: current_ee
+    path_mode: reverse_approach
+    retreat_distance_m: 0.065
+    orientation_mode: preserve_current
+  vla:
+    max_chunks: 8
+    chunk_size: 16
+    max_policy_actions: 128
+budget:
+  max_skill_calls: 12
+  max_analytic_ticks: 4000
+  max_policy_actions: 300
+  max_vla_chunks: 16

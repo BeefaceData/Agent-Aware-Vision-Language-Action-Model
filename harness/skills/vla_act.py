@@ -9,18 +9,13 @@ from .base import ExecutionContext
 from .schemas import SkillCommand
 
 
-# Once RoboTwin's native checker first reports success during the full-task
-# VLA hang call, let the frozen policy execute a short, fixed follow-through
-# for release/retreat. This is deliberately not planner-selectable.
-NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS = 16
-
-
 class VLAAct:
     def execute(self, context: ExecutionContext, command: SkillCommand) -> str:
         env, parameters = context.environment, command.parameters
         if context.cancelled():
             return "cancelled"
         if env.native_success:
+            context.native_success_seen = True
             return "task_success"
         # These limits bound only learned-policy work. Analytic skills remain
         # available so a planner can recover after VLA budget exhaustion.
@@ -28,11 +23,6 @@ class VLAAct:
             return "policy_action_budget_exhausted"
         if context.chunk_limit < 1:
             return "chunk_budget_exhausted"
-        # A task-success check may turn true even when Opus selected an ordinary
-        # feedback-boundary stop (for example, chunk_budget_exhausted). Native
-        # success itself, not the requested chunk stop, starts the fixed tail.
-        success_follow_through = True
-        native_success_seen = False
         if parameters.failure_stop is not None:
             if not context.begin_predicate_attempt(parameters.failure_stop, parameters.failure_arm):
                 return "predicate_unavailable"
@@ -62,10 +52,13 @@ class VLAAct:
         if context.refresh_history:
             context.vla.reset_history()
             context.history_reset = True
+            if context.measured_tcp_history is not None:
+                for poses in context.measured_tcp_history.values():
+                    poses.clear()
             context.log({"event_type": "policy_history_reset"})
+        self._remember_tcp_poses(context, context.observation)
         configured_chunk_limit = min(parameters.max_chunks, context.chunk_limit)
-        success_chunk_limit = None
-        while context.chunks < (success_chunk_limit or configured_chunk_limit):
+        while context.chunks < configured_chunk_limit:
             if context.cancelled():
                 return "cancelled"
             remaining = min(parameters.max_policy_actions, context.action_limit) - context.executed
@@ -93,18 +86,8 @@ class VLAAct:
                     if context.cancelled():
                         return "cancelled"
                     if env.native_success:
-                        if not native_success_seen:
-                            native_success_seen = True
-                            context.native_success_seen = True
-                            context.log({"event_type": "native_success_candidate",
-                                         "observation": context.observation.sequence,
-                                         "post_success_action_allowance": NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS})
-                        if not success_follow_through:
-                            return "task_success"
-                        if context.post_success_actions >= NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS:
-                            context.log({"event_type": "native_success_follow_through_complete",
-                                         "post_success_actions": context.post_success_actions})
-                            return "task_success"
+                        context.native_success_seen = True
+                        return "task_success"
                     stopped = predicate_stop()
                     if stopped:
                         return stopped
@@ -128,8 +111,8 @@ class VLAAct:
                     # The command may execute even if its response is lost. Never retry it.
                     context.ambiguous = True
                     pending -= 1
-                    context.observation = (env.step_after_success(action) if native_success_seen
-                                           else env.step(action))
+                    context.observation = env.step(action)
+                    self._remember_tcp_poses(context, context.observation)
                     step_ms = (time.perf_counter() - action_started) * 1000.0
                     context.executed += 1
                     context.ambiguous = False
@@ -138,25 +121,11 @@ class VLAAct:
                                  "command_state": context.observation.command_state,
                                  "action_index": context.executed,
                                  "environment_step_ms": step_ms})
-                    if native_success_seen:
-                        context.post_success_actions += 1
-                    overlap_check = getattr(env, "arm_overlap_detected", None)
-                    if callable(overlap_check) and overlap_check():
-                        context.log({"event_type": "inter_arm_contact_guard",
-                                     "observation": context.observation.sequence,
-                                     "action_index": context.executed,
-                                     "stopped": True})
-                        return "arm_overlap_detected"
-                    if env.native_success and not native_success_seen:
-                        native_success_seen = True
+                    if env.native_success:
                         context.native_success_seen = True
                         context.log({"event_type": "native_success_candidate",
                                      "observation": context.observation.sequence,
-                                     "post_success_action_allowance": NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS})
-                    if (native_success_seen and success_follow_through
-                            and context.post_success_actions >= NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS):
-                        context.log({"event_type": "native_success_follow_through_complete",
-                                     "post_success_actions": context.post_success_actions})
+                                     "post_success_action_allowance": 0})
                         return "task_success"
                     stopped = predicate_stop()
                     if stopped:
@@ -165,20 +134,6 @@ class VLAAct:
                 context.discarded += pending
                 if pending:
                     context.log({"event_type": "chunk_discarded", "discarded_actions": pending})
-            if native_success_seen and success_follow_through:
-                # The command's ordinary chunk allowance bounds planner work;
-                # a checker-positive hang gets only enough additional requests
-                # to execute the fixed follow-through allowance. Recompute
-                # against returned chunk length, since Modal may return fewer
-                # actions than requested.
-                remaining_follow_through = (NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS
-                                            - context.post_success_actions)
-                if remaining_follow_through > 0:
-                    needed_chunks = ((remaining_follow_through + parameters.chunk_size - 1)
-                                     // parameters.chunk_size)
-                    proposed_limit = max(configured_chunk_limit, context.chunks + needed_chunks)
-                    success_chunk_limit = min(context.chunk_limit,
-                        max(success_chunk_limit or 0, proposed_limit))
         if command.stop in ("chunk_budget_exhausted", "task_success"):
             context.check_predicate(command.stop)
         if (context.executed >= context.action_limit
@@ -187,6 +142,18 @@ class VLAAct:
         if context.chunks >= context.chunk_limit:
             return "chunk_budget_exhausted"
         return "chunk_budget_exhausted"
+
+    @staticmethod
+    def _remember_tcp_poses(context, observation):
+        if context.measured_tcp_history is None or observation.measured_tcp_poses is None:
+            return
+        for arm, pose in observation.measured_tcp_poses.items():
+            history = context.measured_tcp_history.get(arm)
+            if history is None:
+                continue
+            value = tuple(float(component) for component in pose)
+            if not history or history[-1] != value:
+                history.append(value)
 
 
 class Abort:

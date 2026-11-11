@@ -9,9 +9,11 @@ import time
 from harness.planner.base import PlannerContext
 from harness.skills.schemas import (SkillCommand, SkillType,
                                     is_recoverable_executed_motion_failure,
-                                    is_recoverable_arm_overlap,
+                                    is_recoverable_partial_planning_failure,
                                     is_recoverable_predicate_unavailable,
                                     is_recoverable_release_support_gap,
+                                    is_recoverable_controlled_tracking_error,
+                                    is_recoverable_trajectory_limit,
                                     is_retryable_pre_motion_planning_failure)
 
 # Anchor-preparation failures that hand control back to the planner for a new
@@ -45,6 +47,7 @@ PIXEL_GROUNDED_TARGETS = frozenset({"mug_pregrasp", "rack_approach"})
 MILESTONE_OUTCOMES = {
     "task_success": ("COMPLETE", "task_success"),
     "handoff_confirmed": ("APPROACH_RACK", "handoff_confirmed"),
+    "right_mug_lifted": ("HANG", "right_grasp_confirmed"),
     "left_transfer_complete": ("RIGHT_PICK_AND_HANG", "left_transfer_complete"),
     "mug_lifted": ("TRANSFER", "acquisition_confirmed"),
 }
@@ -57,7 +60,7 @@ UNCONFIRMED_STOP_FAILURES = {
     "handoff_confirmed": "handoff_unconfirmed",
     "task_success": "task_success_unconfirmed",
 }
-BASE_PREDICATES = ("mug_grasp_confirmed", "mug_lifted", "right_mug_lifted", "handoff_confirmed",
+BASE_PREDICATES = ("mug_grasp_confirmed", "mug_in_workspace", "mug_lifted", "right_mug_lifted", "handoff_confirmed",
                    "release_ready", "mug_placed_on_table", "mug_staged_on_table",
                    "left_transfer_complete", "grasp_attempt_failed", "task_success")
 PERCEPTION_PREDICATES = ("mug_near_rack", "rack_contact_detected", "mug_released")
@@ -94,6 +97,9 @@ def grounding_rejection_code(command, error_code):
         return error_code
     if target in HANG_TARGETS and error_code in HANG_GROUNDING_REJECTIONS:
         return "hang_target_grounding_unavailable"
+    if (target == "current_ee" and command.parameters.path_mode == "reverse_approach"
+            and error_code in SYMBOLIC_GROUNDING_REJECTIONS):
+        return "symbolic_target_grounding_unavailable"
     if target in SYMBOLIC_ANCHOR_TARGETS and error_code in SYMBOLIC_GROUNDING_REJECTIONS:
         return "symbolic_target_grounding_unavailable"
     return None
@@ -105,6 +111,8 @@ def reselection_feedback(command, reselections):
     After a repeated pixel failure the planner must switch camera views.
     """
     target, grounding = command.parameters.target, command.parameters.grounding
+    if target == "current_ee" and command.parameters.path_mode == "reverse_approach":
+        target = "mug_pregrasp"
     if reselections >= 2 and grounding is not None:
         object_name = ("the mug handle in the grounded rack view" if target in HANG_TARGETS
                        else "lower outer mug wall, away from the hollow opening")
@@ -146,7 +154,9 @@ def recovery_flags(result):
     return {
         "retryable_pre_motion_planning_failure": is_retryable_pre_motion_planning_failure(result),
         "recoverable_executed_motion_failure": is_recoverable_executed_motion_failure(result),
-        "recoverable_arm_overlap": is_recoverable_arm_overlap(result),
+        "recoverable_partial_planning_failure": is_recoverable_partial_planning_failure(result),
+        "recoverable_trajectory_limit": is_recoverable_trajectory_limit(result),
+        "recoverable_controlled_tracking_error": is_recoverable_controlled_tracking_error(result),
         "recoverable_perception_gap": (is_recoverable_predicate_unavailable(result)
                                        or is_recoverable_release_support_gap(result)),
     }
@@ -172,8 +182,10 @@ class SkillOrchestrator:
         self.invariant_check = invariant_check
         self._started = False
 
-    def _predicates(self, observation):
+    def _predicates(self, observation, *, native_success=None):
         executor = self.executor
+        if native_success is None:
+            native_success = executor.environment.native_success
         update_action_count = getattr(
             getattr(executor.predicates, "perception", None), "set_policy_action_count", None)
         if callable(update_action_count):
@@ -186,7 +198,7 @@ class SkillOrchestrator:
         if getattr(executor.predicates, "rack_seat_gate", None) is not None:
             names += ("rack_seat_aligned",)
         return tuple(executor.predicates.evaluate(name, observation,
-            native_success=executor.environment.native_success,
+            native_success=native_success,
             allow_oracle=executor.allow_oracle) for name in names)
 
     def _remaining_budget(self, turn, grounding_reselections):
@@ -217,7 +229,9 @@ class SkillOrchestrator:
         if command.action != SkillType.MOVE_TO or command.parameters.target != "rack_seat":
             return None
         try:
-            return self.executor.anchors.resolve("rack_seat", command.arm, observation)
+            return self.executor.anchors.resolve(
+                "rack_seat", command.arm, observation,
+                allow_oracle=self.executor.allow_oracle)
         except ValueError:
             return prepared
 
@@ -233,27 +247,44 @@ class SkillOrchestrator:
         grounding_camera_to_avoid = None
         grounding_reselections = 0
         next_observation = None
+        next_native_success = None
         phase, outcome, error_type = "APPROACH_MUG", "planner_turn_budget_exhausted", None
+        error_stage = None
         success = None
         milestone = False
         acquired = False
         terminal_phase, terminal_outcome = MILESTONE_OUTCOMES[self.completion_predicate]
         try:
             for turn in range(1, self.max_turns + 1):
+                error_stage = "invariant_before_turn"
                 self.invariant_check()
                 # Reuse the last feedback frame until motion occurs; this keeps
                 # boundary-only perception from being repeated in the same state.
-                observation = next_observation or executor.environment.observe()
-                next_observation = None
-                success = executor.environment.native_success
+                error_stage = "observation"
+                if next_observation is not None:
+                    observation, success = next_observation, next_native_success
+                    next_observation, next_native_success = None, None
+                else:
+                    observation = executor.environment.observe()
+                    error_stage = "success_status"
+                    success = executor.environment.native_success
                 perception = getattr(executor.predicates, "perception", None)
+                error_stage = "phase_configuration"
                 configure_phase = getattr(perception, "set_task_phase", None)
                 if callable(configure_phase):
                     configure_phase(phase)
-                predicates = self._predicates(observation)
+                error_stage = "predicate_evaluation"
+                predicates = self._predicates(observation, native_success=success)
                 visual_context = (perception.planner_summary(observation)
                                   if perception is not None else None)
                 acquired |= predicate_true(predicates, "mug_lifted")
+                mug_workspace = next((item for item in predicates
+                                      if item.name == "mug_in_workspace"), None)
+                if mug_workspace is not None and mug_workspace.value is False:
+                    self._abort_for_lost_mug(mug_workspace, observation, turn)
+                    turns = turn
+                    phase, outcome = "FAILED", "mug_out_of_workspace"
+                    break
                 if success:
                     phase, outcome = "COMPLETE", "task_success"
                     break
@@ -265,9 +296,11 @@ class SkillOrchestrator:
                 before_ref = self.save_observation(observation)
                 retrieved = self.memory.retrieve(task="hanging_mug", phase=phase) if self.memory else None
                 tick = time.perf_counter()
+                error_stage = "planner_selection"
                 selection = self.planner.select(PlannerContext(turn, observation.copy(), predicates,
                     previous.model_copy(deep=True) if previous else None,
                     remaining_budget=self._remaining_budget(turn, grounding_reselections),
+                    policy_actions_executed=executor.executed_policy_actions,
                     memory=retrieved, grounding_feedback=grounding_feedback,
                     grounding_camera_to_avoid=grounding_camera_to_avoid,
                     visual_context=visual_context))
@@ -275,12 +308,14 @@ class SkillOrchestrator:
                 grounding_feedback = None
                 camera_to_avoid_this_turn = grounding_camera_to_avoid
                 grounding_camera_to_avoid = None
+                error_stage = "command_validation"
                 command = SkillCommand.model_validate(selection.command.model_dump())
                 latency = time.perf_counter() - tick
                 phase, retries = selection.phase, selection.retry_count
                 base = dict(schema_version=2, episode=self.episode_id, seed=self.seed,
                             planner_turn=turn, phase=phase, retry_count=retries)
                 # Durable intent precedes anchor preparation and all motion.
+                error_stage = "selection_logging"
                 self.log({**base, "event_type": "planner_selection", "observation_before": before_ref,
                     "predicates_before": [p.model_dump(mode="json") for p in predicates],
                     "visual_context": visual_context,
@@ -289,6 +324,7 @@ class SkillOrchestrator:
                     "command": command.model_dump(mode="json"),
                     "planner_latency_seconds": latency, "planner_metadata": selection.metadata})
 
+                error_stage = "anchor_preparation"
                 prepared, rejection_code = self._prepare_anchor(
                     command, observation, camera_to_avoid_this_turn)
                 if rejection_code is not None:
@@ -305,15 +341,22 @@ class SkillOrchestrator:
                         "task_success": success, "milestone_reached": False})
                     if can_reselect:
                         next_observation = observation
+                        next_native_success = success
                         grounding_feedback, grounding_camera_to_avoid = reselection_feedback(
                             command, grounding_reselections)
                         continue
                     phase, outcome = "FAILED", "grounding_reselection_budget_exhausted"
                     break
 
+                error_stage = "invariant_before_execution"
                 self.invariant_check()  # Recheck after the potentially slow provider/planner call.
                 target_anchor = self._rack_seat_target(command, observation, prepared)
-                previous = executor.execute(command)
+                error_stage = "skill_execution"
+                previous = executor.execute(command, confirmed_observation=observation,
+                    allow_recoverable_tracking_error=(
+                        phase == "RIGHT_RETRY_REORIENT"
+                        and command.action == SkillType.MOVE_TO
+                        and command.arm == "right"))
                 release_gate = getattr(executor.predicates, "rack_seat_gate", None)
                 if release_gate is not None:
                     release_gate.record(command, previous, target_anchor)
@@ -321,18 +364,31 @@ class SkillOrchestrator:
                 success = previous.task_success
                 after_ref, post = None, ()
                 if not previous.execution_uncertain:
+                    error_stage = "post_observation"
                     after = executor.environment.observe()
-                    after_ref, post = self.save_observation(after), self._predicates(after)
+                    error_stage = "post_success_status"
+                    success = executor.environment.native_success
+                    after_ref = self.save_observation(after)
+                    error_stage = "post_predicate_evaluation"
+                    post = self._predicates(after, native_success=success)
                     next_observation = after
+                    next_native_success = success
                 confirmed = previous.completed and not previous.execution_uncertain
                 acquired |= confirmed and predicate_true(post, "mug_lifted")
                 milestone = confirmed and predicate_true(post, self.completion_predicate)
                 failure = turn_failure(command, previous, post)
                 flags = recovery_flags(previous)
+                error_stage = "result_logging"
                 self.log({**base, "event_type": "planner_turn_result", "observation_after": after_ref,
                     "post_condition": [p.model_dump(mode="json") for p in post],
                     "result": previous.model_dump(mode="json"), "failure_type": failure,
                     "task_success": success, "milestone_reached": milestone, **flags})
+                mug_workspace = next((item for item in post
+                                      if item.name == "mug_in_workspace"), None)
+                if mug_workspace is not None and mug_workspace.value is False:
+                    self._abort_for_lost_mug(mug_workspace, after, turn)
+                    phase, outcome = "FAILED", "mug_out_of_workspace"
+                    break
                 recoverable_failure = any(flags.values())
                 if previous.episode_terminal or (not previous.completed and not recoverable_failure):
                     if success:
@@ -370,8 +426,20 @@ class SkillOrchestrator:
             grounding_reselections=grounding_reselections,
             memory_snapshot_sha256=self.memory.sha256 if self.memory else None,
             error_type=error_type)
+        if error_type is not None:
+            summary["error_stage"] = error_stage
         # Preserve achieved milestones even when a later phase fails, so a
         # placement/handoff failure does not erase a successful grasp.
         summary["acquisition_confirmed"] = acquired
         self.log({"event_type": "episode_summary", **summary})
         return summary
+
+    def _abort_for_lost_mug(self, predicate, observation, turn):
+        """Stop every task phase when evidence confirms the mug left the workspace."""
+        self.log({"event_type": "global_stop_predicate", "planner_turn": turn,
+            "predicate": predicate.model_dump(mode="json"),
+            "reason": "mug_out_of_workspace"})
+        result = self.executor.execute({"action": "abort", "reason": "mug_out_of_workspace"},
+                                       confirmed_observation=observation)
+        self.log({"event_type": "global_stop_result", "planner_turn": turn,
+            "result": result.model_dump(mode="json")})

@@ -5,16 +5,15 @@ fills the asset Volume once, measures a GPU (spike), and runs whole
 ``run_skills.py`` episodes remotely with the same arguments as locally.
 
     modal run modal_apps/simulator.py::download_assets   # once; CPU only
-    modal run modal_apps/simulator.py::spike             # default GPU: T4
     SIM_GPU=T4 modal run modal_apps/simulator.py::spike
     modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
-    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
-    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
+    SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
+    SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
       --output-root data/perception/frames_cam                              # ... with the perception camera
 
 Episode-only options: ``--time-limit-minutes N`` (default 90) and
 ``--skip-observations`` (leave observations on the Volume, not downloaded).
-Every ``modal run`` of this file needs the ``anthropic`` Modal secret to exist.
+Anthropic runs use the ``anthropic`` Modal secret.
 Spike reports and one head-camera frame per GPU are saved to data/modal_spike/.
 """
 
@@ -53,7 +52,7 @@ CAPTURE_FUNCTION_TIMEOUT_SECONDS = 60 * 60
 VOLUME_SETTLE_ATTEMPTS = 12
 VOLUME_SETTLE_SECONDS = 5
 
-# T4, A100, A10G, L4. Compiling CuRobo for all of them lets one image serve any GPU.
+# Compile CuRobo for the simulator GPUs supported by the main branch.
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
 # SIM_GPU may list fallbacks, e.g. "L4,A10G,T4": Modal uses the first type with free
 # capacity instead of queueing for one. GPU is the label used in names and messages.
@@ -94,7 +93,9 @@ assets_volume = modal.Volume.from_name("robotwin-assets", create_if_missing=True
 runs_volume = modal.Volume.from_name("robotwin-runs", create_if_missing=True)
 
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.10")
+    # Modal's current image builder accepts Python 3.11+; pinned simulator
+    # dependencies (including SAPIEN 3.0.3 and mplib 0.2.1) publish cp311 wheels.
+    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "unzip", "build-essential", "libvulkan1", "vulkan-tools",
                  "libgl1", "libegl1", "libglib2.0-0", "libx11-6", "libxext6", "libxrender1")
     .env({"NVIDIA_DRIVER_CAPABILITIES": "all", "CUDA_HOME": "/usr/local/cuda",
@@ -105,7 +106,10 @@ image = (
     .run_commands(f"git clone https://github.com/RoboTwin-Platform/RoboTwin.git {ROBOTWIN}",
                   f"git -C {ROBOTWIN} checkout {ROBOTWIN_COMMIT}")
     .add_local_file(REPO / "patches/robotwin-renderer.patch", "/opt/robotwin-renderer.patch", copy=True)
-    .run_commands(f"git -C {ROBOTWIN} apply /opt/robotwin-renderer.patch")
+    .add_local_file(REPO / "patches/robotwin-grasp-pose-selection.patch",
+                    "/opt/robotwin-grasp-pose-selection.patch", copy=True)
+    .run_commands(f"git -C {ROBOTWIN} apply /opt/robotwin-renderer.patch",
+                  f"git -C {ROBOTWIN} apply /opt/robotwin-grasp-pose-selection.patch")
     # CUDA kernels compile for CUDA_ARCHES without a GPU attached (slow, cached once).
     # --no-build-isolation uses installed build tools, so add CuRobo's build-system
     # requirements first; ninja replaces the much slower serial compile fallback.
@@ -223,7 +227,6 @@ def measure(seed: int = 3, observations: int = 20, physics_steps: int = 200):
 @app.local_entrypoint()
 def spike(seed: int = 3):
     report, head_png = measure.remote(seed=seed)
-    # SIM_GPU is only set on this machine; inside the container GPU reads the default.
     report = {"gpu_requested": GPU, **report}
     output = REPO / "data/modal_spike"
     output.mkdir(parents=True, exist_ok=True)
@@ -301,6 +304,50 @@ def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_s
         runs_volume.commit()
 
 
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              timeout=30 * 60, single_use_containers=True)
+def capture_reset_observation(run_id: str, seed: int, perception_camera: str) -> dict:
+    """Save one public RGB-D reset observation without policy calls or robot actions."""
+    import hashlib
+
+    sys.path.insert(0, "/root")
+    from development.simulator.local_simulator import LocalSimulator
+    from harness.environment.local import LocalEnvironmentClient
+    from harness.environment.perception_cameras import parse_camera_spec
+    from harness.perception.observations import ObservationStore
+
+    output = Path(RUNS) / run_id
+    output.mkdir(parents=True, exist_ok=False)
+    simulator = LocalSimulator(ROBOTWIN, rgbd_enabled=True,
+                               perception_cameras=(parse_camera_spec(perception_camera),))
+    environment = LocalEnvironmentClient(simulator)
+    try:
+        observation = environment.reset(seed)
+        ObservationStore(output / "observations").save(observation)
+        image = observation.images["perception_camera"]
+        camera = observation.camera_frames["perception_camera"]
+        report = {
+            "schema_version": 1,
+            "mode": "reset_rgbd_grounding_capture",
+            "seed": seed,
+            "sequence": observation.sequence,
+            "policy_started": False,
+            "robot_actions_after_reset": 0,
+            "camera": "perception_camera",
+            "image_shape_px": list(image.shape[:2]),
+            "image_sha256": hashlib.sha256(image.tobytes()).hexdigest(),
+            "valid_depth_pixels": int((camera.depth_m > 0).sum()),
+            "intrinsic_sha256": hashlib.sha256(camera.intrinsic.tobytes()).hexdigest(),
+            "world_to_camera_sha256": hashlib.sha256(
+                camera.world_to_camera.tobytes()).hexdigest(),
+        }
+        (output / "capture.json").write_text(json.dumps(report, indent=2) + "\n")
+        runs_volume.commit()
+        return report
+    finally:
+        environment.close()
+
+
 @app.local_entrypoint()
 def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, chunk_size: int = 16,
            output_root: str = "data/perception/frames", perception_camera: str = ""):
@@ -350,6 +397,32 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
                   f"modal volume get robotwin-runs {run_id} <dir>", flush=True)
     if failed:
         raise SystemExit(f"frames: seeds failed: {failed}")
+
+
+@app.local_entrypoint()
+def reset_observation(seed: int = 3, perception_camera: str = "default"):
+    """Capture one reset-only RGB-D frame and download it from the Modal T4 worker."""
+    sys.path.insert(0, str(REPO))
+    from harness.environment.perception_cameras import parse_camera_spec
+
+    if seed < 0:
+        raise SystemExit("reset_observation: seed must be nonnegative")
+    try:
+        parse_camera_spec(perception_camera)
+    except ValueError as exc:
+        raise SystemExit(f"reset_observation: {exc}") from None
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run_id = f"reset_rgbd_seed{seed}_{stamp}"
+    output = REPO / "data/validation" / run_id
+    if output.exists() or _run_exists_on_volume(run_id):
+        raise SystemExit(f"reset_observation: output already exists: {run_id}")
+
+    report = capture_reset_observation.remote(run_id, seed, perception_camera)
+    if _wait_for_volume(run_id, expected_observations=1) == 0:
+        raise SystemExit(f"reset_observation: no artifacts saved for {run_id}")
+    _download_run(run_id, output, skip_observations=False)
+    print(json.dumps({**report, "output": str(output / "observations/observation_00000000.npz")},
+                     indent=2))
 
 
 def _wait_for_volume(run_id, *, expected_observations=None):
@@ -418,7 +491,8 @@ def episode(*argv):
     except ValueError as exc:
         raise SystemExit(f"episode: {exc}") from None
     # The same checks run_skills.main makes, before any GPU is allocated.
-    run_skills.parse_arguments(run_skills.build_parser(REPO), list(request.local_argv))
+    parsed_args, _settings = run_skills.parse_arguments(
+        run_skills.build_parser(REPO), list(request.local_argv))
     output = request.local_output.resolve()
     if output.exists():
         raise SystemExit(f"episode: {output} already exists; choose a new --output")
@@ -430,7 +504,8 @@ def episode(*argv):
     print(f"Running {request.run_id} on {GPU} (limit {request.time_limit_minutes} min)")
     result = None
     try:
-        result = run_episode.remote(list(request.remote_argv), uploads, request.time_limit_minutes)
+        result = run_episode.remote(list(request.remote_argv), uploads,
+                                    request.time_limit_minutes)
     finally:
         # Partial artifacts are still worth having after a failed or interrupted run.
         try:

@@ -121,7 +121,11 @@ class HangTargetTests(unittest.TestCase):
             self.cache, self.obs, report("mug_handle", 0, MUG_POINTS),
             tcp_pose=tcp, anchors=anchors, arm="right")
         self.assertEqual(set(result), {"rack_approach", "rack_seat"})
-        self.assertGreater(result["rack_approach"].pose[0], result["rack_seat"].pose[0])
+        from harness.perception.pose_grounding import _pose_matrix
+        rack_z = _pose_matrix(self.cache.resolve(self.obs))[:3, 2]
+        tcp_delta = (np.asarray(result["rack_approach"].pose[:3])
+                     - np.asarray(result["rack_seat"].pose[:3]))
+        self.assertAlmostEqual(float(tcp_delta @ rack_z), -0.10)
         for anchor in result.values():
             self.assertEqual(anchor.observation_sequence, 0)
             self.assertEqual(anchor.source, "perception")

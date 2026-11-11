@@ -19,6 +19,7 @@ Grip = Annotated[StrictFloat, Field(ge=0, le=1)]
 class MugEvidence(Model):
     observation_sequence: NonnegativeInt
     mug_position: Point
+    mug_in_task_workspace: StrictBool
     left_tcp: Point
     right_tcp: Point
     left_contact: StrictBool
@@ -92,6 +93,8 @@ class HangingMugPredicates:
             self._stage_count = self._stage_count + 1 if stage_condition else 0
             self._stage_sequence = data.observation_sequence
         if name == "mug_grasp_confirmed": value = held
+        elif name == "mug_in_workspace":
+            value = data.mug_in_task_workspace
         elif name == "mug_lifted":
             self.lift_confirmed |= (held and not data.table_contact
                                     and data.mug_position[2] >= self.initial_height + 0.03)

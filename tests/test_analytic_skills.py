@@ -5,9 +5,11 @@ import numpy as np
 
 from harness.environment.base import Observation
 from harness.skills import SkillExecutor
+from harness.skills.move_to import MoveTo
 from harness.predicates.registry import PredicateRegistry
 from harness.predicates.hanging_mug import HangingMugPredicates, MugEvidence
 from harness.perception.anchors import Anchor, AnchorRegistry
+from harness.perception.geometry import reverse_approach_waypoints
 from harness.perception.preparation import PlannerPixelAnchorPreparer
 from harness.perception.rgbd import RGBDCamera
 from harness.skills.schemas import SkillCommand
@@ -70,6 +72,92 @@ class AnalyticEnvironment:
         return self.step(action)
 
 
+class RetryPlanEnvironment(AnalyticEnvironment):
+    def __init__(self):
+        super().__init__(x=-0.2)
+        self.plan_calls = 0
+
+    def plan(self, arm, pose):
+        self.plan_calls += 1
+        self.plan_status = "Fail" if self.plan_calls == 1 else "Success"
+        return super().plan(arm, pose)
+
+
+class FailPlanAtCallEnvironment(AnalyticEnvironment):
+    def __init__(self, fail_at):
+        super().__init__(x=-0.2)
+        self.fail_at = fail_at
+        self.plan_calls = 0
+
+    def plan(self, arm, pose):
+        self.plan_calls += 1
+        self.plan_status = "Fail" if self.plan_calls == self.fail_at else "Success"
+        return super().plan(arm, pose)
+
+
+class FailInitialRetreatAndLongFallbackEnvironment(AnalyticEnvironment):
+    def __init__(self):
+        super().__init__(x=-0.2)
+        self.plan_calls = 0
+
+    def plan(self, arm, pose):
+        self.plan_calls += 1
+        self.plan_status = "Fail" if self.plan_calls in (3, 4) else "Success"
+        return super().plan(arm, pose)
+
+
+class RetreatOrientationDriftEnvironment(AnalyticEnvironment):
+    """Model small measured wrist drift between successive retreat segments."""
+
+    def __init__(self):
+        super().__init__(x=-0.2)
+        self.drift_pending = False
+
+    def plan(self, arm, pose):
+        self.drift_pending = True
+        return super().plan(arm, pose)
+
+    def tick(self, arm, position, velocity, gripper, other_hold):
+        super().tick(arm, position, velocity, gripper, other_hold)
+        if (self.drift_pending
+                and np.max(abs(position-self.start-0.01)) < 1e-6):
+            self.arms[arm]["pose"][3:] = [np.cos(0.05), np.sin(0.05), 0., 0.]
+            self.drift_pending = False
+
+
+class ShortRetreatOnlyEnvironment(AnalyticEnvironment):
+    """Reject the long fallback while allowing a distinct local clearance move."""
+
+    def plan(self, arm, pose):
+        target = np.asarray(pose)
+        if np.linalg.norm(target[:3] - self.arms[arm]["pose"][:3]) > 0.09:
+            self.goal = target.copy()
+            self.goals.append(self.goal.copy())
+            return {"status": "Fail", "position": [], "velocity": []}
+        return super().plan(arm, pose)
+
+
+class ShortMoveOnlyEnvironment(AnalyticEnvironment):
+    """A long fallback is infeasible while a local retreat remains feasible."""
+
+    def plan(self, arm, pose):
+        if np.linalg.norm(np.asarray(pose)[:3] - self.arms[arm]["pose"][:3]) > 0.10:
+            self.goal = np.asarray(pose).copy()
+            self.goals.append(self.goal.copy())
+            return {"status": "Fail", "position": [], "velocity": []}
+        return super().plan(arm, pose)
+
+
+class InexactRetreatEnvironment(AnalyticEnvironment):
+    def tick(self, arm, position, velocity, gripper, other_hold):
+        super().tick(arm, position, velocity, gripper, other_hold)
+        if self.goal is not None:
+            self.arms[arm]["pose"] = self.goal.copy()
+            self.arms[arm]["pose"][0] -= 0.018
+            angle = 0.075
+            self.arms[arm]["pose"][3:] = [np.cos(angle), 0.0, 0.0, np.sin(angle)]
+
+
 class EndpointLagEnvironment(AnalyticEnvironment):
     """CPU-only endpoint profile: settle off-target, then converge."""
 
@@ -113,6 +201,7 @@ class RGBDAnalyticEnvironment(AnalyticEnvironment):
 
 def evidence(sequence, **kwargs):
     data = dict(observation_sequence=sequence, mug_position=(-0.2,0.0,0.75),
+                mug_in_task_workspace=True,
                 left_tcp=(-0.2,0.0,0.8), right_tcp=(0.2,0.0,0.8),
                 left_contact=False, right_contact=False, left_bilateral=False, right_bilateral=False,
                 left_gripper=0.0, right_gripper=0.0, table_contact=True,
@@ -134,6 +223,46 @@ MOVE = {"action": "move_to", "arm": "left", "parameters": {"offset_xyz": [0.02, 
 
 
 class AnalyticTests(unittest.TestCase):
+    def test_reverse_retreat_reanchors_each_waypoint_to_measured_wrist(self):
+        env = RetreatOrientationDriftEnvironment()
+        run, _, logs = executor(env)
+        run.measured_tcp_history["right"].extend((
+            (-0.28, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.26, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.24, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.22, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.20, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+        ))
+
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.05,
+                           "orientation_mode": "preserve_current"}})
+
+        self.assertEqual(result.stop_reason, "completed")
+        planned = [event for event in logs
+                   if event.get("event_type") == "analytic_waypoint_plan"]
+        self.assertGreater(len(planned), 1)
+        for event in planned:
+            np.testing.assert_allclose(event["target_pose"][3:],
+                                       event["measured_start_pose"][3:], atol=1e-12)
+        clearance = next(event for event in logs
+                         if event.get("event_type") == "retreat_clearance_check")
+        self.assertTrue(clearance["satisfied"])
+        self.assertGreaterEqual(clearance["minimum_clearance_m"], 0.05)
+
+    def test_subdivided_retreat_holds_orientation_at_measured_start(self):
+        measured = np.array([0.0, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0])
+        historical = np.array([0.04, 0.0, 0.9,
+                               np.cos(0.1), 0.0, 0.0, np.sin(0.1)])
+
+        waypoints = MoveTo._subdivide_retreat_path(
+            measured, (historical,), max_segment_m=0.01)
+
+        self.assertGreater(len(waypoints), 1)
+        for waypoint in waypoints:
+            np.testing.assert_allclose(waypoint[3:], measured[3:], atol=1e-12)
+
     def test_rgbd_grounded_analytic_grasp_and_lift_composition(self):
         env = RGBDAnalyticEnvironment(x=-0.2)
         anchors = AnchorRegistry()
@@ -248,6 +377,379 @@ class AnalyticTests(unittest.TestCase):
         self.assertEqual(env.goals, [])
         self.assertEqual(env.writes, [])
 
+    def test_minimum_translation_guard_rejects_short_retreat_before_planning(self):
+        env = AnalyticEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        anchors.bind("near_pregrasp", "left", Anchor((-.16, 0., .9, 1., 0., 0., 0.), 0))
+        run, _, _ = executor(env, anchors=anchors)
+        result = run.execute({"action": "move_to", "arm": "left",
+                              "parameters": {"target": "near_pregrasp",
+                                             "minimum_translation_m": 0.05}})
+        self.assertEqual(result.stop_reason, "minimum_translation_not_met")
+        self.assertEqual(env.goals, [])
+        self.assertEqual(env.writes, [])
+
+    def test_reverse_approach_retreat_follows_measured_path(self):
+        env = AnalyticEnvironment(x=-0.2)
+        run, _, _ = executor(env)
+        run.measured_tcp_history["right"].extend((
+            (-0.30, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.28, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.25, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.22, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.2, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+        ))
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.065,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        np.testing.assert_allclose(env.goal[:3], [-0.285, 0.0, 0.9])
+        np.testing.assert_allclose(env.goal[3:], [1.0, 0.0, 0.0, 0.0])
+        self.assertEqual(len(env.goals), 5)
+        np.testing.assert_allclose([goal[0] for goal in env.goals],
+                                   [-0.22, -0.24, -0.26, -0.28, -0.285])
+        np.testing.assert_allclose([goal[1:] for goal in env.goals],
+                                   [[0.0, 0.9, 1.0, 0.0, 0.0, 0.0]] * 5)
+
+    def test_reverse_approach_without_measured_history_uses_vertical_retreat(self):
+        env = AnalyticEnvironment(x=-0.2)
+        run, _, logs = executor(env)
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.065,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        np.testing.assert_allclose(env.goal[:3], [-0.2, 0.0, 0.97])
+        self.assertTrue(any(event.get("event_type") == "vertical_retreat_fallback_prepared"
+                            for event in logs))
+
+    def test_reverse_approach_uses_short_pregrasp_retreat_when_history_is_short(self):
+        env = AnalyticEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        anchors.bind("mug_pregrasp", "right",
+                     Anchor((-.32, 0., .9, 0., 0., 0., 1.), 0))
+        run, _, logs = executor(env, anchors=anchors)
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.065,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        np.testing.assert_allclose(env.goal[:3], [-.285, 0., .9])
+        np.testing.assert_allclose(env.goal[3:], [1., 0., 0., 0.])
+        fallback = next(event for event in logs
+                        if event.get("event_type") == "reverse_approach_fallback_prepared")
+        self.assertEqual(fallback["fallback_source"], "perception")
+        self.assertAlmostEqual(fallback["anchor_distance_m"], 0.12)
+        self.assertAlmostEqual(fallback["clearance_m"], 0.085)
+        self.assertAlmostEqual(fallback["minimum_clearance_m"], 0.065)
+
+    def test_short_retreat_fallback_avoids_infeasible_long_pregrasp_plan(self):
+        env = ShortMoveOnlyEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        anchors.bind("mug_pregrasp", "right",
+                     Anchor((-.37, 0., .9, 0., 0., 0., 1.), 0))
+        run, _, logs = executor(env, anchors=anchors)
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.065,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertAlmostEqual(np.linalg.norm(env.goal[:3] - np.array([-.2, 0., .9])), .085)
+        fallback = next(event for event in logs
+                        if event.get("event_type") == "reverse_approach_fallback")
+        self.assertEqual(fallback["fallback"], "short_retreat_toward_fresh_pregrasp")
+
+    def test_short_fallback_retreat_preserves_five_centimeter_clearance_on_second_retry(self):
+        env = AnalyticEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        anchors.bind("mug_pregrasp", "left",
+                     Anchor((-.36, 0., .9, 1., 0., 0., 0.), 0))
+        run, _, logs = executor(env, anchors=anchors)
+        result = run.execute({"action": "move_to", "arm": "left",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.10,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertAlmostEqual(np.linalg.norm(env.goal[:3] - np.array([-.2, 0., .9])), .12)
+        fallback = next(event for event in logs
+                        if event.get("event_type") == "reverse_approach_fallback_prepared")
+        self.assertEqual(fallback["requested_clearance_m"], 0.10)
+        self.assertEqual(fallback["minimum_clearance_m"], 0.10)
+        self.assertAlmostEqual(fallback["clearance_m"], 0.12)
+
+    def test_long_retreat_fallback_uses_safe_five_centimeter_clearance_when_limited(self):
+        env = AnalyticEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        anchors.bind("mug_pregrasp", "right",
+                     Anchor((-.28, 0., .9, 0., 0., 0., 1.), 0))
+        run, _, logs = executor(env, anchors=anchors)
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.10,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertAlmostEqual(np.linalg.norm(env.goal[:3] - np.array([-.2, 0., .9])), .08)
+        fallback = next(event for event in logs
+                        if event.get("event_type") == "reverse_approach_fallback_prepared")
+        self.assertEqual(fallback["requested_clearance_m"], 0.10)
+        self.assertAlmostEqual(fallback["minimum_clearance_m"], 0.06)
+        self.assertAlmostEqual(fallback["clearance_m"], .08)
+
+    def test_long_retreat_fallback_accepts_anchor_with_five_centimeter_clearance(self):
+        env = AnalyticEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        anchors.bind("mug_pregrasp", "right",
+                     Anchor((-.1401, 0., .9, 0., 0., 0., 1.), 0))
+        run, _, logs = executor(env, anchors=anchors)
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.10,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertAlmostEqual(np.linalg.norm(env.goal[:3] - np.array([-.2, 0., .9])), .0599)
+        fallback = next(event for event in logs
+                        if event.get("event_type") == "reverse_approach_fallback_prepared")
+        self.assertEqual(fallback["minimum_clearance_m"], 0.05)
+        self.assertAlmostEqual(fallback["clearance_m"], .0599)
+
+    def test_short_pregrasp_fallback_uses_vertical_retreat_for_either_arm(self):
+        for arm in ("left", "right"):
+            with self.subTest(arm=arm):
+                env = AnalyticEnvironment(x=-0.2)
+                anchors = AnchorRegistry()
+                anchors.bind("mug_pregrasp", arm,
+                             Anchor((-.19, 0., .9, 1., 0., 0., 0.), 0))
+                run, _, logs = executor(env, anchors=anchors)
+                result = run.execute({"action": "move_to", "arm": arm,
+                    "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                                   "retreat_distance_m": 0.05,
+                                   "orientation_mode": "preserve_current"}})
+
+                self.assertEqual(result.stop_reason, "completed")
+                np.testing.assert_allclose(env.goal[:3], [-0.2, 0.0, 0.97])
+                np.testing.assert_allclose(env.goal[3:], [1.0, 0.0, 0.0, 0.0])
+                fallback = next(event for event in logs
+                                if event.get("event_type") == "vertical_retreat_fallback_prepared")
+                self.assertEqual(fallback["arm"], arm)
+                self.assertEqual(fallback["minimum_clearance_m"], 0.05)
+
+    def test_reverse_approach_accepts_clearance_despite_small_endpoint_error(self):
+        env = InexactRetreatEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        anchors.bind("mug_pregrasp", "left",
+                     Anchor((-.32, 0., .9, 1., 0., 0., 0.), 0))
+        run, _, logs = executor(env, anchors=anchors)
+        result = run.execute({"action": "move_to", "arm": "left",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.065,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertGreater(result.position_error_m, 0.015)
+        self.assertGreater(result.orientation_error_rad, 0.10)
+        clearance = next(event for event in logs
+                         if event.get("event_type") == "retreat_clearance_check")
+        self.assertTrue(clearance["satisfied"])
+        self.assertGreaterEqual(clearance["measured_clearance_m"], 0.065)
+
+    def test_reverse_approach_accepts_five_centimeter_clearance_with_endpoint_error(self):
+        env = InexactRetreatEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        anchors.bind("mug_pregrasp", "right",
+                     Anchor((-.32, 0., .9, 1., 0., 0., 0.), 0))
+        run, _, logs = executor(env, anchors=anchors)
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.05,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        clearance = next(event for event in logs
+                         if event.get("event_type") == "retreat_clearance_check")
+        self.assertTrue(clearance["satisfied"])
+        self.assertGreaterEqual(clearance["measured_clearance_m"], 0.05)
+
+    def test_measured_reverse_retreat_plans_endpoint_margin_for_five_cm_gate(self):
+        env = InexactRetreatEnvironment(x=-0.2)
+        run, _, logs = executor(env)
+        run.measured_tcp_history["right"].extend((
+            (-0.26, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.24, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.22, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.20, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+        ))
+
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.05,
+                           "orientation_mode": "preserve_current"}})
+
+        self.assertEqual(result.stop_reason, "completed")
+        planned = [event for event in logs
+                   if event.get("event_type") == "analytic_waypoint_plan"]
+        planned_clearance = np.linalg.norm(
+            np.asarray(planned[-1]["target_pose"][:3])
+            - np.asarray(planned[0]["measured_start_pose"][:3]))
+        self.assertAlmostEqual(planned_clearance, 0.07, places=5)
+        clearance = next(event for event in logs
+                         if event.get("event_type") == "retreat_clearance_check")
+        self.assertEqual(clearance["minimum_clearance_m"], 0.05)
+        self.assertGreaterEqual(clearance["measured_clearance_m"], 0.05)
+        self.assertTrue(clearance["satisfied"])
+
+    def test_reverse_approach_uses_net_clearance_not_path_length(self):
+        current = (0.0, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0)
+        curved = (
+            (-0.08, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.04, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (0.0, 0.02, 0.9, 1.0, 0.0, 0.0, 0.0),
+            current,
+        )
+        waypoints = reverse_approach_waypoints(curved, current, 0.065)
+        self.assertAlmostEqual(np.linalg.norm(np.asarray(waypoints[-1][:3]) - current[:3]),
+                               0.065, places=6)
+
+        loop = [(-0.015, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+                (0.0, 0.015, 0.9, 1.0, 0.0, 0.0, 0.0),
+                (0.015, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+                (0.0, -0.015, 0.9, 1.0, 0.0, 0.0, 0.0), current]
+        with self.assertRaisesRegex(ValueError, "approach_history_clearance_unavailable"):
+            reverse_approach_waypoints(loop, current, 0.065)
+
+    def test_reverse_approach_plan_failure_uses_bounded_pregrasp_fallback(self):
+        env = RetryPlanEnvironment()
+        anchors = AnchorRegistry()
+        anchors.bind("mug_pregrasp", "right",
+                     Anchor((-.32, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0), 0))
+        run, _, logs = executor(env, anchors=anchors)
+        run.measured_tcp_history["right"].extend((
+            (-0.31, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.28, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.25, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.22, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.2, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+        ))
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.065,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(result.stop_reason, "completed")
+        np.testing.assert_allclose(env.goals[0][:3], [-0.22, 0.0, 0.9])
+        np.testing.assert_allclose(env.goals[-1][:3], [-0.285, 0.0, 0.9])
+        self.assertEqual(sum(event.get("event_type") == "reverse_approach_fallback"
+                             for event in logs), 1)
+        prepared = next(event for event in logs
+                        if event.get("event_type") == "reverse_approach_fallback_prepared")
+        self.assertEqual(prepared["fallback_source"],
+                         "measured_approach_path_subdivision")
+        self.assertEqual(prepared["step_size_m"], 0.01)
+
+    def test_partial_reverse_retreat_failure_continues_outward_from_measured_progress(self):
+        env = FailPlanAtCallEnvironment(fail_at=3)
+        run, _, logs = executor(env)
+        run.measured_tcp_history["right"].extend((
+            (-0.28, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.26, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.24, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.22, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.20, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+        ))
+
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.05,
+                           "orientation_mode": "preserve_current"}})
+
+        self.assertEqual(result.stop_reason, "completed")
+        fallback = next(event for event in logs
+                        if event.get("event_type") == "reverse_approach_fallback_prepared")
+        self.assertEqual(fallback["fallback_source"],
+                         "measured_approach_path_subdivision")
+        self.assertEqual(fallback["step_size_m"], 0.01)
+        self.assertGreaterEqual(fallback["fallback_waypoint_count"], 1)
+        clearance_check = next(event for event in logs
+                                if event.get("event_type") == "retreat_clearance_check")
+        self.assertTrue(clearance_check["satisfied"])
+        self.assertGreaterEqual(clearance_check["measured_clearance_m"], 0.05)
+
+    def test_rejected_retreat_fallback_steps_down_to_shorter_safe_clearance(self):
+        env = FailInitialRetreatAndLongFallbackEnvironment()
+        run, _, logs = executor(env)
+        run.measured_tcp_history["right"].extend((
+            (-0.28, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.26, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.24, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.22, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+            (-0.20, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0),
+        ))
+
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "retreat_distance_m": 0.05,
+                           "orientation_mode": "preserve_current"}})
+
+        self.assertEqual(result.stop_reason, "completed")
+        fallbacks = [event for event in logs
+                     if event.get("event_type") == "reverse_approach_fallback_prepared"]
+        self.assertEqual(len(fallbacks), 2)
+        self.assertEqual(fallbacks[0]["step_size_m"], 0.01)
+        self.assertEqual(fallbacks[1]["step_size_m"], 0.005)
+        self.assertGreater(fallbacks[1]["fallback_waypoint_count"],
+                           fallbacks[0]["fallback_waypoint_count"])
+        clearance_check = next(event for event in logs
+                               if event.get("event_type") == "retreat_clearance_check")
+        self.assertTrue(clearance_check["satisfied"])
+        self.assertGreaterEqual(clearance_check["measured_clearance_m"], 0.05)
+
+    def test_rejected_pregrasp_retreat_plan_is_retried_in_short_segments(self):
+        for arm in ("left", "right"):
+            with self.subTest(arm=arm):
+                env = ShortRetreatOnlyEnvironment(x=-0.2)
+                anchors = AnchorRegistry()
+                anchors.bind("mug_pregrasp", arm,
+                             Anchor((-.4, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0), 0))
+                run, _, logs = executor(env, anchors=anchors)
+                result = run.execute({"action": "move_to", "arm": arm,
+                    "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                                   "retreat_distance_m": 0.1,
+                                   "orientation_mode": "preserve_current"}})
+
+                self.assertEqual(result.stop_reason, "completed")
+                self.assertGreater(len(env.goals), 2)
+                prepared = [event for event in logs
+                            if event.get("event_type") == "reverse_approach_fallback_prepared"]
+                self.assertEqual(prepared[0]["fallback_source"], "perception")
+                self.assertAlmostEqual(prepared[0]["clearance_m"], 0.12)
+                self.assertEqual(prepared[1]["fallback_source"],
+                                 "measured_approach_path_subdivision")
+                self.assertEqual(prepared[1]["step_size_m"], 0.005)
+                clearance_check = next(event for event in logs
+                                       if event.get("event_type") == "retreat_clearance_check")
+                self.assertTrue(clearance_check["satisfied"])
+
+    def test_retreat_and_reorientation_can_be_planned_as_separate_moves(self):
+        env = AnalyticEnvironment(x=-0.2)
+        anchors = AnchorRegistry()
+        target = np.array([-0.10, -0.08, 0.98,
+                           np.cos(np.pi / 6), 0.0, 0.0, np.sin(np.pi / 6)])
+        anchors.bind("mug_pregrasp", "left", Anchor(tuple(target), 0))
+        run, _, _ = executor(env, anchors=anchors)
+
+        retreat = run.execute({"action": "move_to", "arm": "left",
+            "parameters": {"target": "mug_pregrasp", "minimum_translation_m": 0.065,
+                           "orientation_mode": "preserve_current"}})
+        self.assertEqual(retreat.stop_reason, "completed")
+        np.testing.assert_allclose(env.goal[:3], target[:3])
+        np.testing.assert_allclose(env.goal[3:], [1., 0., 0., 0.])
+
+        # Anchors are observation-scoped; refresh the same symbolic target at
+        # the post-retreat observation before asking for wrist reorientation.
+        anchors.bind("mug_pregrasp", "left", Anchor(tuple(target), env.sequence))
+        reorient = run.execute({"action": "move_to", "arm": "left",
+            "parameters": {"target": "mug_pregrasp", "position_mode": "preserve_current"}})
+        self.assertEqual(reorient.stop_reason, "completed")
+        np.testing.assert_allclose(env.goal[:3], target[:3])
+        np.testing.assert_allclose(env.goal[3:], target[3:])
+
     def test_bad_plan_and_insufficient_tick_capacity_do_not_write(self):
         for failed_plan in (True, False):
             env = AnalyticEnvironment()
@@ -309,24 +811,29 @@ class AnalyticTests(unittest.TestCase):
                     observation_sequence=observation.sequence,
                     reason="supported_before_open" if value else "temporary_mask_dropout")
 
-        env = AnalyticEnvironment()
-        run, _, _ = executor(env, predicates=PredicateRegistry(perception=SupportDropout()))
-        result = run.execute({"action": "release", "arm": "left",
-                              "parameters": {"ramp_ticks": 50}})
-        self.assertEqual(result.stop_reason, "release_support_lost")
-        self.assertFalse(result.completed)
-        self.assertFalse(result.episode_terminal)
-        self.assertFalse(result.execution_uncertain)
-        self.assertEqual(result.executed_physics_ticks, 25)
-        self.assertGreater(result.observation_after, result.observation_before)
-        self.assertIsNone(result.predicate.value)
-        self.assertTrue(is_recoverable_release_support_gap(result))
-        self.assertFalse(is_recoverable_release_support_gap(
-            result.model_copy(update={"execution_uncertain": True})))
-        self.assertFalse(is_recoverable_release_support_gap(
-            result.model_copy(update={"information_source": "development_oracle"})))
-        self.assertFalse(is_recoverable_release_support_gap(
-            result.model_copy(update={"predicate": result.predicate.model_copy(update={"value": False})})))
+        commands = (
+            {"action": "release", "arm": "left", "parameters": {"ramp_ticks": 50}},
+            {"action": "set_gripper", "arm": "left",
+             "parameters": {"value": 1.0, "ramp_ticks": 50}},
+        )
+        for command in commands:
+            env = AnalyticEnvironment()
+            run, _, _ = executor(env, predicates=PredicateRegistry(perception=SupportDropout()))
+            result = run.execute(command)
+            self.assertEqual(result.stop_reason, "release_support_lost")
+            self.assertFalse(result.completed)
+            self.assertFalse(result.episode_terminal)
+            self.assertFalse(result.execution_uncertain)
+            self.assertEqual(result.executed_physics_ticks, 25)
+            self.assertGreater(result.observation_after, result.observation_before)
+            self.assertIsNone(result.predicate.value)
+            self.assertTrue(is_recoverable_release_support_gap(result))
+            self.assertFalse(is_recoverable_release_support_gap(
+                result.model_copy(update={"execution_uncertain": True})))
+            self.assertFalse(is_recoverable_release_support_gap(
+                result.model_copy(update={"information_source": "development_oracle"})))
+            self.assertFalse(is_recoverable_release_support_gap(
+                result.model_copy(update={"predicate": result.predicate.model_copy(update={"value": False})})))
 
     def test_actual_loss_of_release_support_remains_terminal(self):
         from harness.predicates.base import PredicateResult
@@ -356,17 +863,68 @@ class AnalyticTests(unittest.TestCase):
         run, _, logs = executor(env)
         result = run.execute(MOVE)
         self.assertEqual(result.stop_reason, "tracking_error")
-        self.assertEqual(env.ticks, 1)
+        self.assertEqual(env.ticks, 3)
         self.assertTrue(result.episode_terminal)
         self.assertIsNotNone(result.tracking_error)
         self.assertEqual(result.tracking_error.arm, "left")
         self.assertEqual(result.tracking_error.comparison, "controlled_arm")
         self.assertEqual(result.tracking_error.joint_index, 0)
-        self.assertAlmostEqual(result.tracking_error.measured_position_rad, 0.5)
-        self.assertAlmostEqual(result.tracking_error.commanded_position_rad, 0.2)
+        self.assertAlmostEqual(result.tracking_error.measured_position_rad, 0.5066667)
+        self.assertAlmostEqual(result.tracking_error.commanded_position_rad, 0.2066667)
         self.assertAlmostEqual(result.tracking_error.residual_rad, 0.3)
         diagnostic = next(e for e in logs if e.get("event_type") == "tracking_error")
         self.assertEqual(len(diagnostic["diagnostic"]["residuals_rad"]), 6)
+        self.assertEqual(diagnostic["diagnostic"]["consecutive_ticks"], 3)
+
+    def test_authorized_right_reorientation_tracking_error_returns_measured_state(self):
+        env = AnalyticEnvironment()
+        tick = env.tick
+
+        def slip(*args):
+            tick(*args)
+            env.arms["right"]["joints"][2] += 0.251
+
+        env.tick = slip
+        run, _, _ = executor(env)
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "offset_xyz": [0.02, 0.0, 0.0]}},
+            allow_recoverable_tracking_error=True)
+        self.assertEqual(result.stop_reason, "tracking_error")
+        self.assertFalse(result.episode_terminal)
+        self.assertFalse(result.execution_uncertain)
+        self.assertEqual(result.tracking_error.arm, "right")
+        self.assertEqual(result.tracking_error.comparison, "controlled_arm")
+        self.assertIsNotNone(result.state_after)
+        from harness.runtime.orchestrator import recovery_flags
+        self.assertTrue(recovery_flags(result)["recoverable_controlled_tracking_error"])
+
+    def test_single_tracking_residual_spike_does_not_stop_motion(self):
+        env = AnalyticEnvironment()
+        tick = env.tick
+        calls = 0
+        def one_tick_spike(*args):
+            nonlocal calls
+            tick(*args)
+            calls += 1
+            if calls == 1:
+                env.arms["left"]["joints"][0] += 0.251
+        env.tick = one_tick_spike
+        run, _, logs = executor(env)
+        result = run.execute(MOVE)
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertFalse(any(event.get("event_type") == "tracking_error" for event in logs))
+
+    def test_severe_tracking_residual_stops_immediately(self):
+        env = AnalyticEnvironment()
+        tick = env.tick
+        def severe_slip(*args):
+            tick(*args)
+            env.arms["left"]["joints"][0] += 0.51
+        env.tick = severe_slip
+        run, _, _ = executor(env)
+        result = run.execute(MOVE)
+        self.assertEqual(result.stop_reason, "tracking_error")
+        self.assertEqual(env.ticks, 1)
 
     def test_tracking_error_identifies_motion_in_inactive_arm(self):
         env = AnalyticEnvironment()
@@ -382,8 +940,33 @@ class AnalyticTests(unittest.TestCase):
         self.assertEqual(result.tracking_error.comparison, "inactive_arm")
         self.assertEqual(result.tracking_error.joint_index, 4)
 
+    def test_inactive_arm_tracking_error_remains_terminal_even_if_recovery_was_enabled(self):
+        env = AnalyticEnvironment()
+        tick = env.tick
+
+        def inactive_slip(*args):
+            tick(*args)
+            env.arms["left"]["joints"][4] += 0.3
+
+        env.tick = inactive_slip
+        run, _, _ = executor(env)
+        result = run.execute({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "offset_xyz": [0.02, 0.0, 0.0]}},
+            allow_recoverable_tracking_error=True)
+        self.assertEqual(result.stop_reason, "tracking_error")
+        self.assertTrue(result.episode_terminal)
+        self.assertEqual(result.tracking_error.comparison, "inactive_arm")
+
 
 class PredicateTests(unittest.TestCase):
+    def test_workspace_loss_is_reported_as_false(self):
+        gate = HangingMugPredicates(
+            lambda obs: evidence(obs.sequence, mug_in_task_workspace=False),
+            source="development_oracle")
+        result = gate.evaluate("mug_in_workspace", Observation(12, images(0), (0.,)*14))
+        self.assertFalse(result.value)
+        self.assertEqual(result.source, "development_oracle")
+
     def test_table_stage_requires_stable_support_and_two_observations(self):
         frames = {
             0: evidence(0, table_contact=True, left_gripper=1.0, stage_distance_m=0.03),

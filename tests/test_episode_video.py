@@ -16,7 +16,29 @@ def observation(sequence):
     return Observation(sequence, {name: np.zeros((240, 320, 3), dtype=np.uint8) for name in CAMERAS}, (0.,)*14)
 
 
+def observation_with_supervisor_camera(sequence):
+    images = {name: np.zeros((240, 320, 3), dtype=np.uint8) for name in CAMERAS}
+    images["perception_camera"] = np.zeros((240, 320, 3), dtype=np.uint8)
+    return Observation(sequence, images, (0.,)*14)
+
+
 class VideoTests(unittest.TestCase):
+    def test_supervisor_recording_uses_head_and_fixed_scene_camera(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = EpisodeVideo(tmp)
+            try:
+                video.append(observation_with_supervisor_camera(0), 'reset', 0, 0)
+            finally:
+                video.close()
+            reader = __import__('imageio.v2', fromlist=['get_reader']).get_reader(
+                Path(tmp)/'episode.mp4')
+            try:
+                self.assertEqual(reader.get_data(0).shape, (272, 960, 3))
+            finally:
+                reader.close()
+            self.assertEqual(video.metadata()['cameras'],
+                             ['head_camera', 'perception_camera'])
+
     def test_real_encoding_and_frame_index(self):
         import imageio.v2 as imageio
         with tempfile.TemporaryDirectory() as tmp:
@@ -35,7 +57,8 @@ class VideoTests(unittest.TestCase):
                 reader.close()
             rows = [json.loads(x) for x in (Path(tmp)/'video_frames.jsonl').read_text().splitlines()]
             self.assertEqual([r['observation_sequence'] for r in rows], [0, 1])
-            self.assertEqual(rows[1]['playback_seconds'], .1)
+            self.assertAlmostEqual(rows[1]['playback_seconds'], 1/30)
+            self.assertEqual(video.metadata()['fps'], 30)
             self.assertFalse(video.metadata()['real_time'])
 
     def test_recording_does_not_add_actions_and_observations_do_not_duplicate_frames(self):

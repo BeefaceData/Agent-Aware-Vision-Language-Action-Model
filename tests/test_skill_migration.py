@@ -25,7 +25,9 @@ class SkillMigrationTests(unittest.TestCase):
         _, executor, events = setup_runtime()
         data = executor.execute(COMMAND).model_dump(mode="json")
         self.assertEqual(data["schema_version"], 2)
-        self.assertEqual(events[0]["event_type"], "skill_requested")
+        event_types = [event["event_type"] for event in events]
+        self.assertLess(event_types.index("skill_preflight_completed"),
+                        event_types.index("skill_requested"))
         data["primitive"] = data.pop("skill")
         data["schema_version"] = 1
         result = SkillResult.model_validate(data)

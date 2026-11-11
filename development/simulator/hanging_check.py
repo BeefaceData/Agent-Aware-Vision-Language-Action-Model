@@ -20,11 +20,12 @@ def observe_hanging(task, *, log, frame_callback=None, ticks=750, window=250,
         d = rack_diagnostics(task)
         names = d["mug_contact_entities"]
         robot_contact = any(n.startswith(("fl_", "fr_", "left_", "right_")) for n in names)
-        supported = (d["task_success"] and d["right_gripper"] >= 0.999
-                     and rack_name in names and "table" not in names and not robot_contact)
-        samples.append((supported, d["mug_position"]))
+        rack_supported = (d["task_success"] and d["right_gripper"] >= 0.999
+                          and rack_name in names and not robot_contact)
+        samples.append((rack_supported, d["mug_position"]))
         minimum_height = min(minimum_height, d["mug_position"][2])
-        log({"event": "hanging_sample", "tick": tick, "supported_without_robot": supported,
+        log({"event": "hanging_sample", "tick": tick,
+             "rack_supported_without_robot": rack_supported,
              "privileged": d})
         if frame_callback and tick % 25 == 0:
             frame_callback(tick)

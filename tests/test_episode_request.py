@@ -19,6 +19,12 @@ class EpisodeRequestTests(unittest.TestCase):
         self.assertEqual(result.uploads, {"config.yaml": Path("configs/a.yaml")})
         self.assertEqual(result.remote_argv[:2], ("--config", "/tmp/in/config.yaml"))
 
+    def test_replay_prefix_is_uploaded_and_its_path_rewritten(self):
+        result = request("--replay-prefix", "data/prefix.npz", "--output", "data/runs/x")
+
+        self.assertEqual(result.uploads, {"replay_prefix.npz": Path("data/prefix.npz")})
+        self.assertEqual(result.remote_argv[:2], ("--replay-prefix", "/tmp/in/replay_prefix.npz"))
+
     def test_output_and_robotwin_root_point_into_the_container(self):
         result = request("--output", "data/runs/x")
 

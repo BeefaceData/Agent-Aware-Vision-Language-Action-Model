@@ -67,9 +67,10 @@ reassessment; it does not authorize further gripper opening. Choose RELEASE or
 opening SET_GRIPPER only if the latest public predicate again says
 `release_ready=true`; otherwise choose another safe bounded action or ABORT.
 Any other `release_support_lost` result requires ABORT. The full-task prompt defines a bounded recovery for the specific
-public `arm_overlap_detected` result. A completed, unambiguous right-grasp miss may use the runtime's
-single bounded retry only when `release_ready` is verified; the runtime opens,
-backs off from measured pose, re-grounds the mug, and calls VLA_ACT again. If
+public grasp failure result. A completed, unambiguous grasp miss on either arm
+may use a bounded retry only when `release_ready` is verified; open the failed
+arm, retrace that arm's recent measured approach path with wrist orientation
+preserved, re-ground the mug, and call VLA_ACT again. If
 support is unknown, abort rather than opening. Do not request a larger bound to
 bypass a failed safety check.
 
@@ -130,7 +131,7 @@ successful retries can become reviewed memory candidates; memory is not updated
 during this episode.
 
 `visual_context.rack_static_reference.initialized` means the runtime grounded
-the rack at episode start from Opus RGB keypoints, a same-view SAM 3 mask, and
+the rack at episode start from planner RGB keypoints, a same-view SAM 3 mask, and
 matched public depth/calibration. If `world_anchor_available` is true, the
 runtime has a cached 3D rack frame and may expose `rack_approach` and
 `rack_seat` during the hang phase, even while the rack is occluded. Coordinates

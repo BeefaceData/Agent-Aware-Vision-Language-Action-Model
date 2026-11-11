@@ -1,0 +1,29 @@
+# Sequential full-task evaluation with the scripted VLA-first orchestrator.
+# Development-oracle evidence is enabled by the run flag only where public
+# RGB-D perception cannot produce a predicate. Each episode records 30 FPS.
+record_video: true
+max_turns: 24
+perception:
+  rgbd_enabled: true
+  perception_camera: default
+recipe:
+  arm: left
+  max_retries: 2
+  stage_before_first_vla: false
+  stage:
+    max_physics_ticks: 1600
+  vla:
+    max_chunks: 16
+    chunk_size: 16
+    max_policy_actions: 256
+handoff:
+  # Let transfer and hanging use the remaining episode budget before the
+  # orchestrator marks an unconfirmed milestone as failed.
+  max_chunks: 32
+  chunk_size: 16
+  max_policy_actions: 768
+budget:
+  max_skill_calls: 24
+  max_analytic_ticks: 10000
+  max_policy_actions: 1200
+  max_vla_chunks: 240

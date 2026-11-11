@@ -49,7 +49,8 @@ def runtime_identity(root):
         paths.update(p for p in root.glob(pattern) if p.is_file() and not p.name.endswith("_tmp.yml"))
     files = {p.relative_to(root).as_posix(): sha256(p.read_bytes()).hexdigest() for p in sorted(paths)}
     packages = {}
-    for name in ("numpy", "pydantic", "PyYAML", "Pillow", "anthropic", "modal", "torch", "sapien"):
+    for name in ("numpy", "pydantic", "PyYAML", "Pillow", "anthropic", "modal",
+                 "torch", "sapien"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:

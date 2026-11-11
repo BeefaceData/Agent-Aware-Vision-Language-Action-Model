@@ -42,6 +42,14 @@ class PerceptionAnchorPreparer:
             return None
         target = command.parameters.target
         if target == "current_ee":
+            if command.parameters.path_mode == "reverse_approach":
+                result = self.provider.observe(observation)
+                if result.observation_sequence != observation.sequence:
+                    raise ValueError("grounding_missing_or_stale")
+                measured = self.environment.arm_state(command.arm)["pose"]
+                return self.provider.bind_approach_anchor(
+                    "mug_pregrasp", command.arm, observation,
+                    measured_tcp_pose=measured, offset_m=self.approach_offset_m)
             return None
         if target not in SYMBOLIC_ANCHORS:
             raise ValueError("unsupported_perception_anchor")

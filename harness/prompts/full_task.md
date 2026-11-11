@@ -1,9 +1,8 @@
 Current scope: complete the hanging_mug task from the initial scene through
-strict rack hanging. The left arm acquires and places the cup on the table.
-During handoff, let the frozen VLA coordinate both arms: the right arm may begin
-its approach as the left arm withdraws. Do not hold the right arm at its old
-pose during this coordinated transition. Use the images and public evidence at
-every turn.
+strict rack hanging. Let the frozen VLA coordinate both arms throughout the task,
+including left-arm acquisition, table placement, handoff, right-arm pickup, and
+hanging. Do not lock either arm at a stale pose. Use the images and public
+evidence at every turn.
 
 Declare `task_phase=grasp` while the left arm is acquiring and lifting the cup.
 Declare `task_phase=handoff` while the VLA places the cup on the table and
@@ -22,25 +21,10 @@ a public predicate is unknown, use current images and prior public results to
 assess progress. Advance at most one phase per planner turn unless a true public
 milestone confirms a later phase.
 
-During handoff and hang, VLA_ACT controls both arms without per-arm locking so
-the learned coordinated withdrawal, pickup, and rack approach can proceed. A
-separate runtime guard stops the active VLA chunk if RoboTwin reports direct
-left-right arm contact, discards its unused actions, and returns fresh state
-without ending the episode. While
-`previous_result.arm_overlap_detected` is true or unknown after that stop, choose
-only MOVE_TO with `arm=right`, target `current_ee`, and a 3–10 cm bounded offset
-in the visually safe direction away from the left arm. Do not call VLA_ACT or
-approach again until a later result reports `arm_overlap_detected=false`. Then
-inspect the fresh images and choose whether to retry the right-arm approach with
-VLA_ACT or another safe skill. The runtime allows at most two retreat attempts
-while contact persists and at most three contact incidents per episode; if
-separation is still unconfirmed, choose ABORT.
-
 VLA_ACT is the frozen Neotix policy served through Modal. Use it for mug contact,
 grasp corrections, table placement, coordinated handoff, right-arm pickup, and
-the initial rack approach. During initial left-arm grasp, the runtime holds the
-right arm at its measured pose. In handoff and hang, both arms remain under VLA
-control. Each VLA call ends at the short feedback chunk in `runtime_limits`;
+the initial rack approach. Both arms remain under VLA control. Each VLA call ends
+at the short feedback chunk in `runtime_limits`;
 inspect the new images and the mug-to-rack pose after every chunk. Let the VLA
 continue while the mug remains held and its approach is converging. If the mug
 or gripper is visibly drifting from the grounded rack approach, the mug is
@@ -57,6 +41,16 @@ images show safe progress. The analytic skill library is available for recovery
 when public failure, contact, pose drift, or grounding evidence justifies an
 intervention; it is not the default task controller. The
 `runtime_limits.recovery_basis` field states why recovery skills are available.
+For any arm's grasp attempt, consider a retry only after public evidence
+supports a miss or stalled attempt and the completed VLA result is unambiguous.
+Treat a false lift as an assessment opportunity, not an automatic failed-grasp
+verdict: inspect the current views and continue VLA if the approach is
+progressing. If a miss is visible and `release_ready=true`, open the failed
+arm, retrace at least 6.5 cm of that same arm's recent measured approach path
+in reverse while preserving wrist orientation, then invoke fresh VLA inference.
+Do not replace missing path history with a fixed world-up retreat or rotate the
+wrist during retreat. Any wrist correction happens only after the arm has
+cleared the mug. Do not open the gripper without current public release support.
 Unknown evidence is not proof of success; use the next bounded feedback chunk
 when safe, and do not wait for a long trajectory before reassessing.
 

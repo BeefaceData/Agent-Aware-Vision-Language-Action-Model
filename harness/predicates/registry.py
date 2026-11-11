@@ -1,7 +1,7 @@
 from .base import PredicateResult
 
 
-PREDICATE_NAMES = frozenset({"mug_grasp_confirmed", "mug_lifted", "right_mug_lifted", "handoff_confirmed",
+PREDICATE_NAMES = frozenset({"mug_grasp_confirmed", "mug_in_workspace", "mug_lifted", "right_mug_lifted", "handoff_confirmed",
     "mug_near_rack", "rack_contact_detected", "mug_released", "release_ready",
     "rack_seat_aligned",
     "mug_placed_on_table", "mug_staged_on_table",
@@ -10,10 +10,12 @@ PREDICATE_NAMES = frozenset({"mug_grasp_confirmed", "mug_lifted", "right_mug_lif
 
 
 class PredicateRegistry:
-    def __init__(self, hanging_mug=None, *, perception=None, rack_seat_gate=None):
+    def __init__(self, hanging_mug=None, *, perception=None, rack_seat_gate=None,
+                 fallback_oracle=None):
         self.hanging_mug = hanging_mug
         self.perception = perception
         self.rack_seat_gate = rack_seat_gate
+        self.fallback_oracle = fallback_oracle
 
     def feedback_boundary_predicates(self):
         """Public image predicates are evaluated when control returns to planner.
@@ -28,17 +30,23 @@ class PredicateRegistry:
 
     def prime(self, observation, *, allow_oracle=False):
         """Capture the episode's lift reference before any skill moves."""
-        if self.perception is not None or self.hanging_mug is not None:
+        if (self.perception is not None or self.hanging_mug is not None
+                or self.fallback_oracle is not None):
             self.evaluate("mug_lifted", observation, allow_oracle=allow_oracle)
 
     def begin_attempt(self, name, observation, *, arm="left", allow_oracle=False):
-        # Explicit public perception takes precedence over development evidence;
-        # a configured sensor path must never silently fall back to the oracle.
         provider = self.perception if self.perception is not None else self.hanging_mug
+        if provider is not None:
+            begin = getattr(provider, "begin_attempt", None)
+            if begin and begin(name, observation, arm=arm):
+                return True
+        fallback = self.fallback_oracle
+        if (fallback is not None and allow_oracle
+                and fallback.begin_attempt(name, observation, arm=arm)):
+            return True
         if provider is None or (provider.source == "development_oracle" and not allow_oracle):
             return False
-        begin = getattr(provider, "begin_attempt", None)
-        return bool(begin and begin(name, observation, arm=arm))
+        return False
 
     def evaluate(self, name, observation, *, arm="auto", native_success=False,
                  budget_exhausted=False, allow_oracle=False):
@@ -54,6 +62,12 @@ class PredicateRegistry:
                 return result
         provider = self.perception if self.perception is not None else self.hanging_mug
         if provider is None or (provider.source == "development_oracle" and not allow_oracle):
-            return PredicateResult(name=name, value=None, source="unavailable",
+            result = PredicateResult(name=name, value=None, source="unavailable",
                 observation_sequence=observation.sequence, reason="no_approved_evidence_provider")
-        return provider.evaluate(name, observation, arm=arm)
+        else:
+            result = provider.evaluate(name, observation, arm=arm)
+        if (result.value is None and self.fallback_oracle is not None and allow_oracle):
+            fallback_result = self.fallback_oracle.evaluate(name, observation, arm=arm)
+            if fallback_result.value is not None:
+                return fallback_result
+        return result

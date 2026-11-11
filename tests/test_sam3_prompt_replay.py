@@ -32,6 +32,8 @@ class Sam3PromptReplayTests(unittest.TestCase):
     def test_request_limit_and_camera_validation(self):
         self.assertEqual(validate_selection([0, 4], ["head_camera"]),
                          ((0, 4), ("head_camera",)))
+        self.assertEqual(validate_selection([0], ["perception_camera"]),
+                         ((0,), ("perception_camera",)))
         with self.assertRaisesRegex(ValueError, "request_limit"):
             validate_selection(list(range(5)), ["head_camera", "left_camera", "right_camera"])
         with self.assertRaisesRegex(ValueError, "camera_selection"):
@@ -45,6 +47,7 @@ class Sam3PromptReplayTests(unittest.TestCase):
             image = np.zeros((4, 5, 3), dtype=np.uint8)
             np.savez_compressed(observations / "observation_00000007.npz",
                 head_camera=image, left_camera=image, right_camera=image,
+                perception_camera=image,
                 sequence=7, command_state=np.zeros(14))
             worker = Worker()
             output = root / "result"
@@ -54,6 +57,21 @@ class Sam3PromptReplayTests(unittest.TestCase):
             self.assertEqual(worker.detect_rack_prompt_variants.calls, [(7, "head_camera")])
             self.assertTrue((output / "results.json").is_file())
             self.assertEqual(len(list(output.glob("*.png"))), len(PROMPTS))
+
+    def test_replays_supervisor_camera(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            observations = root / "observations"
+            observations.mkdir()
+            image = np.zeros((4, 5, 3), dtype=np.uint8)
+            np.savez_compressed(observations / "observation_00000000.npz",
+                head_camera=image, left_camera=image, right_camera=image,
+                perception_camera=image, sequence=0, command_state=np.zeros(14))
+            worker = Worker()
+
+            replay(observations, [0], ["perception_camera"], root / "result", worker=worker)
+
+        self.assertEqual(worker.detect_rack_prompt_variants.calls, [(0, "perception_camera")])
 
 
 if __name__ == "__main__":

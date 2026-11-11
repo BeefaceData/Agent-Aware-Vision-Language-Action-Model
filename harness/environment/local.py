@@ -1,16 +1,26 @@
 """Native planning/tick capability around the existing process-local simulator.
 
-No object poses or contacts are exported. Create/reset/close from the episode
-owner. Use in a dedicated process because RoboTwin changes its working directory.
+Object poses and contact details stay out of planner-facing observations.
+Create/reset/close from the episode owner in a dedicated process because
+RoboTwin changes its working directory.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from harness.environment.base import vector14
 from harness.perception.geometry import pose7
 from .client import EnvironmentClient
+
+
+@dataclass(frozen=True)
+class ReplayState:
+    """State-only result from a development prefix action without a camera render."""
+
+    sequence: int
+    command_state: tuple[float, ...]
+    measured_tcp_poses: dict[str, tuple[float, ...]]
 
 
 class LocalEnvironmentClient(EnvironmentClient):
@@ -76,6 +86,32 @@ class LocalEnvironmentClient(EnvironmentClient):
         self._sequence += 1
         self._uncertain = False
 
+    def advance_for_replay(self, action):
+        """Replay one action and read joint/FK state without capturing camera frames.
+
+        The reset observation remains cached until the next normal ``observe``;
+        replay callers must compare their final RGB snapshot after replay.
+        """
+        if self.native_success:
+            raise RuntimeError("environment is terminal")
+        self._uncertain = True
+        try:
+            success = self.simulator.act(vector14(action))
+            self._sequence += 1
+            self._native_success = bool(success)
+            robot = self.simulator.task.robot
+            state = np.asarray(
+                robot.get_left_arm_jointState() + robot.get_right_arm_jointState(),
+                dtype=np.float32)
+            command_state = vector14(state)
+            measured_tcp_poses = {
+                arm: tuple(self.arm_state(arm)["pose"]) for arm in ("left", "right")}
+            self._uncertain = False
+            return ReplayState(self._sequence, command_state, measured_tcp_poses)
+        except BaseException:
+            # A failed simulator call may have acted; preserve the uncertain latch.
+            raise
+
     @property
     def native_success(self):
         if self._observation is None or self._uncertain:
@@ -94,28 +130,6 @@ class LocalEnvironmentClient(EnvironmentClient):
             raise ValueError("invalid_robot_state")
         return {"joints": joints, "pose": pose7(getattr(robot, f"get_{arm}_ee_pose")()),
                 "gripper": gripper}  # Gripper remains a command, not aperture sensing.
-
-    def arm_overlap_detected(self):
-        """Return whether measured simulator contacts directly join both arms."""
-        contacts = self.simulator.task.scene.get_contacts()
-
-        def side(name):
-            name = str(name).lower()
-            if name.startswith(("fl_", "left_")):
-                return "left"
-            if name.startswith(("fr_", "right_")):
-                return "right"
-            return None
-
-        for contact in contacts:
-            bodies = getattr(contact, "bodies", ())
-            if len(bodies) != 2:
-                continue
-            names = [getattr(getattr(body, "entity", None), "name", "")
-                     for body in bodies]
-            if {side(name) for name in names} == {"left", "right"}:
-                return True
-        return False
 
     def joint_bounds(self, arm):
         task = self.simulator.task

@@ -112,25 +112,29 @@ def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
 
 
 def tcp_targets_for_mug_alignment(tcp_pose, mug_function_pose, rack_function_pose,
-                                  *, approach_offset_m=0.05):
+                                  *, approach_offset_m=0.05, seat_offset_m=0.05):
     """Return prehang and aligned TCP poses from measured/grounded 6D frames.
 
     ``mug_function_pose`` is the visible mug handle's functional frame and
-    ``rack_function_pose`` is the selected hanger peg's mating frame. The
-    current TCP-to-mug transform is preserved, so the solution adapts to the
-    actual grasp rather than assuming a fixed wrist/object offset.
+    ``rack_function_pose`` is the selected hanger peg's mating frame. RoboTwin's
+    ``hanging_mug`` task uses ``pre_dis=0.05`` and ``dis=-0.05`` along the
+    functional frame's local +Z axis. Reproduce those offsets: approach at
+    ``-approach_offset_m`` and seat at ``+seat_offset_m``. The current TCP-to-
+    mug transform is preserved, so the solution adapts to the actual grasp.
     """
-    if (isinstance(approach_offset_m, bool) or not np.isfinite(approach_offset_m)
-            or not 0.01 <= approach_offset_m <= 0.10):
-        raise ValueError("approach_offset_out_of_bounds")
+    offsets = (approach_offset_m, seat_offset_m)
+    if (any(isinstance(value, bool) for value in offsets)
+            or not np.isfinite(offsets).all()
+            or not 0.01 <= approach_offset_m <= 0.10
+            or not 0.01 <= seat_offset_m <= 0.10):
+        raise ValueError("hang_frame_offset_out_of_bounds")
     tcp, mug, rack = map(_pose_matrix, (tcp_pose, mug_function_pose, rack_function_pose))
     tcp_to_mug = np.linalg.inv(tcp) @ mug
+    rack_z = rack[:3, 2]
     target_mug = rack.copy()
-    # The rack frame's local +X axis points from the peg seat toward its free
-    # tip. Start beyond that tip, then move back along the peg to seat the
-    # handle. No world-space rack coordinate is introduced.
+    target_mug[:3, 3] += rack_z * float(seat_offset_m)
     prehang_mug = rack.copy()
-    prehang_mug[:3, 3] += rack[:3, 0] * float(approach_offset_m)
+    prehang_mug[:3, 3] -= rack_z * float(approach_offset_m)
     prehang_tcp = prehang_mug @ np.linalg.inv(tcp_to_mug)
     target_tcp = target_mug @ np.linalg.inv(tcp_to_mug)
     return _matrix_pose(prehang_tcp), _matrix_pose(target_tcp)

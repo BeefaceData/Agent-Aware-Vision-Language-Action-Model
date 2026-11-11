@@ -98,6 +98,13 @@ class ConfigTests(unittest.TestCase):
             RunSettings.model_validate({"perception": {
                 "rgbd_enabled": True, "perception_camera": "bad-pose"}})
 
+    def test_depth_pose_anchors_are_opt_in_and_need_rgbd(self):
+        self.assertFalse(RunSettings().perception.depth_pose_anchors)
+        self.assertTrue(RunSettings.model_validate({"perception": {"rgbd_enabled": True, "depth_pose_anchors": True}})
+                        .perception.depth_pose_anchors)
+        with self.assertRaisesRegex(ValueError, "depth_pose_anchors_requires_rgbd"):
+            RunSettings.model_validate({"perception": {"depth_pose_anchors": True}})
+
     def test_anthropic_full_task_scope_selects_full_task_completion(self):
         settings = RunSettings.model_validate({"anthropic": {
             "model": "claude-test-model", "task_scope": "full_task"}})

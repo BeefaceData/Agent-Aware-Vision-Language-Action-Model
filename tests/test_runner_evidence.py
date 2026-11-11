@@ -80,9 +80,12 @@ class RunnerEvidenceTests(unittest.TestCase):
         registry = PredicateRegistry(perception=public)
         args = SimpleNamespace(development_oracle=True, development_start_phase=None,
                                planner_pixel_grounding=False)
-        settings = SimpleNamespace(perception=SimpleNamespace(rack_grounding_camera="perception_camera"))
+        from harness.runtime.settings import RunSettings
+        settings = RunSettings.model_validate({"perception": {
+            "rgbd_enabled": True, "rack_grounding_camera": "perception_camera",
+            "depth_pose_anchors": True}})
         with patch.object(run_skills.assembly, "public_perception_evidence",
-                          return_value=(registry, object())), \
+                          return_value=(registry, object())) as public_evidence, \
              patch("development.simulator.skill_oracle.oracle_predicates",
                    return_value=SimpleNamespace(hanging_mug=oracle)):
             predicates, _ = run_skills.build_evidence(args, settings,
@@ -91,6 +94,7 @@ class RunnerEvidenceTests(unittest.TestCase):
                 rack_frame_cache=None, oracle_log=lambda _: None)
         self.assertIs(predicates, registry)
         self.assertIs(registry.fallback_oracle, oracle)
+        self.assertTrue(public_evidence.call_args.kwargs["depth_pose_anchors"])
 
     def test_evidence_source_remains_required(self):
         with self.assertRaisesRegex(ValueError, "evidence_provider_required"):

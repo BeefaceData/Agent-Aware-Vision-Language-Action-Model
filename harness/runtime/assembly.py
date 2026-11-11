@@ -10,7 +10,7 @@ import importlib
 import time
 
 from harness.perception.grounding import RGBDPerceptionProvider
-from harness.perception.hang_targets import StaticRackFrameCache
+from harness.perception.hang_targets import DepthRackFrame, StaticRackFrameCache
 from harness.perception.opus_frame import OpusObjectFrameGrounder
 from harness.perception.preparation import (HybridAnchorPreparer, PerceptionAnchorPreparer,
                                             PlannerPixelAnchorPreparer)
@@ -204,13 +204,19 @@ def initialize_mug_lift_evidence(environment, perception, planner, *, log,
 
 def public_perception_evidence(perception, environment, anchors, *, planner,
                                rack_frame_cache=None, release_gate=None,
-                               hang_camera="head_camera", pixel_grounding=False):
+                               hang_camera="head_camera", pixel_grounding=False,
+                               depth_pose_anchors=False):
     """Predicates and anchor preparation from public RGB-D perception.
 
     Returns ``(predicates, prepare)``. With a cached rack frame, hang targets
     are composed from a freshly grounded mug-handle frame on each request.
+    With ``depth_pose_anchors`` the rack frame comes from the depth rack pose
+    (when the planner can ground the mug handle), and approach targets from
+    the depth poses.
     """
     predicates = PredicateRegistry(perception=perception, rack_seat_gate=release_gate)
+    if depth_pose_anchors and getattr(planner, "client", None) is not None:
+        rack_frame_cache = DepthRackFrame(perception)
     mug_frame_grounder = None
     if rack_frame_cache is not None:
         mug_frame_grounder = OpusObjectFrameGrounder(
@@ -218,7 +224,8 @@ def public_perception_evidence(perception, environment, anchors, *, planner,
     prepare = PerceptionAnchorPreparer(perception, environment, anchors,
                                        hang_target_cache=rack_frame_cache,
                                        mug_frame_grounder=mug_frame_grounder,
-                                       mug_frame_camera=hang_camera)
+                                       mug_frame_camera=hang_camera,
+                                       depth_pose_anchors=depth_pose_anchors)
     if pixel_grounding:
         prepare = HybridAnchorPreparer(prepare, PlannerPixelAnchorPreparer(environment, anchors))
     return predicates, prepare

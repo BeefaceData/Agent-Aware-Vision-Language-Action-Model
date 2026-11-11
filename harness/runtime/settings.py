@@ -28,6 +28,11 @@ class PerceptionSettings(Model):
     # Experimental rack grounding uses a separately calibrated SAM 3 prompt
     # and confidence threshold. Default/evaluation behavior remains unchanged.
     rack_prompt_profile: Literal["default", "explore_mug_rack"] = "default"
+    # Experimental: aim mug_pregrasp and rack_approach at the depth-fitted mug
+    # and rack poses, and build the hang targets' rack frame from the depth
+    # rack pose instead of Opus keypoints (the mug-handle frame stays Opus).
+    # Falls back to the default targets when a pose is unavailable.
+    depth_pose_anchors: StrictBool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -83,6 +88,8 @@ class RunSettings(Model):
                 raise ValueError("opus_rack_grounding_requires_rgbd")
             if self.anthropic is None or self.anthropic.task_scope != "full_task":
                 raise ValueError("opus_rack_grounding_requires_full_task_anthropic")
+        if self.perception.depth_pose_anchors and not self.perception.rgbd_enabled:
+            raise ValueError("depth_pose_anchors_requires_rgbd")
         if self.perception.opus_mug_lift_grounding:
             if not self.perception.rgbd_enabled:
                 raise ValueError("opus_mug_lift_grounding_requires_rgbd")

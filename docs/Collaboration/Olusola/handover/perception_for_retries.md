@@ -7,7 +7,7 @@ to be handed to a coding agent as working context. It describes the state of bra
 
 Read it together with:
 
-- `docs/Collaboration/Olusola/perception_guide.pdf` (source `perception_guide.tex`): the
+- `docs/Collaboration/Olusola/guides/perception/perception_guide.pdf` (source `perception_guide.tex`): the
   illustrated explanation of predicates, providers, planners, the evaluation loop, every
   perception fix and its measured result. Appendix A is a plan for recovering a toppled mug.
 - `CONTRIBUTE_README.md`: the technical map, including the scoring definition of each

@@ -135,6 +135,8 @@ def option_error(args, settings):
             return f"perception.{name} requires a model-backed planner"
         if enabled and not args.perception_factory:
             return f"perception.{name} requires --perception-factory"
+    if settings.perception.depth_pose_anchors and not args.perception_factory:
+        return "perception.depth_pose_anchors requires --perception-factory"
     if args.perception_factory and not settings.perception.rgbd_enabled:
         return "--perception-factory requires perception.rgbd_enabled: true"
     if args.perception_factory and args.evaluation_manifest:
@@ -505,7 +507,8 @@ def build_evidence(args, settings, *, environment, simulator, anchors, perceptio
             perception, environment, anchors, planner=planner,
             rack_frame_cache=rack_frame_cache, release_gate=release_gate,
             hang_camera=settings.perception.rack_grounding_camera,
-            pixel_grounding=args.planner_pixel_grounding)
+            pixel_grounding=args.planner_pixel_grounding,
+            depth_pose_anchors=settings.perception.depth_pose_anchors)
         if args.development_oracle:
             oracle_registry = oracle_predicates(simulator.task, log=oracle_log)
             predicates.fallback_oracle = oracle_registry.hanging_mug

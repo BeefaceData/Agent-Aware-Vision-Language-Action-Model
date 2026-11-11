@@ -18,7 +18,7 @@ class PerceptionAnchorPreparer:
 
     def __init__(self, provider, environment, anchors, *, approach_offset_m=0.12,
                  hang_target_cache=None, mug_frame_grounder=None,
-                 mug_frame_camera="head_camera"):
+                 mug_frame_camera="head_camera", depth_pose_anchors=False):
         if not isinstance(provider, RGBDPerceptionProvider):
             raise ValueError("invalid_perception_provider")
         if provider.anchors is not anchors:
@@ -35,6 +35,8 @@ class PerceptionAnchorPreparer:
         self.hang_target_cache = hang_target_cache
         self.mug_frame_grounder = mug_frame_grounder
         self.mug_frame_camera = mug_frame_camera
+        # Aim approach targets with the depth-fitted poses when they exist.
+        self.depth_pose_anchors = bool(depth_pose_anchors)
 
     def __call__(self, command, observation):
         action = command.action.value if hasattr(command.action, "value") else command.action
@@ -75,6 +77,14 @@ class PerceptionAnchorPreparer:
         if result.observation_sequence != observation.sequence:
             raise ValueError("grounding_missing_or_stale")
         measured = self.environment.arm_state(command.arm)["pose"]
+        if self.depth_pose_anchors:
+            try:
+                return self.provider.bind_pose_approach_anchor(
+                    target, command.arm, observation, measured_tcp_pose=measured,
+                    offset_m=self.approach_offset_m)
+            except ValueError as exc:
+                if str(exc) != "pose_target_unavailable":
+                    raise
         if (target == "rack_approach"
                 and self.provider.static_rack_world_anchor_available(observation)):
             return self.provider.bind_static_rack_approach(

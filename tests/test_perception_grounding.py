@@ -10,6 +10,7 @@ from harness.perception.anchors import AnchorRegistry
 from harness.perception.grounding import (
     Detection, DetectionBatch, GroundedObject, RGBDPerceptionProvider,
 )
+from harness.perception.object_pose import ObjectPose
 from harness.perception.rgbd import RGBDCamera
 from harness.skills.schemas import SkillCommand
 from tests.helpers import images
@@ -468,6 +469,56 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertEqual(reason, "table_support_not_judged_from_wrist_view")
 
+    def test_a_fitted_axis_lying_down_vetoes_release_even_when_the_surface_faces_sideways(self):
+        # Held-out seed 6: a toppled mug seen end-on shows its flat base, |z| 0.09 like an upright wall.
+        end_on = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=0.09)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+        lying = ObjectPose("mug", (0., 0., 1.05), (1., 0., 0.), False, .045, None, .9, True, "wall_fit_1_camera",
+                           ("head_camera",), 2)
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": end_on, "table": table},
+                                                                       mug_pose=lying)
+
+        self.assertIs(value, False)
+        self.assertEqual(reason, "mug_axis_tilted_not_upright")
+
+    def test_even_an_untrusted_axis_lying_down_vetoes_release(self):
+        end_on = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=0.09)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+        lying = ObjectPose("mug", (0., 0., 1.05), (1., 0., 0.), False, .045, None, .5, False,
+                           "cylinder_fit_inliers_low",
+                           ("head_camera",), 2)
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": end_on, "table": table},
+                                                                       mug_pose=lying)
+
+        self.assertIs(value, False)
+        self.assertEqual(reason, "mug_axis_tilted_not_upright")
+
+    def test_an_untrusted_upright_axis_does_not_replace_the_surface_test(self):
+        sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+        upright = ObjectPose("mug", (0., 0., 1.0), (0., 0., 1.), True, .045, None, .5, False,
+                             "cylinder_fit_inliers_low",
+                             ("head_camera",), 2)
+
+        value, reason = RGBDPerceptionProvider._table_support_evidence({"mug": sliver, "table": table},
+                                                                       mug_pose=upright)
+
+        self.assertIsNone(value)
+        self.assertEqual(reason, "mug_orientation_unavailable")
+
+    def test_an_upright_fitted_axis_judges_orientation_when_normals_were_too_few(self):
+        sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
+        table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
+        upright = ObjectPose("mug", (0., 0., 1.0), (0., 0., 1.), True, .045, None, .9, True, "wall_fit_1_camera",
+                             ("head_camera",), 2)
+
+        value, _reason = RGBDPerceptionProvider._table_support_evidence({"mug": sliver, "table": table},
+                                                                        mug_pose=upright)
+
+        self.assertIs(value, True)
+
     def test_table_support_stays_unknown_when_mug_orientation_was_not_measured(self):
         sliver = self.support_object("mug", 1.05, (1.00, 1.01, 1.02, 1.09), median_normal_z=None)
         table = self.support_object("table", 1.0, (1.0, 1.0, 1.0, 1.0))
@@ -516,6 +567,28 @@ class PerceptionGroundingTests(unittest.TestCase):
             {"mug": mug, "table": table})
         self.assertIsNone(value)
         self.assertEqual(reason, "mug_table_support_not_established")
+
+    @staticmethod
+    def rack_pose(tip, cameras=("right_camera",)):
+        return ObjectPose("rack", (0., 0., .75), (0., 0., 1.), True, None, (1., 0., 0.), .9, True,
+                          "pole_and_peg_fit_1_camera", cameras, 0, {"peg_tip": tip})
+
+    def test_a_single_camera_rack_fit_waits_for_a_second_observation_to_agree(self):
+        provider = RGBDPerceptionProvider(FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ())))
+
+        first = provider._confirmed_rack(self.rack_pose((.1, .2, .9)), "pole_and_peg_fit_1_camera")
+        moved = provider._confirmed_rack(self.rack_pose((.1, .3, .9)), "pole_and_peg_fit_1_camera")
+        agreed = provider._confirmed_rack(self.rack_pose((.1, .305, .9)), "pole_and_peg_fit_1_camera")
+
+        self.assertEqual(first, (None, "rack_fit_awaiting_confirmation"))
+        self.assertEqual(moved, (None, "rack_fit_awaiting_confirmation"))
+        self.assertEqual(agreed[1], "pole_and_peg_fit_confirmed_by_a_second_observation")
+
+    def test_two_agreeing_cameras_confirm_the_rack_at_once(self):
+        provider = RGBDPerceptionProvider(FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ())))
+        pose = self.rack_pose((.1, .2, .9), cameras=("head_camera", "right_camera"))
+
+        self.assertIs(provider._confirmed_rack(pose, "pole_and_peg_fit_2_cameras")[0], pose)
 
     def test_right_lift_requires_arm_association_not_height_alone(self):
         detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
@@ -627,7 +700,7 @@ class PerceptionGroundingTests(unittest.TestCase):
             Detection("mug", .99, mask()),)))
         provider = RGBDPerceptionProvider(detector)
         support = {"value": True}
-        provider._table_support_evidence = lambda _objects: (
+        provider._table_support_evidence = lambda _objects, **_options: (
             support["value"], "mug_silhouette_meets_local_table"
             if support["value"] is True else "mug_table_support_not_established")
 
@@ -664,7 +737,7 @@ class PerceptionGroundingTests(unittest.TestCase):
         detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", (
             Detection("mug", .99, mask()),)))
         provider = RGBDPerceptionProvider(detector)
-        provider._table_support_evidence = lambda _objects: (True, "mug_silhouette_meets_local_table")
+        provider._table_support_evidence = lambda _objects, **_options: (True, "mug_silhouette_meets_local_table")
 
         def release_ready_at(sequence, depth_m):
             obs = observation(sequence, np.full((2, 3), depth_m, dtype=np.float32))
@@ -765,6 +838,66 @@ class PerceptionGroundingTests(unittest.TestCase):
             update={"target": "current_ee"})})
         self.assertIsNone(prepare(current_ee, observation(22)))
         self.assertEqual(len(detector.calls), 1)
+
+    @staticmethod
+    def provider_with_mug_pose(sequence, *, trusted, mug_status="grounded"):
+        """A provider whose current result has a mug median at (0.53, 0, 0.8) and a vertical axis at x=0.5."""
+        from harness.perception.grounding import GroundingResult
+
+        anchors = AnchorRegistry()
+        provider = RGBDPerceptionProvider(FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ())),
+                                          anchors)
+        mug = GroundedObject("mug", (.53, 0., .8), .99, sequence, "head_camera", 1.)
+        pose = ObjectPose("mug", (.5, 0., .75), (0., 0., 1.), True, .045, None, .9, trusted,
+                          "wall_fit_1_camera", ("head_camera",), sequence)
+        provider._last_sequence = sequence
+        provider._last_result = GroundingResult(sequence, {"mug": mug}, {"mug": mug_status}, mug_pose=pose)
+        return provider, anchors
+
+    def test_pose_anchor_aims_at_the_mug_axis_at_the_median_height(self):
+        provider, _anchors = self.provider_with_mug_pose(5, trusted=True)
+
+        anchor = provider.bind_pose_approach_anchor("mug_pregrasp", "left", observation(5),
+                                                    measured_tcp_pose=(.5, -.5, .8, 1., 0., 0., 0.),
+                                                    offset_m=.1)
+
+        np.testing.assert_allclose(anchor.pose[:3], (.5, -.1, .8), atol=1e-9)  # 0.1 m short of (0.5, 0, 0.8)
+
+    def test_pose_anchor_needs_a_trusted_pose(self):
+        provider, _anchors = self.provider_with_mug_pose(5, trusted=False)
+
+        with self.assertRaisesRegex(ValueError, "pose_target_unavailable"):
+            provider.bind_pose_approach_anchor("mug_pregrasp", "left", observation(5),
+                                               measured_tcp_pose=(.5, -.5, .8, 1., 0., 0., 0.))
+
+    def test_pose_anchor_needs_a_grounded_mug(self):
+        provider, _anchors = self.provider_with_mug_pose(5, trusted=True, mug_status="ambiguous")
+
+        with self.assertRaisesRegex(ValueError, "pose_target_unavailable"):
+            provider.bind_pose_approach_anchor("mug_pregrasp", "left", observation(5),
+                                               measured_tcp_pose=(.5, -.5, .8, 1., 0., 0., 0.))
+
+    def test_preparer_uses_pose_anchors_only_when_enabled_and_falls_back_without_a_pose(self):
+        from harness.perception.preparation import PerceptionAnchorPreparer
+
+        command = SkillCommand.model_validate({"action": "move_to", "arm": "left",
+                                               "parameters": {"target": "mug_pregrasp"}})
+        environment = SimpleNamespace(arm_state=lambda arm: {"pose": (.5, -.5, .8, 1., 0., 0., 0.)})
+        def standoff(target):
+            tcp = np.array((.5, -.5, .8))
+            return np.asarray(target) - (np.asarray(target) - tcp) / np.linalg.norm(np.subtract(target, tcp)) * .1
+
+        bound = {}
+        for enabled, trusted in ((False, True), (True, True), (True, False)):
+            provider, anchors = self.provider_with_mug_pose(5, trusted=trusted)
+            prepare = PerceptionAnchorPreparer(provider, environment, anchors, approach_offset_m=.1,
+                                               depth_pose_anchors=enabled)
+            bound[enabled, trusted] = prepare(command, observation(5)).pose[:3]
+
+        median, on_axis = (.53, 0., .8), (.5, 0., .8)
+        np.testing.assert_allclose(bound[False, True], standoff(median))  # as before
+        np.testing.assert_allclose(bound[True, True], standoff(on_axis))
+        np.testing.assert_allclose(bound[True, False], standoff(median))  # untrusted pose: the default target
 
     def test_anchor_preparer_rejects_registry_mismatch_and_unapproved_symbols(self):
         from types import SimpleNamespace

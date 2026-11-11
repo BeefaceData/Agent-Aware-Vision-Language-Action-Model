@@ -26,7 +26,7 @@ walkthrough with diagrams, see `docs/v1/robot_mug_guide.pdf`.
 
 | Component | Code | Runs on |
 |---|---|---|
-| Episode runner: RoboTwin simulator, CuRobo, harness | `run_skills.py`, `harness/` | a Modal GPU (route 1) **or** your NVIDIA GPU (route 2) |
+| Episode runner: RoboTwin simulator, CuRobo, harness | `run_skills.py`, `harness/` | Modal T4 (route 1) **or** your NVIDIA GPU (route 2) |
 | Frozen Neotix policy | `modal_apps/policy.py` | Modal, T4, both routes |
 | SAM 3 segmentation (optional) | `modal_apps/sam3.py` | Modal, T4, both routes |
 | Opus planner and perception prompts (optional) | `harness/planner/`, `harness/perception/` | Anthropic API, both routes |
@@ -34,9 +34,9 @@ walkthrough with diagrams, see `docs/v1/robot_mug_guide.pdf`.
 Both routes take the same `run_skills.py` options and produce the same output
 folder layout.
 
-- **Route 1, Modal.** The simulator runs in a fresh cloud container for each
-  episode, and your machine needs no GPU. On an L4, camera rendering is about
-  7× faster than on a 4 GB laptop GPU.
+- **Route 1, Modal.** The simulator runs in a fresh T4 cloud container for each
+  episode, and your machine needs no GPU. Three-camera RGB-D rendering measured
+  about 344 ms per observation on T4.
 - **Route 2, local.** You get the simulator in reach for debugging. It needs
   Linux, an NVIDIA GPU with Vulkan, and about 10 GB of disk.
 
@@ -65,11 +65,13 @@ modal setup                        # log in once
 modal deploy modal_apps/policy.py  # frozen policy; weights download on first use
 ```
 
-### SAM 3 (needed for `--perception-factory`)
+### SAM 3 (used by RGB-D harness runs by default)
 
 1. Request access to [facebook/sam3](https://huggingface.co/facebook/sam3) and
    wait for approval.
-2. Create a Hugging Face read token, store it on Modal, then deploy and test SAM 3:
+2. Create a Hugging Face read token, store it on Modal, then deploy and test SAM 3. RGB-D
+   harness configs select this Modal provider automatically; pass `--perception-factory`
+   only to override it:
 
    ```bash
    modal secret create huggingface HF_TOKEN=hf_...   # add --force to replace it
@@ -144,7 +146,6 @@ modal run modal_apps/simulator.py::episode \
 modal run modal_apps/simulator.py::episode \
   --config configs/skill_runtime_opus_full_task_rgbd_table_lift.yaml \
   --planner anthropic \
-  --perception-factory harness.perception.modal_sam3:create_detector \
   --output data/runs/modal_full_01 --time-limit-minutes 75
 ```
 
@@ -185,37 +186,33 @@ Limitations today:
 - **Frozen evaluation and campaigns run locally.** `--evaluation-manifest` is
   rejected, and `run_exploration.py` and `run_evaluation.py` use route 2.
 
-### M5. Choose the simulator GPU
+### M5. Simulator GPU
 
-Set `SIM_GPU` on the same command line as `modal run`. The default is `T4`.
+The simulator, frozen policy worker, and SAM 3 worker default to Modal T4 GPUs.
+Use `SIM_GPU=T4` explicitly for recovery experiments to keep costs consistent.
 
 ```bash
-SIM_GPU=L4 modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME
-SIM_GPU=A10G modal run modal_apps/simulator.py::spike    # measure before switching
+SIM_GPU=T4 modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME
 ```
 
-`SIM_GPU` is read when `modal run` starts, so it applies to that run only. It also
-accepts a ranked list, such as `SIM_GPU=L4,A10G,T4`: Modal starts on the first type
-with free capacity instead of queueing for one. A queued call shows the function as
-*Inactive* with no live containers on the dashboard. To
-change the default, edit `GPU = os.environ.get("SIM_GPU", "T4")` in
-`modal_apps/simulator.py`. The run's `summary.json` does not record the GPU, so
-name the output folder after it when you compare GPUs.
+Main also supports an explicit `SIM_GPU` override or ranked fallback list for
+performance studies. It is read when `modal run` starts. The run's `summary.json`
+does not record the GPU, so name output folders after the selected GPU when
+comparing hardware.
 
 Measured with the spike (seed 3; three RGB-D cameras):
 
 | GPU | Render 3 RGB-D cameras | CuRobo plan | Approx. $/h* | Notes |
 |---|---|---|---|---|
-| T4 | 344 ms | 88 ms | ~0.59 | default; cheapest, about 1 min slower per full episode |
-| A10G | 153 ms | 73 ms | ~1.10 | slower than L4 and pricier |
-| L4 | 110 ms | 86 ms | ~0.80 | fastest rendering tested |
+| T4 | 344 ms | 88 ms | ~0.59 | default and selected for recovery experiments |
+| A10G | 153 ms | 73 ms | ~1.10 | historical comparison |
+| L4 | 110 ms | 86 ms | ~0.80 | historical comparison |
 | Laptop RTX 2050 (route 2) | 800 ms | 322 ms | — | for comparison |
 
 \*Approximate; check Modal's pricing page.
 
-**Which to pick:** a full Opus episode spends most of its time waiting for Opus,
-the policy and SAM 3, so the T4 is usually the cheapest. The L4 pays off when
-rendering dominates, for example with few Opus turns per policy step.
+The T4 is selected for the current recovery experiments to keep GPU usage
+consistent and credit-efficient. The L4 and A10G measurements are historical comparisons.
 
 **Do the images match?** All three tested GPUs render the same images as the local
 GPU (mean difference 0.03/255). Still record which GPU produced a result.
@@ -232,11 +229,12 @@ GPU (mean difference 0.03/255). Still record which GPU produced a result.
 ### M6. Capture labelled perception frames
 
 For offline perception evaluation (see `CONTRIBUTE_README.md`), roll out the frozen
-policy and save public frames plus simulator labels, one seed after another. The
-L4 suits this job because rendering dominates it (about 7 minutes per 900-action seed):
+policy and save public frames plus simulator labels, one seed after another.
+L4 took about 7 minutes per 900-action seed in the earlier comparison; current
+captures use T4 to conserve credits and may take longer:
 
 ```bash
-SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
 ```
 
 The manifest records which GPU actually ran. Each seed is downloaded into `data/perception/frames/seed_<N>`. Options:
@@ -372,12 +370,13 @@ python run_skills.py --config configs/skill_runtime.yaml \
 timeout -s INT 75m python run_skills.py \
   --config configs/skill_runtime_opus_full_task_rgbd_table_lift.yaml \
   --planner anthropic \
-  --perception-factory harness.perception.modal_sam3:create_detector \
   --output data/runs/full_task_01
 ```
 
-Development-oracle mode is for internal debugging. Do not combine it with a
-public perception factory. Run one RoboTwin job at a time on GPUs with little VRAM.
+Development-oracle mode is for internal debugging. In an RGB-D harness config,
+public perception remains primary and the oracle supplies only unknown predicate
+values; oracle results are not sent to Opus. Use an RGB-D-disabled config for an
+oracle-only comparison. Run one RoboTwin job at a time on GPUs with little VRAM.
 
 ### L7. Campaigns, evaluation and the baseline
 
@@ -457,6 +456,21 @@ after as different conditions.
   - Local: `timeout -s INT`.
   - Opus calls: copy a config and lower `max_turns` / `anthropic.max_calls`.
 - **Storage:** remote runs stay on the `robotwin-runs` Volume until you delete them (M7).
+
+### Recovery validation workstream
+
+Recovery testing is currently development-only and uses `--development-oracle` to
+separate skill behavior from public perception quality. Oracle-assisted results
+must not be reported as perception or deployment validation.
+
+1. Replay a controlled left empty-grasp state; verify open, measured backoff,
+   refreshed pregrasp, and a fresh frozen-VLA retry.
+2. Replay the left-transfer boundary; verify right-arm grasp and its recovery
+   sequence with simulator predicates.
+3. Validate the rack-hanging phase and its associated recovery skills using
+   simulator privilege, including stable support after the robot withdraws.
+4. Once perception is ready, repeat the same cases with public evidence and
+   compare those decisions against oracle labels.
 
 ### Troubleshooting
 

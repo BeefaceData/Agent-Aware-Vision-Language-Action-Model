@@ -2,6 +2,10 @@
 # open -> measured backoff -> fresh pregrasp -> frozen VLA retry with oracle gates.
 record_video: true
 max_turns: 12
+perception:
+  rgbd_enabled: true
+  perception_camera: default
+  depth_pose_anchors: true
 recipe:
   arm: left
   max_retries: 2

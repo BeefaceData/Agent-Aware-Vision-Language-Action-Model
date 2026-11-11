@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from .anchors import Anchor
 from .geometry import pose7
 from .grounding import RGBDPerceptionProvider, SYMBOLIC_ANCHORS
@@ -30,7 +31,7 @@ class PerceptionAnchorPreparer:
         self.approach_offset_m = float(approach_offset_m)
         if (hang_target_cache is None) != (mug_frame_grounder is None):
             raise ValueError("hang_cache_and_mug_grounder_must_be_paired")
-        if mug_frame_camera not in ("head_camera", "left_camera", "right_camera"):
+        if mug_frame_camera not in (*CAMERAS, *PERCEPTION_CAMERAS):
             raise ValueError("invalid_hang_frame_camera")
         self.hang_target_cache = hang_target_cache
         self.mug_frame_grounder = mug_frame_grounder
@@ -49,9 +50,7 @@ class PerceptionAnchorPreparer:
                 if result.observation_sequence != observation.sequence:
                     raise ValueError("grounding_missing_or_stale")
                 measured = self.environment.arm_state(command.arm)["pose"]
-                return self.provider.bind_approach_anchor(
-                    "mug_pregrasp", command.arm, observation,
-                    measured_tcp_pose=measured, offset_m=self.approach_offset_m)
+                return self._bind_approach("mug_pregrasp", command.arm, observation, measured)
             return None
         if target not in SYMBOLIC_ANCHORS:
             raise ValueError("unsupported_perception_anchor")
@@ -77,10 +76,13 @@ class PerceptionAnchorPreparer:
         if result.observation_sequence != observation.sequence:
             raise ValueError("grounding_missing_or_stale")
         measured = self.environment.arm_state(command.arm)["pose"]
+        return self._bind_approach(target, command.arm, observation, measured)
+
+    def _bind_approach(self, target, arm, observation, measured):
         if self.depth_pose_anchors:
             try:
                 return self.provider.bind_pose_approach_anchor(
-                    target, command.arm, observation, measured_tcp_pose=measured,
+                    target, arm, observation, measured_tcp_pose=measured,
                     offset_m=self.approach_offset_m)
             except ValueError as exc:
                 if str(exc) != "pose_target_unavailable":
@@ -88,9 +90,9 @@ class PerceptionAnchorPreparer:
         if (target == "rack_approach"
                 and self.provider.static_rack_world_anchor_available(observation)):
             return self.provider.bind_static_rack_approach(
-                target, command.arm, observation, measured_tcp_pose=measured,
+                target, arm, observation, measured_tcp_pose=measured,
                 offset_m=self.approach_offset_m)
-        return self.provider.bind_approach_anchor(target, command.arm, observation,
+        return self.provider.bind_approach_anchor(target, arm, observation,
             measured_tcp_pose=measured, offset_m=self.approach_offset_m)
 
     def _prepare_hang_targets(self, arm, observation, requested_target):

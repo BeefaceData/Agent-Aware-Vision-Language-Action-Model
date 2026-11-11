@@ -61,12 +61,14 @@ class OptionErrorTests(unittest.TestCase):
         scripted = SimpleNamespace()
 
         _predicates, with_client = assembly.public_perception_evidence(
-            perception, SimpleNamespace(), anchors, planner=anthropic, depth_pose_anchors=True)
+            perception, SimpleNamespace(), anchors, planner=anthropic, depth_pose_anchors=True,
+            hang_camera="perception_camera")
         _predicates, without_client = assembly.public_perception_evidence(
             perception, SimpleNamespace(), anchors, planner=scripted, depth_pose_anchors=True)
 
         self.assertIsInstance(with_client.hang_target_cache, DepthRackFrame)
         self.assertTrue(with_client.depth_pose_anchors)
+        self.assertEqual(with_client.mug_frame_camera, "perception_camera")
         self.assertIsNone(without_client.hang_target_cache)
         self.assertTrue(without_client.depth_pose_anchors)
 
@@ -200,6 +202,10 @@ class InitializationFailureTests(unittest.TestCase):
 
 
 class TurnDecisionTests(unittest.TestCase):
+    def test_missing_depth_rack_pose_returns_grounding_feedback(self):
+        self.assertEqual(grounding_rejection_code(move("rack_seat"),
+                         "depth_rack_pose_unavailable"), "hang_target_grounding_unavailable")
+
     def test_hang_target_grounding_errors_become_recoverable_rejections(self):
         code = grounding_rejection_code(move("rack_seat"), "rack_frame_not_cached")
         self.assertEqual(code, "hang_target_grounding_unavailable")

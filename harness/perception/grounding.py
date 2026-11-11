@@ -188,6 +188,7 @@ class RGBDPerceptionProvider:
         self._mug_lift_tracker_enabled = False
         self._rack_pose = None
         self._rack_candidate = None
+        self._depth_rack_pose_required = False
         self._last_batches = ()
         self._scene_coverage_sequence = None
         self._mug_absence_count = 0
@@ -363,6 +364,11 @@ class RGBDPerceptionProvider:
         """The depth rack pose kept for the episode once two views agreed, else None."""
         return self._rack_pose
 
+    def enable_depth_pose_anchors(self):
+        """Keep rack masks available until the depth rack fit is confirmed."""
+        self._depth_rack_pose_required = True
+        self._set_detector_rack_reference(self._rack_pose is not None)
+
     def static_rack_world_anchor_available(self, observation):
         reference = self._static_rack_reference
         available = bool(reference is not None
@@ -425,7 +431,8 @@ class RGBDPerceptionProvider:
     def _set_detector_rack_reference(self, initialized):
         configure = getattr(self.detector, "set_static_rack_reference", None)
         if callable(configure):
-            configure(initialized)
+            configure(initialized and not (
+                self._depth_rack_pose_required and self._rack_pose is None))
 
     def observe(self, observation):
         """Ground one public observation; duplicate or old sequences fail closed."""
@@ -531,6 +538,8 @@ class RGBDPerceptionProvider:
         if self._rack_pose is None:
             self._rack_pose, rack_pose_reason = self._confirmed_rack(
                 *self._fit_rack(batches, frames, table_height, sequence))
+        if self._depth_rack_pose_required and self._rack_pose is not None:
+            self._set_detector_rack_reference(True)
         previous_mug_height = self._previous_mug_height
         if mug is not None:
             self._previous_mug_height = mug.position[2]

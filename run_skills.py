@@ -500,8 +500,11 @@ def build_evidence(args, settings, *, environment, simulator, anchors, perceptio
     development_hang_recovery = (
         args.development_oracle
         and getattr(args, "development_start_phase", None) == "hang_recovery")
+    depth_hang_targets = (settings.perception.depth_pose_anchors
+                         and getattr(planner, "client", None) is not None)
     release_gate = (RackSeatReleaseGate(environment)
-                    if rack_frame_cache is not None or development_hang_recovery else None)
+                    if rack_frame_cache is not None or depth_hang_targets
+                    or development_hang_recovery else None)
     if perception is not None:
         predicates, prepare = assembly.public_perception_evidence(
             perception, environment, anchors, planner=planner,

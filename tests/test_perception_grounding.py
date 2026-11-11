@@ -49,6 +49,23 @@ class FakeDetector:
 
 
 class PerceptionGroundingTests(unittest.TestCase):
+    def test_rack_masks_remain_enabled_until_depth_fit_is_confirmed(self):
+        from unittest.mock import patch
+        from tests.test_hang_targets import depth_rack_pose
+
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ()))
+        provider = RGBDPerceptionProvider(detector)
+        cache = SimpleNamespace(resolve=lambda obs: None, metadata=lambda: {})
+        provider.set_static_rack_frame_cache(cache)
+        self.assertTrue(detector.static_rack_reference)
+
+        provider.enable_depth_pose_anchors()
+        self.assertFalse(detector.static_rack_reference)
+        with patch.object(provider, "_fit_rack", return_value=(depth_rack_pose(), "fit")):
+            provider.observe(observation(1))
+        self.assertTrue(detector.static_rack_reference)
+        self.assertIsNotNone(provider.episode_rack_pose)
+
     def test_table_relative_lift_predicate_skips_sam_detector(self):
         class Tracker:
             def __init__(self):
@@ -869,6 +886,24 @@ class PerceptionGroundingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pose_target_unavailable"):
             provider.bind_pose_approach_anchor("mug_pregrasp", "left", observation(5),
                                                measured_tcp_pose=(.5, -.5, .8, 1., 0., 0., 0.))
+
+    def test_reverse_retreat_fallback_uses_depth_pose_without_rotating_either_wrist(self):
+        from harness.perception.preparation import PerceptionAnchorPreparer
+
+        measured = (.5, -.5, .8, 0., 1., 0., 0.)
+        environment = SimpleNamespace(arm_state=lambda arm: {"pose": measured})
+        for arm in ("left", "right"):
+            with self.subTest(arm=arm):
+                provider, anchors = self.provider_with_mug_pose(5, trusted=True)
+                prepare = PerceptionAnchorPreparer(provider, environment, anchors,
+                    approach_offset_m=.1, depth_pose_anchors=True)
+                command = SkillCommand.model_validate({"action": "move_to", "arm": arm,
+                    "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                                   "orientation_mode": "preserve_current"}})
+                anchor = prepare(command, observation(5))
+                np.testing.assert_allclose(anchor.pose[:3], (.5, -.1, .8))
+                np.testing.assert_allclose(anchor.pose[3:], measured[3:])
+
 
     def test_pose_anchor_needs_a_grounded_mug(self):
         provider, _anchors = self.provider_with_mug_pose(5, trusted=True, mug_status="ambiguous")

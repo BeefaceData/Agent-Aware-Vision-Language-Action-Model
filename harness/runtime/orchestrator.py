@@ -20,6 +20,7 @@ from harness.skills.schemas import (SkillCommand, SkillType,
 # grounding choice instead of ending the episode. Initial pixel + two retries.
 MAX_GROUNDING_RESELECTIONS = 2
 HANG_GROUNDING_REJECTIONS = frozenset({
+    "depth_rack_pose_unavailable",
     "rack_frame_not_cached", "rack_frame_camera_unavailable", "rack_frame_camera_changed",
     "grounding_report_stale_or_wrong_camera", "grounding_confidence_too_low",
     "grounding_mask_missing_or_misaligned", "grounding_keypoint_outside_object_mask",

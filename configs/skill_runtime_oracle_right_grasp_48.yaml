@@ -2,6 +2,11 @@
 # leaving both arms under the frozen policy's control.
 record_video: true
 max_turns: 16
+perception:
+  rgbd_enabled: true
+  perception_camera: default
+  depth_pose_anchors: true
+  rack_prompt_profile: explore_mug_rack
 recipe:
   arm: right
   max_retries: 2

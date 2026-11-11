@@ -96,14 +96,17 @@ class DepthRackFrame:
     with the Opus cache.
     """
 
-    def __init__(self, provider):
+    def __init__(self, provider, *, fallback=None):
         self.provider = provider
+        self.fallback = fallback
 
     def resolve(self, observation):
         # Observing first lets this view confirm a rack pose not yet kept.
         self.provider.observe(observation)
         rack_pose = self.provider.episode_rack_pose
         if rack_pose is None:
+            if self.fallback is not None:
+                return self.fallback.resolve(observation)
             raise ValueError("depth_rack_pose_unavailable")
         return rack_frame_from_pose(rack_pose)
 

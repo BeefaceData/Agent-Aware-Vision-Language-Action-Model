@@ -6,6 +6,7 @@ max_turns: 100
 perception:
   rgbd_enabled: true
   perception_camera: default
+  depth_pose_anchors: true
   opus_rack_grounding: true
   opus_mug_lift_grounding: false
   mug_lift_first_check_after_actions: 0

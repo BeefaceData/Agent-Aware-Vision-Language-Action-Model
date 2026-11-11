@@ -215,8 +215,10 @@ def public_perception_evidence(perception, environment, anchors, *, planner,
     the depth poses.
     """
     predicates = PredicateRegistry(perception=perception, rack_seat_gate=release_gate)
+    if depth_pose_anchors:
+        perception.enable_depth_pose_anchors()
     if depth_pose_anchors and getattr(planner, "client", None) is not None:
-        rack_frame_cache = DepthRackFrame(perception)
+        rack_frame_cache = DepthRackFrame(perception, fallback=rack_frame_cache)
     mug_frame_grounder = None
     if rack_frame_cache is not None:
         mug_frame_grounder = OpusObjectFrameGrounder(

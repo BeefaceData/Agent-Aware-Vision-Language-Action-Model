@@ -201,6 +201,16 @@ def depth_rack_pose():
 
 
 class DepthRackFrameTests(unittest.TestCase):
+    def test_missing_depth_fit_retains_an_existing_public_rack_cache(self):
+        expected = (0.25, 0.15, 0.9, 1.0, 0.0, 0.0, 0.0)
+        fallback = SimpleNamespace(resolve=lambda observation: expected)
+        provider = SimpleNamespace(observe=lambda observation: None, episode_rack_pose=None)
+        cache = DepthRackFrame(provider, fallback=fallback)
+        self.assertEqual(cache.resolve(object()), expected)
+        provider.episode_rack_pose = depth_rack_pose()
+        np.testing.assert_allclose(cache.resolve(object()),
+                                   rack_frame_from_pose(depth_rack_pose()))
+
     def test_the_depth_rack_frame_follows_the_opus_keypoint_convention(self):
         transform = _pose_matrix(rack_frame_from_pose(depth_rack_pose()))
 

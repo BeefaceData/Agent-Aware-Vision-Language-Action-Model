@@ -8,6 +8,40 @@ from run_skills import build_parser, parse_arguments, validate_evidence_mode
 
 
 class RunnerEvidenceTests(unittest.TestCase):
+    def test_focused_grasp_presets_enable_depth_poses_and_public_camera(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        cases = (
+            ("skill_runtime_oracle_right_grasp_48.yaml", "scripted"),
+            ("skill_runtime_oracle_left_retry.yaml", "scripted"),
+            ("skill_runtime_opus_grasp_retry.yaml", "anthropic"),
+            ("skill_runtime_opus_right_grasp_retry.yaml", "anthropic"),
+        )
+        for name, planner in cases:
+            with self.subTest(config=name):
+                args, settings = parse_arguments(build_parser(root), [
+                    "--config", str(root / "configs" / name), "--planner", planner])
+                self.assertTrue(settings.perception.depth_pose_anchors)
+                self.assertEqual(settings.perception.perception_camera, "default")
+                self.assertEqual(args.perception_factory,
+                                 "harness.perception.modal_sam3:create_detector")
+
+    def test_depth_hang_targets_install_release_gate_without_opus_rack_cache(self):
+        import run_skills
+        from harness.predicates.registry import PredicateRegistry
+        from harness.runtime.settings import RunSettings
+
+        settings = RunSettings.model_validate({"perception": {
+            "rgbd_enabled": True, "depth_pose_anchors": True}})
+        args = SimpleNamespace(development_oracle=False, planner_pixel_grounding=False)
+        with patch.object(run_skills.assembly, "public_perception_evidence",
+                          return_value=(PredicateRegistry(), None)) as public_evidence:
+            run_skills.build_evidence(args, settings,
+                environment=object(), simulator=object(), anchors=object(),
+                perception=object(), planner=SimpleNamespace(client=object()),
+                rack_frame_cache=None, oracle_log=lambda event: None)
+        self.assertIsNotNone(public_evidence.call_args.kwargs["release_gate"])
+
     def test_rgbd_harness_config_defaults_to_merged_public_perception(self):
         from pathlib import Path
         root = Path(__file__).resolve().parents[1]

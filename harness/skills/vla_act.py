@@ -62,7 +62,8 @@ class VLAAct:
         if context.refresh_history:
             context.vla.reset_history()
             context.history_reset = True
-            context.log({"event_type": "policy_history_reset"})
+            context.log({"event_type": "policy_history_reset",
+                         "reset_ms": getattr(context.vla, "last_reset_ms", None)})
         configured_chunk_limit = min(parameters.max_chunks, context.chunk_limit)
         success_chunk_limit = None
         while context.chunks < (success_chunk_limit or configured_chunk_limit):
@@ -80,6 +81,7 @@ class VLAAct:
             inference_ms = (time.perf_counter() - inference_started) * 1000.0
             context.log({"event_type": "chunk_received", "chunk": context.chunks,
                          "observation": observation.sequence, "inference_ms": inference_ms,
+                         "policy_timing": getattr(context.vla, "last_timing", {}),
                          "returned_actions": len(actions) if actions.ndim else 0})
             if (actions.ndim != 2 or actions.shape[1:] != (14,)
                     or not 1 <= len(actions) <= parameters.chunk_size

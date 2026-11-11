@@ -1,0 +1,9 @@
+{
+  "outcome": "step_budget",
+  "elapsed_seconds": 20.0,
+  "planner_turns": 2,
+  "skill_calls": 2,
+  "vla_chunks": 1,
+  "policy_actions": 2,
+  "analytic_ticks": 120
+}

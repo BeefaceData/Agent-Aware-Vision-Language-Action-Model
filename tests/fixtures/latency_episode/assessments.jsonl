@@ -1,0 +1,4 @@
+{"event_type":"planner_selection","planner_turn":1,"planner_latency_seconds":2.0}
+{"event_type":"planner_turn_result","planner_turn":1,"result":{"call_id":1,"elapsed_seconds":8.0}}
+{"event_type":"planner_selection","planner_turn":2,"planner_latency_seconds":4.0}
+{"event_type":"planner_turn_result","planner_turn":2,"result":{"call_id":2,"elapsed_seconds":3.0}}

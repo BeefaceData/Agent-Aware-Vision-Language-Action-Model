@@ -1,0 +1,8 @@
+{"event_type":"skill_requested","call_id":1}
+{"event_type":"policy_history_reset","call_id":1,"reset_ms":50.0}
+{"event_type":"chunk_received","call_id":1,"chunk":1,"inference_ms":3000.0,"policy_timing":{"pack_ms":100.0,"modal_rpc_ms":2500.0,"modal_compute_ms":2000.0,"modal_overhead_ms":500.0,"cloud_preprocess_ms":300.0,"cloud_inference_ms":1500.0,"cloud_postprocess_ms":200.0}}
+{"event_type":"action_confirmed","call_id":1,"environment_step_ms":200.0}
+{"event_type":"action_confirmed","call_id":1,"environment_step_ms":400.0}
+{"event_type":"skill_result","call_id":1,"result":{"elapsed_seconds":8.0}}
+{"event_type":"skill_requested","call_id":2}
+{"event_type":"skill_result","call_id":2,"result":{"elapsed_seconds":3.0}}

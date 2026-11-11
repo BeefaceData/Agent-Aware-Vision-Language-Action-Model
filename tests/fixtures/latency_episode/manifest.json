@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "synthetic": true,
+  "seed": 3,
+  "planner": "scripted",
+  "mode": "scripted_development",
+  "development_oracle": true,
+  "perception_factory": null,
+  "settings": {"max_turns": 2, "record_video": false}
+}

@@ -72,22 +72,20 @@ Reproducibility & State-checked prefix replay, structured skill traces, 30 FPS t
   transform and the multi-waypoint path.
   \item The event monitor gave the VLA genuine post-recovery attempts instead of
   immediately classifying inherited contact loss as a new failed grasp.
+  \item In the normalized live replay, the initial miss stopped after 77 policy
+  actions and discarded three stale actions. Clearance finished in 78 physics
+  ticks with 0.30 mm position error; the gripper then opened from 0.0 to 1.0.
+  Fresh VLA inference confirmed a right-arm lift after 68 further actions.
   \item The complete CPU suite currently passes: 696 tests covering planner
   sequencing, skill contracts, guarded opening, perception, and left/right retry behavior.
 \end{itemize}
 
-The most recent replay exposed a closed-gripper handback: the VLA moved away
-without establishing a new grasp. The new clearance-then-open normalization is
-implemented and its bounded live validation is in progress at this snapshot.
-
 \heading{Remaining gaps}
 
 \begin{enumerate}
-  \item Visually confirm the new sequence---clearance, supported opening, fresh
-  VLA retry---in the current recorded Modal run.
-  \item Repeat the experiment across left and right failures and multiple seeds;
+  \item Repeat the successful sequence across left and right failures and multiple seeds;
   report retry success, abort causes, endpoint error, and policy actions to recovery.
-  \item Replace development-oracle evidence incrementally as public RGB-D
+  \item Replace remaining development-oracle evidence incrementally as public RGB-D
   predicates demonstrate equivalent reliability, especially support, toppling,
   workspace presence, and arm-specific lift.
   \item Replay the verified contract through the Opus supervisor, ensuring its
@@ -97,10 +95,9 @@ implemented and its bounded live validation is in progress at this snapshot.
 
 \heading{Current conclusion}
 
-The analytic retreat is now geometrically repeatable and integrated through
-RoboTwin-native control. The principal open question has shifted from ``can the
-robot reach a safe clearance pose?'' to ``does a normalized, freshly monitored
-VLA retry recover the grasp across varied scenes?'' The next milestone is a
-multi-seed recorded evaluation using public perception wherever it is reliable.
+The full right-arm recovery contract has now succeeded once in a recorded live
+replay: intervention, clearance, guarded opening, fresh inference, and verified
+lift. This establishes feasibility, not reliability. The next milestone is a
+multi-seed evaluation of both arms using public perception wherever it is reliable.
 
 \end{document}

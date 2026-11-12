@@ -19,7 +19,6 @@ class InvalidPlannerResponse(ValueError):
         "vla_attempt_budget_exhausted", "vla_call_outside_acquisition_limits",
         "invalid_phase_assessment",
         "phase_outside_task_scope", "vla_call_outside_task_phase_limits",
-        "inter_arm_recovery_requires_right_retreat", "inter_arm_retreat_outside_bounds",
         "release_not_publicly_authorized",
         "analytic_skill_not_recovery_eligible",
     })
@@ -66,7 +65,7 @@ def tool_schemas(vla_limits=None, *, task_scope="acquisition", vla_stop_predicat
             # Runtime-internal fields must not be selectable by Opus. In
             # particular, it cannot request a simulator-only failure monitor
             # or alter per-arm execution masking.
-            for name in ("lock_arm", "failure_stop", "failure_arm"):
+            for name in ("failure_stop", "failure_arm"):
                 parameter_schema["properties"].pop(name, None)
         if action == SkillType.MOVE_TO:
             # Anthropic's tool schema needs a self-contained object shape here;

@@ -6,6 +6,7 @@ overlapping calls on this executor; it is not a distributed service lease.
 
 import threading
 import time
+from collections import deque
 
 from harness.schemas import StateSummary
 from harness.predicates.registry import PredicateRegistry
@@ -14,6 +15,9 @@ from .base import ExecutionContext
 from .registry import SkillRegistry
 from .schemas import (EpisodeBudget, SkillCommand, SkillResult, SkillType,
                       is_recoverable_release_support_gap)
+
+
+TCP_HISTORY_LIMIT = 256
 
 
 class SkillExecutor:
@@ -32,11 +36,20 @@ class SkillExecutor:
         self.executed_physics_ticks = 0
         self.terminal = False
         self._refresh_history = True
+        self.measured_tcp_history = {
+            arm: deque(maxlen=TCP_HISTORY_LIMIT) for arm in ("left", "right")}
         self._lock = threading.Lock()
         initial = environment.observe()  # Requires an already-reset, confirmed scene.
         self.predicates.prime(initial, allow_oracle=self.allow_oracle)
 
-    def execute(self, command):
+    def execute(self, command, *, confirmed_observation=None,
+                allow_recoverable_tracking_error=False):
+        """Execute one command from a confirmed, unchanged simulator state.
+
+        The orchestrator may pass the observation used for its planner turn. No
+        simulator action occurs while the planner selects a skill, so rendering
+        the same state again here is redundant and can block before dispatch.
+        """
         # Validate before reserving budgets, requesting inference or writing drives.
         command = SkillCommand.model_validate(
             command.model_dump() if isinstance(command, SkillCommand) else command)
@@ -49,13 +62,30 @@ class SkillExecutor:
             if self.calls >= self.budget.max_skill_calls:
                 self.terminal = True
                 raise RuntimeError("skill_call_budget_exhausted")
-            before = self.environment.observe()
-            self.calls += 1
-            call_id = self.calls
-            started = time.perf_counter()
+            call_id = self.calls + 1
+            source = ("planner_confirmed_observation" if confirmed_observation is not None
+                      else "environment_refresh")
+            preflight = time.perf_counter()
 
             def emit(event):
                 self.log({"schema_version": 2, "call_id": call_id, **event})
+
+            emit({"event_type": "skill_preflight_started", "command": command.model_dump(mode="json"),
+                  "observation_source": source,
+                  "candidate_observation": (confirmed_observation.sequence
+                                            if confirmed_observation is not None else None)})
+            try:
+                before = (confirmed_observation if confirmed_observation is not None
+                          else self.environment.observe())
+            except Exception as exc:
+                emit({"event_type": "skill_preflight_failed", "error_type": type(exc).__name__,
+                      "elapsed_seconds": time.perf_counter() - preflight})
+                raise
+            emit({"event_type": "skill_preflight_completed", "observation": before.sequence,
+                  "observation_source": source,
+                  "elapsed_seconds": time.perf_counter() - preflight})
+            self.calls += 1
+            started = time.perf_counter()
 
             context = ExecutionContext(
                 self.environment, self.vla, before, emit, self.cancelled,
@@ -64,6 +94,7 @@ class SkillExecutor:
                 self._refresh_history,
                 tick_limit=self.budget.max_analytic_ticks-self.executed_physics_ticks,
                 anchors=self.anchors, allow_oracle=self.allow_oracle,
+                measured_tcp_history=self.measured_tcp_history,
                 feedback_boundary_predicates=self.predicates.feedback_boundary_predicates(),
             )
             context.predicate_check = lambda name, observation, arm: self.predicates.evaluate(
@@ -90,23 +121,36 @@ class SkillExecutor:
                 self.executed_physics_ticks += context.physics_ticks
             if context.history_reset:
                 self._refresh_history = False
-            if context.motion_started:
+            # A gripper ramp does not invalidate the measured TCP approach
+            # path. Preserve it across the open-before-retreat recovery step;
+            # clear it after analytic arm motion, which could make the
+            # recorded path stale for a later retry.
+            if context.motion_started and command.action in (SkillType.MOVE_TO,
+                                                              SkillType.ROTATE_WRIST):
                 self._refresh_history = True  # Never reuse pre-staging history.
+            recoverable_tracking_error = (
+                allow_recoverable_tracking_error
+                and command.action == SkillType.MOVE_TO
+                and reason == "tracking_error"
+                and context.tracking_error is not None
+                and context.tracking_error.arm == command.arm
+                and context.tracking_error.comparison == "controlled_arm"
+                and not context.ambiguous
+            )
             self.terminal = (reason in {"aborted", "cancelled", "execution_error", "task_success",
+                                        "failure_monitor_unavailable",
+                                        "grasp_monitor_watchdog_exhausted",
                                         "episode_budget_exhausted", "tracking_error", "safety_violation"}
+                             and not recoverable_tracking_error
                              or self.calls >= self.budget.max_skill_calls)
             success = None if context.ambiguous else self.environment.native_success
             self.terminal |= success is True
-            overlap_check = getattr(self.environment, "arm_overlap_detected", None)
-            try:
-                overlap_state = bool(overlap_check()) if callable(overlap_check) else None
-            except Exception:
-                overlap_state = None
             result = SkillResult(
                 call_id=call_id, skill=command.action,
                 completed=reason in {"completed", "predicate_satisfied", "failure_predicate_satisfied",
                                      "chunk_budget_exhausted", "policy_action_budget_exhausted",
-                                     "task_success", "aborted"},
+                                     "failure_monitor_unavailable",
+                                     "grasp_monitor_watchdog_exhausted", "task_success", "aborted"},
                 stop_reason=reason, executed_policy_actions=context.executed,
                 vla_chunks_requested=context.chunks, discarded_actions=context.discarded,
                 executed_physics_ticks=context.physics_ticks,
@@ -114,7 +158,7 @@ class SkillExecutor:
                 state_after=None if context.ambiguous else StateSummary(command_state=context.observation.command_state),
                 observation_before=before.sequence,
                 observation_after=None if context.ambiguous else context.observation.sequence,
-                episode_terminal=self.terminal, arm_overlap_detected=overlap_state,
+                episode_terminal=self.terminal,
                 task_success=success,
                 native_success_seen=context.native_success_seen,
                 post_success_actions=context.post_success_actions,

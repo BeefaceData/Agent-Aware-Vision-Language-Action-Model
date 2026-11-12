@@ -2,7 +2,10 @@
 
 from harness.skills.schemas import SkillCommand, VLAParameters
 from .base import PlannerSelection
-from .scripted import GraspRetryPlanner
+from .scripted import (GraspRetryPlanner, monitored_grasp_parameters,
+                       near_grounded_retry_stage, retry_open_authorized,
+                       verified_recovery_clearance,
+                       verified_recovery_gripper_open)
 
 
 class HandoffPlanner:
@@ -11,8 +14,6 @@ class HandoffPlanner:
     The VLA coordinates both arms during transfer. The transfer predicate is
     based on stable table support and release, without arm-home or clearance.
     """
-
-    RIGHT_GRASP_RETRY_ACTIONS = 176
 
     def __init__(self, acquisition, handoff):
         self.acquisition = GraspRetryPlanner(acquisition)
@@ -27,9 +28,23 @@ class HandoffPlanner:
         self.hang_attempted = False
         self.left_transfer_confirmed = False
 
+    def resume_development_right_grasp(self):
+        """Resume from a replayed, verified left-transfer boundary."""
+        if self.left_transfer_confirmed or self.right_lift_attempted:
+            raise ValueError("planner_already_started")
+        self.left_transfer_confirmed = True
+        self.stage_attempted = True
+
     def select(self, context):
         previous = context.previous
-        if previous and (previous.episode_terminal or not previous.completed or previous.execution_uncertain):
+        if previous and (previous.episode_terminal or previous.execution_uncertain):
+            return self._abort("previous_skill_failed")
+        if previous and not previous.completed:
+            if (not self.left_transfer_confirmed
+                    and self.acquisition.phase == "APPROACH_MUG"
+                    and previous.skill.value == "move_to"
+                    and near_grounded_retry_stage(context, previous)):
+                return self.acquisition.select(context)
             return self._abort("previous_skill_failed")
         if previous and previous.predicate is not None:
             if (previous.predicate.name == "left_transfer_complete"
@@ -55,7 +70,7 @@ class HandoffPlanner:
                 return self._abort("left_transfer_unconfirmed")
             self.stage_attempted = True
             return PlannerSelection(SkillCommand(action="vla_act", arm="both",
-                parameters=self._parameters(lock_arm=None), stop="left_transfer_complete",
+                parameters=self._parameters(), stop="left_transfer_complete",
                 reason="Coordinate left-arm placement and withdrawal with the right-arm approach"),
                 "LEFT_TRANSFER", self.retry_count)
 
@@ -79,16 +94,13 @@ class HandoffPlanner:
                 self.right_lift_confirmed = True
             elif self.right_lift_attempted:
                 if (self.right_grasp_retries >= self.acquisition.settings.max_retries
-                        or not self._retryable_right_grasp_failure(previous)):
+                        or not self._retryable_right_grasp_failure(
+                            previous, observed_failure=right_lifted is False)):
                     return self._abort("right_grasp_unconfirmed")
-                if context.value("release_ready") is not True:
-                    return self._abort("right_grasp_retry_open_not_authorized")
                 self.right_grasp_retries += 1
                 self.right_retry_phase = "retreat"
-                return PlannerSelection(SkillCommand(action="set_gripper", arm="right",
-                    parameters={"value": 1.0},
-                    reason="Open the supported or empty right hand before a bounded grasp retry"),
-                    "RIGHT_RETRY_OPEN", self.retry_count)
+                return self.acquisition.retry_retreat_selection(
+                    arm="right", phase="RIGHT_RETRY_RETREAT", retries=self.retry_count)
             else:
                 self.right_lift_attempted = True
                 return self._right_vla_selection("RIGHT_GRASP")
@@ -106,14 +118,12 @@ class HandoffPlanner:
             return self._abort("rack_hang_unconfirmed")
         self.hang_attempted = True
         return PlannerSelection(SkillCommand(action="vla_act", arm="both",
-            parameters=self._parameters(lock_arm="left"), stop="task_success",
+            parameters=self._parameters(), stop="task_success",
             reason="After right grasp and grounded rack staging, attempt the constrained hang"),
             "RACK_HANG", self.retry_count)
 
-    def _parameters(self, *, lock_arm):
-        data = self.handoff.model_dump()
-        data["lock_arm"] = lock_arm
-        return VLAParameters.model_validate(data)
+    def _parameters(self):
+        return VLAParameters.model_validate(self.handoff.model_dump())
 
     def _select_right_grasp_retry(self, context):
         """Recover a verified, unambiguous miss through bounded existing skills."""
@@ -122,52 +132,47 @@ class HandoffPlanner:
             return None
         previous = context.previous
         if phase == "retreat":
-            if previous is None or previous.skill.value != "set_gripper":
-                return self._abort("right_grasp_retry_open_failed")
-            self.right_retry_phase = "restage"
-            return PlannerSelection(SkillCommand(action="move_to", arm="right",
-                parameters={"target": "current_ee", "offset_xyz": (0.0, 0.0, 0.05)},
-                reason="Back off from the failed right-arm grasp using the measured pose"),
-                "RIGHT_RETRY_RETREAT", self.retry_count)
-        if phase == "restage":
-            if previous is None or previous.skill.value != "move_to":
+            if not verified_recovery_clearance(previous):
                 return self._abort("right_grasp_retry_retreat_failed")
-            self.right_retry_phase = "retry_vla"
-            return PlannerSelection(SkillCommand(action="move_to", arm="right",
-                parameters={"target": "mug_pregrasp"},
-                reason="Re-ground the mug pregrasp from the current observation"),
-                "RIGHT_RETRY_STAGE", self.retry_count)
-        if phase == "retry_vla":
-            if previous is None or previous.skill.value != "move_to":
-                return self._abort("right_grasp_retry_staging_failed")
+            if not retry_open_authorized(context):
+                return self._abort("right_grasp_retry_open_not_authorized")
+            self.right_retry_phase = "open"
+            return self.acquisition.retry_open_selection(
+                arm="right", phase="RIGHT_RETRY_OPEN", retries=self.retry_count)
+        if phase == "open":
+            if not verified_recovery_gripper_open(previous):
+                return self._abort("right_grasp_retry_open_failed")
             self.right_retry_phase = "await_retry"
             return self._right_vla_selection("RIGHT_GRASP_RETRY")
         if phase == "await_retry":
-            self.right_retry_phase = None
             if context.value("right_mug_lifted") is True:
+                self.right_retry_phase = None
                 self.right_lift_confirmed = True
                 return None
+            if (self.right_grasp_retries < self.acquisition.settings.max_retries
+                    and self._retryable_right_grasp_failure(
+                        previous, observed_failure=context.value("right_mug_lifted") is False)):
+                self.right_grasp_retries += 1
+                self.right_retry_phase = "retreat"
+                return self.acquisition.retry_retreat_selection(
+                    arm="right", phase="RIGHT_RETRY_RETREAT", retries=self.retry_count)
+            self.right_retry_phase = None
             return self._abort("right_grasp_retry_budget_exhausted")
         return self._abort("invalid_right_grasp_retry_state")
 
     @staticmethod
-    def _retryable_right_grasp_failure(previous):
+    def _retryable_right_grasp_failure(previous, *, observed_failure=False):
         return (previous is not None and previous.skill.value == "vla_act"
             and previous.completed and not previous.execution_uncertain
             and (previous.objective_satisfied is False
+                 or (previous.objective_satisfied is None and observed_failure)
                  or (previous.stop_reason == "failure_predicate_satisfied"
                      and previous.objective_satisfied is None))
             and previous.stop_reason in {"failure_predicate_satisfied", "chunk_budget_exhausted",
                                          "policy_action_budget_exhausted"})
 
     def _right_vla_selection(self, phase):
-        parameters = self._parameters(lock_arm="left").model_dump()
-        if phase == "RIGHT_GRASP_RETRY":
-            parameters["max_policy_actions"] = min(parameters["max_policy_actions"],
-                                                     self.RIGHT_GRASP_RETRY_ACTIONS)
-            retry_chunks = ((parameters["max_policy_actions"] + parameters["chunk_size"] - 1)
-                            // parameters["chunk_size"])
-            parameters["max_chunks"] = min(parameters["max_chunks"], retry_chunks)
+        parameters = monitored_grasp_parameters(self._parameters(), "right")
         return PlannerSelection(SkillCommand(action="vla_act", arm="both",
             parameters=parameters, stop="right_mug_lifted",
             reason="Use the right arm to grasp and lift the staged mug"),

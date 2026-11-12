@@ -2,8 +2,10 @@
 
 import numpy as np
 
-from harness.perception.geometry import bounded_pose_waypoints, pose7, pose_error
-from harness.skills.motion import SkillStopped, TickExecutor, validate_trajectory
+from harness.perception.geometry import pose7, pose_error
+from harness.skills.motion import (SkillStopped, TickExecutor,
+                                   subsample_trajectory, validate_trajectory)
+from harness.skills.native_motion import NativeMotionAdapter
 from .schemas import TrackingError
 
 
@@ -13,6 +15,8 @@ from .schemas import TrackingError
 SETTLE_TICK_LIMIT = 125
 SETTLE_STABLE_SAMPLES = 3
 TRACKING_ERROR_LIMIT_RAD = 0.25
+TRACKING_ERROR_IMMEDIATE_LIMIT_RAD = 0.50
+TRACKING_ERROR_CONSECUTIVE_TICKS = 3
 
 
 class AnalyticSkill:
@@ -26,15 +30,19 @@ class AnalyticSkill:
             return "cancelled"
         if env.native_success:
             return "task_success"
-        initial = env.arm_state(arm)
+        motion = NativeMotionAdapter(env)
+        initial_state = motion.state(arm)
+        initial = {"joints": initial_state.joints, "pose": initial_state.pose,
+                   "gripper": initial_state.gripper}
         release_predicate = (
             "rack_seat_aligned"
             if command.action.value == "release"
             and command.parameters.authorization == "rack_seat_alignment"
             else "release_ready")
         other = "right" if arm == "left" else "left"
-        other_hold = env.arm_state(other)
+        other_hold = motion.state(other)
         last_position = initial["joints"].copy()
+        tracking_error_streaks = {}
         opening = False
 
         def guard():
@@ -43,16 +51,23 @@ class AnalyticSkill:
             # stop at the native benchmark's >0.8 command threshold.
             if not opening and env.native_success: return "task_success"
             if context.motion_started:
-                measured = env.arm_state(arm)["joints"]
-                inactive = env.arm_state(other)["joints"]
+                measured = motion.state(arm).joints
+                inactive = motion.state(other).joints
                 for compared_arm, measured_joints, commanded_joints, comparison in (
                     (arm, measured, last_position, "controlled_arm"),
-                    (other, inactive, other_hold["joints"], "inactive_arm"),
+                    (other, inactive, other_hold.joints, "inactive_arm"),
                 ):
                     residuals = np.abs(measured_joints-commanded_joints)
                     joint_index = int(np.argmax(residuals))
                     residual = float(residuals[joint_index])
+                    key = (compared_arm, joint_index)
                     if residual > TRACKING_ERROR_LIMIT_RAD:
+                        tracking_error_streaks[key] = tracking_error_streaks.get(key, 0) + 1
+                    else:
+                        tracking_error_streaks[key] = 0
+                    streak = tracking_error_streaks[key]
+                    if (residual > TRACKING_ERROR_IMMEDIATE_LIMIT_RAD
+                            or streak >= TRACKING_ERROR_CONSECUTIVE_TICKS):
                         diagnostic = TrackingError(
                             arm=compared_arm, comparison=comparison,
                             joint_index=joint_index,
@@ -64,6 +79,8 @@ class AnalyticSkill:
                         context.tracking_error = diagnostic
                         context.log({"event_type": "tracking_error", "diagnostic": {
                             **diagnostic.model_dump(mode="json"),
+                            "consecutive_ticks": streak,
+                            "immediate_limit_rad": TRACKING_ERROR_IMMEDIATE_LIMIT_RAD,
                             "measured_joints_rad": measured_joints.tolist(),
                             "commanded_joints_rad": commanded_joints.tolist(),
                             "residuals_rad": residuals.tolist(),
@@ -79,14 +96,14 @@ class AnalyticSkill:
         def advance(position, velocity, gripper):
             nonlocal last_position
             context.motion_started = context.ambiguous = True
-            env.tick(arm, position, velocity, gripper, other_hold)
+            motion.apply_qpos_sample(arm, position, velocity, gripper, other_hold)
             context.physics_ticks += 1
             context.ambiguous = False
             last_position = np.asarray(position).copy()
             context.log({"event_type": "measured_tick", "physics_tick": context.physics_ticks,
                          "physics_seconds": context.physics_ticks / 250.0,
-                         "arm": arm, "measured_joints": env.arm_state(arm)["joints"].tolist(),
-                         "measured_ee_pose": env.arm_state(arm)["pose"].tolist()})
+                         "arm": arm, "measured_joints": motion.state(arm).joints.tolist(),
+                         "measured_ee_pose": motion.state(arm).pose.tolist()})
 
         executor = TickExecutor(min(command.parameters.max_physics_ticks, context.tick_limit),
                                 advance=advance, guard=guard, log=context.log, arm=arm)
@@ -97,15 +114,22 @@ class AnalyticSkill:
             waypoints = ()
             if target is not None:
                 target = pose7(target)
+                minimum_translation = getattr(
+                    command.parameters, "minimum_translation_m", 0.0)
+                translation = float(np.linalg.norm(target[:3] - initial["pose"][:3]))
+                if (getattr(command.parameters, "path_mode", "target") != "reverse_approach"
+                        and translation + 1e-9 < minimum_translation):
+                    raise SkillStopped("minimum_translation_not_met")
                 if (not (-0.65 <= target[0] <= 0.65 and -0.65 <= target[1] <= 0.65
                          and 0.70 <= target[2] <= 1.40)):
                     raise SkillStopped("pose_limits")
-                try:
-                    waypoints = bounded_pose_waypoints(initial["pose"], target)
-                except ValueError as exc:
-                    if str(exc) == "pose_waypoint_limits":
-                        raise SkillStopped("pose_limits") from None
-                    raise
+                waypoints = (context.motion_waypoints
+                             if context.motion_waypoints is not None else (target,))
+                if any(not (-0.65 <= waypoint[0] <= 0.65
+                            and -0.65 <= waypoint[1] <= 0.65
+                            and 0.70 <= waypoint[2] <= 1.40)
+                       for waypoint in waypoints):
+                    raise SkillStopped("pose_limits")
             context.log({"event_type": "analytic_start", "arm": arm,
                          "measured_start_joints": initial["joints"].tolist(),
                          "measured_start_pose": initial["pose"].tolist(),
@@ -115,11 +139,22 @@ class AnalyticSkill:
                          "information_source": "development_oracle" if context.oracle_used else "public"})
             if target is not None:
                 final_gripper = initial["gripper"]
-                for index, waypoint in enumerate(waypoints, start=1):
-                    measured = env.arm_state(arm)
+                waypoint_index = 0
+                while waypoint_index < len(waypoints):
+                    index = waypoint_index + 1
+                    waypoint = waypoints[waypoint_index]
+                    measured_state = motion.state(arm)
+                    measured = {"joints": measured_state.joints, "pose": measured_state.pose,
+                                "gripper": measured_state.gripper}
+                    if (getattr(command.parameters, "path_mode", "target") == "reverse_approach"
+                            and index <= context.reverse_retreat_translation_waypoints):
+                        # Reverse the measured translation while leaving wrist
+                        # orientation at the latest measured value. The
+                        # preserve_current contract forbids a wrist correction
+                        # during this recovery retreat.
+                        waypoint = pose7(waypoint)
+                        waypoint[3:] = measured["pose"][3:]
                     segment_distance, segment_rotation = pose_error(measured["pose"], waypoint)
-                    if segment_distance > 0.30 or segment_rotation > np.deg2rad(60):
-                        raise SkillStopped("pose_limits")
                     context.log({"event_type": "analytic_waypoint_plan", "arm": arm,
                         "waypoint_index": index, "waypoint_count": len(waypoints),
                         "measured_start_joints": measured["joints"].tolist(),
@@ -128,7 +163,7 @@ class AnalyticSkill:
                         "segment_rotation_rad": segment_rotation,
                         "target_pose": waypoint.tolist()})
                     try:
-                        plan = env.plan(arm, waypoint)
+                        plan = motion.plan_pose(arm, waypoint)
                     except Exception as exc:
                         context.log({"event_type": "analytic_plan_result", "arm": arm,
                             "waypoint_index": index, "planner_status": "exception",
@@ -152,7 +187,9 @@ class AnalyticSkill:
                                                 else "invalid_planner_result"})
                     try:
                         positions, velocities = validate_trajectory(
-                            plan, env.joint_bounds(arm), measured["joints"])
+                            plan, motion.joint_bounds(arm), measured["joints"])
+                        positions, velocities = subsample_trajectory(
+                            positions, velocities)
                     except SkillStopped as exc:
                         if planner_status == "success":
                             context.log({"event_type": "analytic_plan_result", "arm": arm,
@@ -162,13 +199,17 @@ class AnalyticSkill:
                         raise
                     context.log({"event_type": "analytic_plan_result", "arm": arm,
                         "waypoint_index": index, "planner_status": planner_status,
-                        "trajectory_samples": trajectory_samples, "result": "accepted",
+                        "trajectory_samples": trajectory_samples,
+                        "native_actions": len(positions),
+                        "trajectory_subsampled": len(positions) < trajectory_samples,
+                        "result": "accepted",
                         "rejection_reason": None})
                     executor.require_capacity(
                         len(positions) + (SETTLE_TICK_LIMIT if index == len(waypoints) else 0))
                     for position, velocity in zip(positions, velocities):
                         executor.tick(command.action.value, position, velocity, initial["gripper"])
-                final_position = positions[-1]
+                    final_position = positions[-1]
+                    waypoint_index += 1
             else:
                 opening = gripper_target > initial["gripper"] + 1e-9
                 if opening and context.check_predicate(release_predicate, arm) is not True:
@@ -187,7 +228,7 @@ class AnalyticSkill:
             for settle_ticks in range(1, settle_limit + 1):
                 executor.tick("settle", final_position, np.zeros(6), float(final_gripper))
                 if target is not None:
-                    measured_pose = env.arm_state(arm)["pose"]
+                    measured_pose = motion.state(arm).pose
                     position_error, orientation_error = pose_error(measured_pose, target)
                     if position_error <= 0.015 and orientation_error <= 0.10:
                         stable_samples += 1
@@ -203,9 +244,25 @@ class AnalyticSkill:
                 "converged": target is not None and stable_samples >= SETTLE_STABLE_SAMPLES})
             reason = guard()
             if reason: raise SkillStopped(reason)
-            final = env.arm_state(arm)
+            final_state = motion.state(arm)
+            final = {"joints": final_state.joints, "pose": final_state.pose,
+                     "gripper": final_state.gripper}
             if target is not None:
                 context.position_error, context.orientation_error = pose_error(final["pose"], target)
+                if context.minimum_retreat_clearance_m is not None:
+                    clearance = float(np.linalg.norm(final["pose"][:3] - initial["pose"][:3]))
+                    orientation_limit = 0.20
+                    retreat_met = (clearance + 1e-3 >= context.minimum_retreat_clearance_m
+                                   and context.orientation_error <= orientation_limit)
+                    context.log({"event_type": "retreat_clearance_check", "arm": arm,
+                        "measured_clearance_m": clearance,
+                        "minimum_clearance_m": context.minimum_retreat_clearance_m,
+                        "orientation_error_rad": float(context.orientation_error),
+                        "orientation_limit_rad": orientation_limit,
+                        "satisfied": retreat_met})
+                    if not retreat_met:
+                        return "target_not_reached"
+                    return "completed"
                 if context.position_error > 0.015 or context.orientation_error > 0.10:
                     return "target_not_reached"
             elif abs(final["gripper"]-gripper_target) > 0.01:
@@ -218,7 +275,7 @@ class AnalyticSkill:
                 # Do not overwrite a known uncertainty with a guessed state.
                 uncertain = context.ambiguous
                 context.ambiguous = True
-                env.hold_measured()
+                motion.hold_measured()
                 if not uncertain:
                     context.observation = env.observe()
                     context.ambiguous = False

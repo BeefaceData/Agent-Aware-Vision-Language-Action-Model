@@ -22,7 +22,7 @@ Evaluate the final rack-hanging phase and improve safe, repeatable behavior. The
 
 ## Constraints
 
-The task sequence includes left-arm acquisition and table handoff, then right-arm pickup and rack hanging. Do not gate the VLA’s two-arm handoff with an invented arm lock. Avoid changing the grasp/handoff trajectory while isolating the hanging test. The VLA can be called through `VLA_ACT`; it must remain the frozen Modal policy and must not emit actions outside the existing 14-DoF interface. Keep simulator oracle contact/pose checks in `development/` and offline evaluation only.
+The task sequence includes left-arm acquisition and table handoff, then right-arm pickup and rack hanging. Do not gate the VLA’s two-arm handoff with an invented arm lock. Avoid changing the grasp/handoff trajectory while isolating the hanging test. The VLA can be called through `VLA_ACT`; it must remain the frozen Modal policy and must not emit actions outside the existing 14-DoF interface. Keep simulator oracle contact/pose checks in `development/`; during explicitly marked development runs, oracle evidence may fill only predicates that public perception leaves unknown and must stay out of Opus inputs.
 
 RoboTwin and CuRobo share the local GPU with the simulator. Do not start concurrent live episodes or planner tests that initialize the simulator. Run CPU/replay checks first and coordinate one bounded live run at a time.
 

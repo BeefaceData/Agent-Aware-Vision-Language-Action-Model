@@ -31,6 +31,10 @@ class ExecutionContext:
     feedback_boundary_predicates: frozenset[str] = frozenset()
     last_predicate: object = None
     anchors: object = None
+    measured_tcp_history: object = None
+    motion_waypoints: tuple | None = None
+    minimum_retreat_clearance_m: float | None = None
+    reverse_retreat_translation_waypoints: int = 0
     allow_oracle: bool = False
     oracle_used: bool = False
     position_error: float | None = None

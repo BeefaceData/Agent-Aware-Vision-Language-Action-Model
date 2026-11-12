@@ -715,8 +715,8 @@ to the planner. Unused actions are thrown away, never executed later (\srcref{ha
 of each phase (full-task config: 64 actions for grasp, 128 for handoff, 64 for hang, set by
 \code{anthropic.*_initial_feedback_after_actions}). After that, each \code{vla_act} call ends after
 \code{planner_feedback_chunks} chunks (normally 1 chunk of 16 actions). The coach then sees new
-pictures and decides again. When RoboTwin's checker first reports success, the policy may finish a fixed 16-action
-follow-through so the gripper can let go cleanly (\code{NATIVE_SUCCESS_FOLLOW_THROUGH_ACTIONS}).
+pictures and decides again. When RoboTwin's checker reports success, the current VLA chunk stops immediately
+and its unused action tail is discarded; the episode is counted as successful without further motion.
 \end{keyidea}
 
 \subsection{How a careful (analytic) move works}

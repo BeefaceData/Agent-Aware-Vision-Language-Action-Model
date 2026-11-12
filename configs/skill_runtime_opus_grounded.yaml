@@ -10,8 +10,8 @@ recipe:
   stage:
     target: mug_pregrasp
   retreat:
-    target: current_ee
-    offset_xyz: [0.0, 0.0, 0.05]
+    target: mug_recovery_clearance
+    orientation_mode: preserve_current
   vla:
     max_chunks: 32
     chunk_size: 8

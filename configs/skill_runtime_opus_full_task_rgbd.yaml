@@ -5,8 +5,9 @@ record_video: true
 max_turns: 100
 perception:
   rgbd_enabled: true
+  perception_camera: default
   opus_rack_grounding: true
-  rack_grounding_camera: right_camera
+  rack_grounding_camera: perception_camera
   rack_prompt_profile: explore_mug_rack
 recipe:
   arm: left

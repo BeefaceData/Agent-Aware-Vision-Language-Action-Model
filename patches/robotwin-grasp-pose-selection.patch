@@ -1,0 +1,14 @@
+diff --git a/envs/_base_task.py b/envs/_base_task.py
+--- a/envs/_base_task.py
++++ b/envs/_base_task.py
+@@ -1088,7 +1088,9 @@ class Base_Task(gym.Env):
+         now_step = -1
+         for i in range(pose_num):
+             if traj_lst["status"][i] != "Success":
+                 continue
+-            if now_pose is None or len(traj_lst["position"][i]) < now_step:
++            path_length = len(traj_lst["position"][i])
++            if now_pose is None or path_length < now_step:
+                 now_pose = target_lst[i]
++                now_step = path_length
+         return now_pose

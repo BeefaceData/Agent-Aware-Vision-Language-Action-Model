@@ -33,7 +33,7 @@ class ProcessAttemptRunner:
             "--robotwin-root", str(self.robotwin_root), "--planner", self.planner,
             "--development-oracle"]
         if self.model:
-            command.extend(["--anthropic-model", self.model])
+            command.extend(["--model", self.model])
         if self.memory:
             path, digest = self.memory
             command.extend(["--memory-snapshot", str(path), "--memory-sha256", digest])

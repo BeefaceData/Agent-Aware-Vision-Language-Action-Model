@@ -96,14 +96,17 @@ class DepthRackFrame:
     with the Opus cache.
     """
 
-    def __init__(self, provider):
+    def __init__(self, provider, *, fallback=None):
         self.provider = provider
+        self.fallback = fallback
 
     def resolve(self, observation):
         # Observing first lets this view confirm a rack pose not yet kept.
         self.provider.observe(observation)
         rack_pose = self.provider.episode_rack_pose
         if rack_pose is None:
+            if self.fallback is not None:
+                return self.fallback.resolve(observation)
             raise ValueError("depth_rack_pose_unavailable")
         return rack_frame_from_pose(rack_pose)
 
@@ -115,10 +118,11 @@ def bind_hang_targets(cache, observation, mug_report, *, tcp_pose,
 
     The rack is episode-static; the mug handle must be grounded in the current
     observation because its pose follows the actual grasp. The resulting
-    symbolic anchors are ``rack_approach`` (outside the peg tip) and
-    ``rack_seat`` (handle aligned with the peg seat). This function computes
-    geometry only; callers still sequence MOVE_TO and RELEASE through the
-    existing skill vocabulary and release guard.
+    symbolic anchors are ``rack_approach`` (the task's 5 cm pre-placement
+    offset) and ``rack_seat`` (the 5 cm placement offset RoboTwin uses for
+    ``hanging_mug``). Both offsets follow the grounded rack frame's local +Z
+    axis. This function computes geometry only; callers still sequence MOVE_TO
+    and RELEASE through the existing skill vocabulary and release guard.
     """
     if arm not in ("left", "right"):
         raise ValueError("hang_target_arm_required")

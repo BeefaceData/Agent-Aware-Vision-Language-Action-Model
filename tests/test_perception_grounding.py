@@ -49,6 +49,61 @@ class FakeDetector:
 
 
 class PerceptionGroundingTests(unittest.TestCase):
+    def test_recovery_clearance_is_fixed_above_grounded_mug(self):
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ()))
+        provider = RGBDPerceptionProvider(detector)
+        provider._fresh_result_for_anchor = lambda *args, **kwargs: SimpleNamespace(
+            objects={"mug": SimpleNamespace(position=(0.03, 0.02, 0.94))},
+            status={"mug": "grounded"})
+        measured = (0.12, -0.04, 0.95, 1.0, 0.0, 0.0, 0.0)
+
+        anchor = provider.bind_recovery_clearance_anchor(
+            "mug_recovery_clearance", "right", observation(4),
+            measured_tcp_pose=measured)
+
+        self.assertEqual(anchor.pose[:2], (0.03, 0.02))
+        self.assertAlmostEqual(anchor.pose[2], 1.04)
+        self.assertEqual(anchor.pose[3:], measured[3:])
+
+    def test_recovery_preparer_converts_tcp_target_to_planning_frame(self):
+        from harness.perception.preparation import PerceptionAnchorPreparer
+
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ()))
+        anchors = AnchorRegistry()
+        provider = RGBDPerceptionProvider(detector, anchors)
+        provider._fresh_result_for_anchor = lambda *args, **kwargs: SimpleNamespace(
+            objects={"mug": SimpleNamespace(position=(0.03, 0.02, 0.74))},
+            status={"mug": "grounded"})
+        environment = SimpleNamespace(arm_state=lambda _arm: {
+            "pose": (0.12, -0.04, 0.95, 1.0, 0.0, 0.0, 0.0),
+            "tcp_pose": (0.24, -0.04, 0.95, 1.0, 0.0, 0.0, 0.0),
+        })
+        prepare = PerceptionAnchorPreparer(provider, environment, anchors)
+        command = SkillCommand.model_validate({"action": "move_to", "arm": "right",
+            "parameters": {"target": "mug_recovery_clearance"}})
+
+        anchor = prepare(command, observation(4))
+
+        np.testing.assert_allclose(anchor.pose[:3], (-0.09, 0.02, 0.84), atol=1e-9)
+        self.assertEqual(anchor.source, "perception")
+
+    def test_rack_masks_remain_enabled_until_depth_fit_is_confirmed(self):
+        from unittest.mock import patch
+        from tests.test_hang_targets import depth_rack_pose
+
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ()))
+        provider = RGBDPerceptionProvider(detector)
+        cache = SimpleNamespace(resolve=lambda obs: None, metadata=lambda: {})
+        provider.set_static_rack_frame_cache(cache)
+        self.assertTrue(detector.static_rack_reference)
+
+        provider.enable_depth_pose_anchors()
+        self.assertFalse(detector.static_rack_reference)
+        with patch.object(provider, "_fit_rack", return_value=(depth_rack_pose(), "fit")):
+            provider.observe(observation(1))
+        self.assertTrue(detector.static_rack_reference)
+        self.assertIsNotNone(provider.episode_rack_pose)
+
     def test_table_relative_lift_predicate_skips_sam_detector(self):
         class Tracker:
             def __init__(self):
@@ -68,6 +123,49 @@ class PerceptionGroundingTests(unittest.TestCase):
         self.assertEqual(evidence.reason, "stable_public_table_relative_lift")
         self.assertEqual(tracker.calls, [4])
         self.assertEqual(detector.calls, [])
+
+    def test_mug_workspace_loss_requires_repeated_static_scene_coverage(self):
+        from unittest.mock import patch
+
+        frame = camera()
+        images_by_camera = {name: np.zeros((2, 3, 3), dtype=np.uint8)
+                            for name in ("head_camera", "left_camera", "right_camera",
+                                         "perception_camera")}
+        table_mask = mask()
+
+        class SceneDetector(FakeDetector):
+            def detect(self, image_map, *, observation_sequence):
+                return DetectionBatch(observation_sequence, "perception_camera", (
+                    Detection("table", 0.95, table_mask),))
+
+        provider = RGBDPerceptionProvider(SceneDetector(lambda _: None),
+            camera_order=("perception_camera",))
+        provider._estimate = lambda selected, frame, sequence, camera_name, image: (
+            GroundedObject("table", (0.0, 0.0, 0.74), 0.95, sequence,
+                           camera_name, 1.0), None)
+
+        def scene_observation(sequence):
+            return Observation(sequence, images_by_camera, (0.0,) * 14,
+                {"perception_camera": frame})
+
+        first = scene_observation(1)
+        provider.observe(first)
+        self.assertIsNone(provider.predicate_evidence("mug_in_workspace", first)["value"])
+        second = scene_observation(2)
+        provider.observe(second)
+        result = provider.predicate_evidence("mug_in_workspace", second)
+        self.assertFalse(result["value"])
+        self.assertEqual(result["reason"], "mug_absent_from_repeatedly_observed_workspace")
+
+    def test_scene_perception_failure_keeps_mug_workspace_unknown(self):
+        provider = RGBDPerceptionProvider(FakeDetector(
+            lambda sequence: DetectionBatch(sequence, "head_camera", ())),
+            camera_order=("head_camera",))
+        obs = observation(1)
+        provider.observe(obs)
+        result = provider.predicate_evidence("mug_in_workspace", obs)
+        self.assertIsNone(result["value"])
+        self.assertEqual(result["reason"], "scene_coverage_or_mug_detection_unavailable")
 
     def test_configured_table_plane_lift_tracker_overrides_sam_centroid_latch(self):
         class Tracker:
@@ -826,6 +924,42 @@ class PerceptionGroundingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pose_target_unavailable"):
             provider.bind_pose_approach_anchor("mug_pregrasp", "left", observation(5),
                                                measured_tcp_pose=(.5, -.5, .8, 1., 0., 0., 0.))
+
+    def test_reverse_retreat_fallback_uses_depth_pose_without_rotating_either_wrist(self):
+        from harness.perception.preparation import PerceptionAnchorPreparer
+
+        measured = (.5, -.5, .8, 0., 1., 0., 0.)
+        environment = SimpleNamespace(arm_state=lambda arm: {"pose": measured})
+        for arm in ("left", "right"):
+            with self.subTest(arm=arm):
+                provider, anchors = self.provider_with_mug_pose(5, trusted=True)
+                prepare = PerceptionAnchorPreparer(provider, environment, anchors,
+                    approach_offset_m=.1, depth_pose_anchors=True)
+                command = SkillCommand.model_validate({"action": "move_to", "arm": arm,
+                    "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                                   "orientation_mode": "preserve_current"}})
+                anchor = prepare(command, observation(5))
+                np.testing.assert_allclose(anchor.pose[:3], (.5, -.1, .8))
+                np.testing.assert_allclose(anchor.pose[3:], measured[3:])
+
+    def test_reverse_retreat_does_not_require_fresh_mug_detection(self):
+        from harness.perception.preparation import PerceptionAnchorPreparer
+
+        detector = FakeDetector(lambda sequence: DetectionBatch(sequence, "head_camera", ()))
+        anchors = AnchorRegistry()
+        provider = RGBDPerceptionProvider(detector, anchors)
+        environment = SimpleNamespace(arm_state=lambda _arm: {
+            "pose": (.5, -.5, .8, 1., 0., 0., 0.)})
+        prepare = PerceptionAnchorPreparer(provider, environment, anchors)
+        command = SkillCommand.model_validate({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "orientation_mode": "preserve_current"}})
+
+        # The measured approach path is sufficient for the normal retreat. A
+        # fresh semantic anchor is only required by the no-history fallback.
+        self.assertIsNone(prepare(command, observation(5)))
+        self.assertEqual(detector.calls[0][1], 5)
+
 
     def test_pose_anchor_needs_a_grounded_mug(self):
         provider, _anchors = self.provider_with_mug_pose(5, trusted=True, mug_status="ambiguous")

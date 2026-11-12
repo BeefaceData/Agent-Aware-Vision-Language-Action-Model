@@ -74,7 +74,11 @@ RoboTwin ──RGB-D images──► RGBDPerceptionProvider ──answers──�
 
 ## 3. Turning camera perception on
 
-Perception is used only when you pass a detector factory and a config with RGB-D:
+RGB-D harness configs now enable the merged public perception pipeline and fixed
+supervisor camera by default. When `--development-oracle` is also selected, public
+perception is queried first and oracle evidence fills only unknown predicates; those
+oracle values stay out of the planner prompt. For oracle-only tests, use a config with
+RGB-D disabled. Pass a factory only when overriding the detector:
 
 ```bash
 # Once per Modal account (the worker must know the perception camera and probe method):
@@ -84,27 +88,25 @@ modal deploy modal_apps/sam3.py
 modal run modal_apps/simulator.py::episode \
   --config configs/skill_runtime_opus_full_task_rgbd_table_lift.yaml \
   --planner anthropic \
-  --perception-factory harness.perception.modal_sam3:create_detector \
   --output data/runs/my_run --time-limit-minutes 75
 
 # Scripted planner with camera perception, locally:
-conda run -n robotwin python run_skills.py --config configs/skill_runtime_rgbd.yaml \
-  --perception-factory harness.perception.modal_sam3:create_detector --seed 3
+conda run -n robotwin python run_skills.py --config configs/skill_runtime_rgbd.yaml --seed 3
 ```
 
 - `perception.rgbd_enabled: true` in the config is required (depth is off by default).
-- Without `--perception-factory` (and without `--development-oracle`) every perception
-  predicate is `None` with reason `no_approved_evidence_provider`.
+- RGB-D harness configs select `harness.perception.modal_sam3:create_detector` unless
+  another `--perception-factory` is supplied. The worker must be deployed in the active
+  Modal account.
 - `configs/skill_runtime_opus_full_task_rgbd_table_lift.yaml` also enables
   `opus_mug_lift_grounding`: `mug_lifted` then comes from an Opus-chosen support pixel
   plus a reset-time table plane (`harness/perception/table_plane.py`), not from the SAM 3
   mug centroid. The offline evaluator scores the SAM 3 path.
-- **The perception-only camera** (`harness/environment/perception_cameras.py`, a fixed
-  RGB-D camera on the far side of the table) is currently available only in the
-  development capture tools (`--perception-camera default`). There is **no run setting
-  yet** to add it to `run_skills.py` episodes. It is a small planned follow-up; until
-  then, live episodes use the head and wrist cameras only. The numbers in section 5 show
-  what that costs.
+- **The fixed supervisor camera** (`harness/environment/perception_cameras.py`) is
+  included automatically in RGB-D harness runs. Opus and episode recordings use the
+  head and supervisor views; the frozen policy still receives its original three
+  cameras. SAM 3 tries the fixed view before phase-relevant wrist fallbacks. Redeploy
+  `modal_apps/sam3.py` in the active account if its deployed version predates this camera.
 - `render_once_per_step: true` (top level of a run config) skips a discarded pre-step
   render in local episodes: same observations, faster. Off by default.
 
@@ -279,9 +281,13 @@ because it is the median of the visible surface.
    the attempt is retryable (`_retryable_right_grasp_failure`: the VLA call completed,
    was not uncertain, and stopped on a budget or failure predicate), retries remain
    (`recipe.max_retries`), **and `release_ready` is True** (so opening cannot drop it):
-2. `set_gripper(right, open)` -> `move_to(right, current_ee, +5 cm z)` ->
+2. `set_gripper(right, open)` -> `move_to(right, current_ee,
+   path_mode=reverse_approach, retreat_distance_m=0.065,
+   orientation_mode=preserve_current)` ->
    `move_to(right, mug_pregrasp)` (re-grounded from the current observation) ->
-   `vla_act` with at most 176 policy actions and `stop="right_mug_lifted"`.
+   monitored `vla_act` chunks until `right_mug_lifted` or
+   `grasp_attempt_failed` is confirmed. The episode-wide policy ceiling is only a
+   watchdog if neither predicate can be resolved.
 3. If `right_mug_lifted` is still not True: abort `right_grasp_retry_budget_exhausted`.
 
 If `right_mug_lifted` is `None` at the decision point the planner aborts
@@ -290,7 +296,8 @@ If `right_mug_lifted` is `None` at the decision point the planner aborts
 ### 7.2 Left-arm acquisition retry (oracle only today)
 
 `GraspRetryPlanner` (`harness/planner/scripted.py`): approach `mug_pregrasp`, `vla_act`
-until `mug_lifted`; on failure open the gripper (only if `release_ready`), retreat 5 cm,
+until `mug_lifted`; on failure open the gripper (only if `release_ready`), retrace
+6.5 cm of that arm's measured approach with wrist orientation preserved,
 re-stage with an optional per-retry offset (`retry_stage_offsets`), retry up to
 `max_retries`. It needs `mug_grasp_confirmed`, which camera perception does not provide
 (section 4.2).
@@ -357,7 +364,7 @@ GPU.
      --frames data/perception/frames_cam/seed_2 --frames data/perception/frames_cam/seed_3 \
      --frames data/perception/frames_cam/seed_4 \
      --output data/perception/reports/my_change
-   # As if the perception camera did not exist (what live episodes see today):
+   # Compare the same capture without the perception-only camera:
    #   ... --output data/perception/reports/my_change_no_camera --ignore-camera perception_camera
    ```
    It writes `summary.md`, `summary.json` and `frames.jsonl` (every frame's answer,
@@ -367,7 +374,7 @@ GPU.
 5. **New frames** (GPU): capture with
    `python -m development.capture.labeled_frames --seed N --output ... --perception-camera default`
    (local; only the policy uses Modal) or
-   `SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds ... --perception-camera default --output-root ...`,
+   `SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds ... --perception-camera default --output-root ...`,
    then `python -m development.replays.sam3_cache --frames <folder>` per seed. Policy
    calls time out after 5 minutes; a failed seed's folder must be moved aside before it
    is captured again.

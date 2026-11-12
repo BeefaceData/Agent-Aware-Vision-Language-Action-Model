@@ -1,0 +1,103 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=18mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\definecolor{accent}{HTML}{244A73}
+\setlist{nosep,leftmargin=5mm}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\heading}[1]{\vspace{1pt}{\large\bfseries\color{accent}#1}\par}
+
+\begin{document}
+
+{\LARGE\bfseries Grasp Recovery Progress Summary}\par
+{\color{accent}\rule{\textwidth}{0.8pt}}
+\textbf{Project:} Agent-aware supervision for a frozen RoboTwin VLA \hfill
+\textbf{Snapshot:} 12 November 2026
+
+\heading{Objective}
+
+The work validates a VLA-first recovery path for failed mug grasps by either
+arm. The frozen Neotix policy remains responsible for normal contact-rich
+execution. Deterministic skills intervene only after a verified miss, place the
+robot in a safe retry state, and then return control to a fresh VLA invocation.
+No policy retraining or arbitrary 14-DoF planner output is introduced.
+
+\heading{Current recovery contract}
+
+\begin{center}
+\fbox{\parbox{0.94\textwidth}{
+Verified failed grasp $\rightarrow$ discard stale VLA actions $\rightarrow$
+ground \code{mug\_recovery\_clearance} from the current mug pose $\rightarrow$
+execute collision-aware \code{MOVE\_TO} $\rightarrow$ verify endpoint $\rightarrow$
+require \code{release\_ready=true} and \code{mug\_toppled=false} $\rightarrow$
+open the cleared gripper $\rightarrow$ reset VLA history $\rightarrow$ fresh monitored VLA retry.
+}}
+\end{center}
+
+The same state machine is used for left-arm acquisition and right-arm pickup.
+No arm locking or wrist-rotation heuristic is used. A toppled mug or confirmed
+workspace loss terminates the episode instead of attempting an unsafe retry.
+
+\heading{Implemented work}
+
+\begin{tabular}{p{0.27\textwidth}p{0.67\textwidth}}
+\toprule
+\textbf{Area} & \textbf{Implementation} \\
+\midrule
+Failure monitoring & Event-based failed-grasp monitoring distinguishes inherited analytic contact from a new VLA closure attempt, avoiding premature retry failure. \\
+Chunk handling & Remaining policy actions are discarded at intervention; every retry starts with reset policy history and fresh observations. \\
+Grounded clearance & A symbolic pose is recomputed above the current mug from RGB-D/development evidence rather than using a hard-coded world pose. \\
+Native motion & Recovery uses RoboTwin/CuRobo planning, measured TCP state, embodiment transforms, bounded waypoints, and native qpos execution. \\
+Retry normalization & Clearance must complete within measured position/orientation tolerances before a support-gated gripper opening and VLA handback. \\
+Evidence separation & Public perception remains planner-facing; simulator privilege is explicitly development-only and fills experimental evidence gaps. \\
+Reproducibility & State-checked prefix replay, structured skill traces, 30 FPS two-camera video, and bounded T4 Modal configurations support repeatable experiments. \\
+\bottomrule
+\end{tabular}
+
+\heading{Evidence so far}
+
+\begin{itemize}
+  \item The vertical-clearance replay completed two recovery moves in 28 physics
+  ticks each, with endpoint errors of 0.33 mm and 0.30 mm and orientation errors
+  below 0.001 rad.
+  \item The later grounded-waypoint replay completed both retry moves with
+  endpoint errors of 0.02 mm and 0.65 mm. This confirmed the corrected TCP/end-link
+  transform and the multi-waypoint path.
+  \item The event monitor gave the VLA genuine post-recovery attempts instead of
+  immediately classifying inherited contact loss as a new failed grasp.
+  \item In the normalized live replay, the initial miss stopped after 77 policy
+  actions and discarded three stale actions. Clearance finished in 78 physics
+  ticks with 0.30 mm position error; the gripper then opened from 0.0 to 1.0.
+  Fresh VLA inference confirmed a right-arm lift after 68 further actions.
+  \item The complete CPU suite currently passes: 696 tests covering planner
+  sequencing, skill contracts, guarded opening, perception, and left/right retry behavior.
+\end{itemize}
+
+\heading{Remaining gaps}
+
+\begin{enumerate}
+  \item Repeat the successful sequence across left and right failures and multiple seeds;
+  report retry success, abort causes, endpoint error, and policy actions to recovery.
+  \item Replace remaining development-oracle evidence incrementally as public RGB-D
+  predicates demonstrate equivalent reliability, especially support, toppling,
+  workspace presence, and arm-specific lift.
+  \item Replay the verified contract through the Opus supervisor, ensuring its
+  prompts select recovery only after an evidenced miss and never bypass the gates.
+  \item Validate hanging recovery separately; it is not established by grasp-retry success.
+\end{enumerate}
+
+\heading{Current conclusion}
+
+The full right-arm recovery contract has now succeeded once in a recorded live
+replay: intervention, clearance, guarded opening, fresh inference, and verified
+lift. This establishes feasibility, not reliability. The next milestone is a
+multi-seed evaluation of both arms using public perception wherever it is reliable.
+
+\end{document}

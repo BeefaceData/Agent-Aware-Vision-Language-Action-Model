@@ -1,4 +1,4 @@
-"""Shared plumbing for structured, single-turn Opus perception requests.
+"""Shared plumbing for structured, single-turn supervisor perception requests.
 
 Each grounder sends public RGB images plus a system prompt, forces exactly one
 tool call, and validates the returned arguments itself. Responses are 2D image
@@ -14,9 +14,9 @@ import numpy as np
 def require_messages_client(client, model):
     """Fail at construction time rather than on the first perception request."""
     if not callable(getattr(getattr(client, "messages", None), "create", None)):
-        raise ValueError("anthropic_messages_client_required")
+        raise ValueError("structured_tool_client_required")
     if not isinstance(model, str) or not model:
-        raise ValueError("anthropic_model_required")
+        raise ValueError("provider_model_required")
 
 
 def rgb_view(observation, camera, *, missing_error, format_error):

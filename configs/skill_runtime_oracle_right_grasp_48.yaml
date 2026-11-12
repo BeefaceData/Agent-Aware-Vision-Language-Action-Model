@@ -1,0 +1,27 @@
+# Focused development replay: shorten the right-grasp VLA segment while
+# leaving both arms under the frozen policy's control.
+record_video: true
+max_turns: 16
+perception:
+  rgbd_enabled: true
+  perception_camera: default
+  depth_pose_anchors: true
+  rack_prompt_profile: explore_mug_rack
+recipe:
+  arm: right
+  max_retries: 2
+  stage_before_first_vla: false
+  vla:
+    max_chunks: 3
+    chunk_size: 16
+    max_policy_actions: 48
+handoff:
+  max_chunks: 3
+  chunk_size: 16
+  max_policy_actions: 48
+budget:
+  max_skill_calls: 16
+  max_analytic_ticks: 5000
+  max_policy_actions: 1200
+  max_vla_chunks: 100
+stop_after_right_pickup: true

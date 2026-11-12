@@ -34,7 +34,7 @@ def _mug_descriptor_condition(visual_context):
             descriptor[name] = [round(float(value), 4) for value in values]
     if not descriptor:
         return None
-    if mug.get("camera") in ("head_camera", "left_camera", "right_camera"):
+    if mug.get("camera") in ("head_camera", "left_camera", "right_camera", "perception_camera"):
         descriptor["camera"] = mug["camera"]
     encoded = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
     return "Public mug visual descriptor (view-dependent; not a diagnosis): " + encoded

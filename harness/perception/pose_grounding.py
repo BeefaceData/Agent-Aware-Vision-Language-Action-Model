@@ -6,66 +6,9 @@ TCP poses. It has no simulator imports and does not decide when a hang is safe.
 
 import numpy as np
 
-from .geometry import pose7
+from .geometry import (matrix_pose as _matrix_pose, pose7,
+                       pose_matrix as _pose_matrix)
 from .rgbd import RGBDCamera
-
-
-def _rotation_to_quaternion(rotation):
-    """Convert a right-handed 3x3 rotation matrix to RoboTwin's wxyz format."""
-    matrix = np.asarray(rotation, dtype=float)
-    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
-        raise ValueError("invalid_rotation")
-    if (not np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-5)
-            or np.linalg.det(matrix) < 0.999):
-        raise ValueError("rotation_not_right_handed")
-    trace = float(np.trace(matrix))
-    if trace > 0:
-        scale = np.sqrt(trace + 1.0) * 2.0
-        q = np.array([0.25 * scale,
-                      (matrix[2, 1] - matrix[1, 2]) / scale,
-                      (matrix[0, 2] - matrix[2, 0]) / scale,
-                      (matrix[1, 0] - matrix[0, 1]) / scale])
-    else:
-        index = int(np.argmax(np.diag(matrix)))
-        if index == 0:
-            scale = np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
-            q = np.array([(matrix[2, 1] - matrix[1, 2]) / scale, 0.25 * scale,
-                          (matrix[0, 1] + matrix[1, 0]) / scale,
-                          (matrix[0, 2] + matrix[2, 0]) / scale])
-        elif index == 1:
-            scale = np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
-            q = np.array([(matrix[0, 2] - matrix[2, 0]) / scale,
-                          (matrix[0, 1] + matrix[1, 0]) / scale, 0.25 * scale,
-                          (matrix[1, 2] + matrix[2, 1]) / scale])
-        else:
-            scale = np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
-            q = np.array([(matrix[1, 0] - matrix[0, 1]) / scale,
-                          (matrix[0, 2] + matrix[2, 0]) / scale,
-                          (matrix[1, 2] + matrix[2, 1]) / scale, 0.25 * scale])
-    q /= np.linalg.norm(q)
-    return q
-
-
-def _pose_matrix(value):
-    pose = pose7(value)
-    w, x, y, z = pose[3:]
-    rotation = np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-        [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)],
-    ])
-    transform = np.eye(4)
-    transform[:3, :3], transform[:3, 3] = rotation, pose[:3]
-    return transform
-
-
-def _matrix_pose(transform):
-    transform = np.asarray(transform, dtype=float)
-    if (transform.shape != (4, 4) or not np.isfinite(transform).all()
-            or not np.allclose(transform[3], (0, 0, 0, 1), atol=1e-7)):
-        raise ValueError("invalid_transform")
-    q = _rotation_to_quaternion(transform[:3, :3])
-    return np.concatenate((transform[:3, 3], q))
 
 
 def frame_from_axes(origin, x_direction, plane_direction):
@@ -124,25 +67,29 @@ def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
 
 
 def tcp_targets_for_mug_alignment(tcp_pose, mug_function_pose, rack_function_pose,
-                                  *, approach_offset_m=0.05):
+                                  *, approach_offset_m=0.05, seat_offset_m=0.05):
     """Return prehang and aligned TCP poses from measured/grounded 6D frames.
 
     ``mug_function_pose`` is the visible mug handle's functional frame and
-    ``rack_function_pose`` is the selected hanger peg's mating frame. The
-    current TCP-to-mug transform is preserved, so the solution adapts to the
-    actual grasp rather than assuming a fixed wrist/object offset.
+    ``rack_function_pose`` is the selected hanger peg's mating frame. RoboTwin's
+    ``hanging_mug`` task uses ``pre_dis=0.05`` and ``dis=-0.05`` along the
+    functional frame's local +Z axis. Reproduce those offsets: approach at
+    ``-approach_offset_m`` and seat at ``+seat_offset_m``. The current TCP-to-
+    mug transform is preserved, so the solution adapts to the actual grasp.
     """
-    if (isinstance(approach_offset_m, bool) or not np.isfinite(approach_offset_m)
-            or not 0.01 <= approach_offset_m <= 0.10):
-        raise ValueError("approach_offset_out_of_bounds")
+    offsets = (approach_offset_m, seat_offset_m)
+    if (any(isinstance(value, bool) for value in offsets)
+            or not np.isfinite(offsets).all()
+            or not 0.01 <= approach_offset_m <= 0.10
+            or not 0.01 <= seat_offset_m <= 0.10):
+        raise ValueError("hang_frame_offset_out_of_bounds")
     tcp, mug, rack = map(_pose_matrix, (tcp_pose, mug_function_pose, rack_function_pose))
     tcp_to_mug = np.linalg.inv(tcp) @ mug
+    rack_z = rack[:3, 2]
     target_mug = rack.copy()
-    # The rack frame's local +X axis points from the peg seat toward its free
-    # tip. Start beyond that tip, then move back along the peg to seat the
-    # handle. No world-space rack coordinate is introduced.
+    target_mug[:3, 3] += rack_z * float(seat_offset_m)
     prehang_mug = rack.copy()
-    prehang_mug[:3, 3] += rack[:3, 0] * float(approach_offset_m)
+    prehang_mug[:3, 3] -= rack_z * float(approach_offset_m)
     prehang_tcp = prehang_mug @ np.linalg.inv(tcp_to_mug)
     target_tcp = target_mug @ np.linalg.inv(tcp_to_mug)
     return _matrix_pose(prehang_tcp), _matrix_pose(target_tcp)

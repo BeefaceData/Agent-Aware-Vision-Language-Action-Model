@@ -1,5 +1,6 @@
 """RGB-D transport and geometry checks; no simulator, policy, or GPU startup."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -168,6 +169,17 @@ class RGBDPerceptionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "depth_rgb_shape_mismatch"):
             client.reset(3)
 
+    def test_native_success_uses_confirmed_status_without_recopying_observation(self):
+        from unittest.mock import patch
+
+        client = EnvironmentClient(lambda *args: (payload(), {}))
+        client.reset(3)
+        with patch.object(client, "observe", side_effect=ValueError("duplicate_copy")):
+            self.assertFalse(client.native_success)
+        client._uncertain = True
+        with self.assertRaisesRegex(RuntimeError, "no confirmed current observation"):
+            _ = client.native_success
+
     def test_observation_store_roundtrips_rgbd_for_offline_replay(self):
         observation = Observation(7, images(), (0.,)*14,
                                   {"head_camera": camera()})
@@ -223,6 +235,20 @@ class RGBDPerceptionTests(unittest.TestCase):
         self.assertNotIn("intrinsic", text)
         self.assertNotIn("measured_tcp_poses", text)
         self.assertNotIn("left_tcp_pose", text)
+
+    def test_opus_receives_head_and_fixed_scene_camera_instead_of_wrist_views(self):
+        from harness.planner.base import PlannerContext
+        images_with_scene = {**images(), "perception_camera":
+                             np.full((240, 320, 3), 7, dtype=np.uint8)}
+        context = PlannerContext(1, Observation(3, images_with_scene, (0.,)*14), (), None)
+        content = user_content(context, limits={}, history=[])
+        labels = [block["text"] for block in content if block["type"] == "text"]
+        self.assertEqual(labels[:2], ["head_camera",
+                                      "supervisor_camera (fixed perception_camera)"])
+        self.assertNotIn("left_camera", labels)
+        self.assertNotIn("right_camera", labels)
+        payload = json.loads(labels[-1])
+        self.assertEqual(set(payload["image_sizes_px"]), {"head_camera", "perception_camera"})
 
     def test_local_simulator_depth_capture_is_opt_in(self):
         from harness.environment import robotwin

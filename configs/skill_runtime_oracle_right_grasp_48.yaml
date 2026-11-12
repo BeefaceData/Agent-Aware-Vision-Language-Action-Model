@@ -19,7 +19,6 @@ handoff:
   max_chunks: 3
   chunk_size: 16
   max_policy_actions: 48
-  lock_arm: null
 budget:
   max_skill_calls: 16
   max_analytic_ticks: 5000

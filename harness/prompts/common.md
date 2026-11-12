@@ -29,8 +29,8 @@ reason to end a VLA call.
 Analytic tools bind to one explicit left/right arm.
 VLA_ACT controls BOTH arms through the unchanged frozen Modal policy. It does not
 accept custom language or exclusive-arm masking. Use analytic motion for staging,
-retreat and reorientation during recovery or the final hanging phase; use a
-bounded VLA attempt for the normal trajectory and contact-rich acquisition.
+retreat during a grasp retry or reorientation during the final hanging phase;
+use a bounded VLA attempt for the normal trajectory and contact-rich acquisition.
 MOVE_TO preserves the measured gripper orientation. Do not stage near a mug with
 MOVE_TO when that orientation is visibly unsuitable for grasping; let VLA_ACT own
 the approach and contact phase in that case. ROTATE_WRIST only changes world-Z
@@ -68,11 +68,16 @@ opening SET_GRIPPER only if the latest public predicate again says
 `release_ready=true`; otherwise choose another safe bounded action or ABORT.
 Any other `release_support_lost` result requires ABORT. The full-task prompt defines a bounded recovery for the specific
 public grasp failure result. A completed, unambiguous grasp miss on either arm
-may use a bounded retry only when `release_ready` is verified; open the failed
-arm, retrace that arm's recent measured approach path with wrist orientation
-preserved, re-ground the mug, and call VLA_ACT again. If
-support is unknown, abort rather than opening. Do not request a larger bound to
-bypass a failed safety check.
+may use a bounded retry after the completed attempt gives an unambiguous miss.
+Issue one MOVE_TO to `mug_recovery_clearance`, the fixed grounded pose 10 cm
+above the currently observed mug, with `orientation_mode=preserve_current`.
+The runtime executes that single call through collision-aware vertical,
+overhead and descent waypoints; do not issue those waypoints as separate tools.
+Do not choose a new grasp orientation or add a separate wrist or re-staging
+skill. After a successful clearance move, require `release_ready=true` and
+`mug_toppled=false`, then issue SET_GRIPPER(open). Hand control back to VLA_ACT
+only after opening completes, with a fresh call and observation. If either
+analytic action fails, execution is uncertain, or `mug_toppled=true`, ABORT.
 
 If a VLA result has `stop_reason=predicate_unavailable`, `execution_uncertain=false`,
 and a fresh perception predicate with `value=null`, treat it as a perception gap,

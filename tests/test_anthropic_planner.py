@@ -99,7 +99,7 @@ class AnthropicTests(unittest.TestCase):
                           for tool in request["tools"] if tool["name"] == "vla_act")
         self.assertTrue({"max_chunks", "chunk_size", "max_policy_actions"}
                         <= set(vla_schema["required"]))
-        self.assertTrue({"lock_arm", "failure_stop", "failure_arm"}.isdisjoint(
+        self.assertTrue({"failure_stop", "failure_arm"}.isdisjoint(
             vla_schema["properties"]))
         self.assertEqual(len([b for b in request["messages"][0]["content"] if b["type"] == "image"]), 3)
         self.assertNotIn("PRIVATE_SENTINEL", json.dumps(request))
@@ -452,7 +452,7 @@ class AnthropicTests(unittest.TestCase):
         first = planner.select(context())
         self.assertEqual(first.phase, "GRASP")
         self.assertEqual(first.command.stop, "chunk_budget_exhausted")
-        self.assertIsNone(first.command.parameters.lock_arm)
+        self.assertFalse(hasattr(first.command.parameters, "lock_arm"))
         self.assertIn("strict rack hanging", provider.requests[0]["system"])
         self.assertEqual(next(tool for tool in provider.requests[0]["tools"]
                               if tool["name"] == "vla_act")["input_schema"]["properties"]["stop"]["enum"],
@@ -465,7 +465,7 @@ class AnthropicTests(unittest.TestCase):
         second = planner.select(transferred)
         self.assertEqual(second.phase, "HANG")
         self.assertEqual(second.command.stop, "task_success")
-        self.assertIsNone(second.command.parameters.lock_arm)
+        self.assertFalse(hasattr(second.command.parameters, "lock_arm"))
 
     def test_full_task_normal_turn_hides_recovery_skills(self):
         planner, provider = self.planner([response()], task_scope="full_task")
@@ -506,7 +506,8 @@ class AnthropicTests(unittest.TestCase):
         payload = json.loads(user_content(grounded_context,
             limits={"task_scope": "full_task"}, history=[])[-1]["text"])
         self.assertEqual(payload["available_targets"],
-                         ["current_ee", "mug_pregrasp", "rack_approach"])
+                         ["current_ee", "mug_pregrasp", "mug_recovery_clearance",
+                          "rack_approach"])
         cached_visual = {**visual, "rack_static_reference": {
             "world_anchor_available": True, "current_visibility": "not_detected"}}
         cached_context = replace(context(), visual_context=cached_visual)
@@ -550,7 +551,7 @@ class AnthropicTests(unittest.TestCase):
             ctx = replace(context(), predicates=tuple(predicates))
             selected = planner.select(ctx)
             self.assertEqual(selected.phase, expected_phase)
-            self.assertIsNone(selected.command.parameters.lock_arm)
+            self.assertFalse(hasattr(selected.command.parameters, "lock_arm"))
 
     def test_public_staged_mug_keeps_planner_in_handoff_until_right_pickup(self):
         from dataclasses import replace
@@ -701,7 +702,7 @@ class AnthropicTests(unittest.TestCase):
             observation_sequence=1, reason="public lift evidence"),))
         selected = planner.select(handoff_context)
         self.assertEqual(selected.phase, "HANDOFF")
-        self.assertIsNone(selected.command.parameters.lock_arm)
+        self.assertFalse(hasattr(selected.command.parameters, "lock_arm"))
         prompt = provider.requests[0]["system"]
         self.assertIn("coordinate both arms throughout the task", prompt)
         self.assertIn("initial rack approach", prompt)
@@ -747,7 +748,7 @@ class AnthropicTests(unittest.TestCase):
                   "rack_static_reference": {"world_anchor_available": True}}
         first = planner.select(replace(context(), predicates=staged, visual_context=visual))
         self.assertEqual(first.command.action.value, "vla_act")
-        self.assertIsNone(first.command.parameters.lock_arm)
+        self.assertFalse(hasattr(first.command.parameters, "lock_arm"))
         tools = {tool["name"] for tool in provider.requests[0]["tools"]}
         self.assertIn("vla_act", tools)
         self.assertIn("move_to", tools)
@@ -1095,7 +1096,8 @@ class AnthropicTests(unittest.TestCase):
 
         initial = planner.select(context())
         self.assertEqual(initial.command.parameters.max_chunks, 1)
-        self.assertIsNone(initial.command.parameters.failure_stop)
+        self.assertEqual(initial.command.parameters.failure_stop, "grasp_attempt_failed")
+        self.assertEqual(initial.command.parameters.failure_arm, "left")
         limits = json.loads(provider.requests[0]["messages"][0]["content"][-1]["text"])
         self.assertEqual(limits["runtime_limits"]["vla"]["max_chunks"], 1)
         self.assertNotIn("failure_stop", limits["runtime_limits"]["vla"])
@@ -1130,7 +1132,8 @@ class AnthropicTests(unittest.TestCase):
             "controlled_arms": "left", "information_source": "public"})
         selected_retry = planner.select(context(42, previous=opened))
         self.assertEqual(selected_retry.command.action.value, "vla_act")
-        self.assertIsNone(selected_retry.command.parameters.failure_stop)
+        self.assertEqual(selected_retry.command.parameters.failure_stop, "grasp_attempt_failed")
+        self.assertEqual(selected_retry.command.parameters.failure_arm, "left")
         self.assertEqual(planner.attempts, 2)
         self.assertIn("vla_act", [tool["name"] for tool in provider.requests[2]["tools"]])
         self.assertIn("fresh images", provider.requests[0]["system"])
@@ -1458,10 +1461,12 @@ class AnthropicTests(unittest.TestCase):
         logs = []
         summary = SkillOrchestrator(executor, planner, log=logs.append,
             save_observation=lambda obs: {"sequence": obs.sequence}, episode_id="test", seed=3).run()
-        # The development oracle's already-latched lift value is private to the
-        # planner; it must not stop VLA before any policy action is executed.
-        self.assertEqual(summary["outcome"], "End test episode")
+        # The development oracle's lift remains private to the planner input,
+        # but the orchestrator may use it to confirm the milestone after the
+        # bounded VLA segment has actually made progress.
+        self.assertEqual(summary["outcome"], "acquisition_confirmed")
         self.assertFalse(summary["task_success"])
-        self.assertEqual((len(provider.requests), worker.chunks), (2, 1))
-        self.assertEqual(summary["policy_actions"], 8)
+        self.assertEqual((len(provider.requests), worker.chunks), (1, 1))
+        self.assertGreater(summary["policy_actions"], 0)
+        self.assertLessEqual(summary["policy_actions"], 8)
         self.assertNotIn("development_oracle", json.dumps(provider.requests))

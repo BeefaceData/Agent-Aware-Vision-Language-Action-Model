@@ -267,17 +267,19 @@ class AnthropicPlanner:
                 if command.stop not in phase_stops or any(getattr(command.parameters, key) > getattr(vla_limits, key)
                         for key in ("max_chunks", "chunk_size", "max_policy_actions")):
                     raise InvalidPlannerResponse("vla_call_outside_task_phase_limits")
-                if command.parameters.lock_arm is not None or command.parameters.failure_stop is not None:
+                if command.parameters.failure_stop is not None:
                     raise InvalidPlannerResponse("vla_internal_control_not_selectable")
-                # End each planner-selected VLA segment at the feedback
-                # boundary. The next planner turn sees the resulting RGB
-                # observations and decides whether this looks like progress,
-                # a retryable miss, or a reason to use bounded analytic skills.
-                # No simulator-only grasp-failure predicate is injected here.
+                # The monitor is runtime-owned and never selectable by Opus.
+                # When an approved local evidence provider is available it can
+                # stop a failed grasp inside the current action chunk. Without
+                # one, VLA execution keeps the normal feedback-boundary behavior.
+                failure_arm = self._runtime_grasp_failure_arm(context, vla_phase)
                 runtime_fields = {"max_chunks": vla_limits.max_chunks,
                                   "chunk_size": vla_limits.chunk_size,
                                   "max_policy_actions": vla_limits.max_policy_actions,
-                                  "failure_arm": "left"}
+                                  "failure_stop": ("grasp_attempt_failed"
+                                                   if failure_arm is not None else None),
+                                  "failure_arm": failure_arm or "left"}
                 parameters = command.parameters.model_copy(update=runtime_fields)
                 command = command.model_copy(update={"parameters": parameters})
                 self.attempts += 1
@@ -416,6 +418,16 @@ class AnthropicPlanner:
         return (cls._public_predicate_true(context, "handoff_confirmed")
                 or cls._public_predicate_true(context, "right_mug_lifted"))
 
+    def _runtime_grasp_failure_arm(self, context, phase):
+        """Choose a local grasp monitor from public phase evidence, not model output."""
+        if phase == "grasp":
+            return "left"
+        if (phase == "handoff"
+                and self._right_transfer_stage_confirmed(context)
+                and not self._public_predicate_true(context, "right_mug_lifted")):
+            return "right"
+        return None
+
     def _recovery_basis(self, context, phase):
         """Offer recovery tools after public failure or a grasp feedback boundary."""
         if (phase == "grasp"
@@ -477,10 +489,12 @@ class AnthropicPlanner:
     def _target_available(self, target, context, *, arm="left", phase=None):
         if target == "current_ee":
             return True
-        if self.settings.task_scope == "acquisition":
-            return target == "mug_pregrasp"
         visual = context.visual_context or {}
         status = visual.get("status", {})
+        if self.settings.task_scope == "acquisition":
+            return (target == "mug_pregrasp"
+                    or (target == "mug_recovery_clearance"
+                        and status.get("mug") == "grounded"))
         rack_reference = visual.get("rack_static_reference", {})
         cached_rack_target = (phase == "hang"
                               and rack_reference.get("world_anchor_available") is True)
@@ -489,6 +503,7 @@ class AnthropicPlanner:
                                        or cached_rack_target),
                      "rack_seat": cached_rack_target,
                      "table_approach": status.get("table") == "grounded",
+                     "mug_recovery_clearance": status.get("mug") == "grounded",
                      "mug_pregrasp": (status.get("mug") == "grounded"
                                        or self.require_pixel_grounding)}
         return bool(available.get(target, False))

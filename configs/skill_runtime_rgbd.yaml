@@ -10,9 +10,7 @@ recipe:
   stage:
     target: mug_pregrasp
   retreat:
-    target: current_ee
-    path_mode: reverse_approach
-    retreat_distance_m: 0.065
+    target: mug_recovery_clearance
     orientation_mode: preserve_current
   vla:
     max_chunks: 3

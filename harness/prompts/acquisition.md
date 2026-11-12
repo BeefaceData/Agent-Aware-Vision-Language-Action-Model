@@ -3,9 +3,11 @@ SOP below; do not initiate handoff or hanging.
 
 Current scope: acquire and lift the mug. Declare `task_phase=grasp` on every
 call. The controller ends this milestone at
-confirmed mug_lifted; it does not attempt handoff or hanging yet. Available MOVE_TO
-symbols are current_ee and mug_pregrasp. The pregrasp anchor is re-grounded by a
-trusted provider at execution time; do not infer absolute world coordinates.
+confirmed mug_lifted; it does not attempt handoff or hanging yet. Available
+MOVE_TO symbols are listed in `available_targets`; recovery may add
+`mug_recovery_clearance` after a demonstrated failed grasp. The pregrasp and
+clearance anchors are re-grounded by a trusted provider at execution time; do
+not infer absolute world coordinates.
 This acquisition path returns at the configured VLA feedback boundary so you
 can inspect fresh public images before selecting another bounded action. The
 first grasp feedback may be delayed to the historically observed contact window;
@@ -36,20 +38,18 @@ lift is unconfirmed, not that the grasp definitely failed. The runtime may make
 analytic recovery skills available so you can inspect the fresh views and decide
 whether a miss or lack of progress justifies them. Continue VLA_ACT when the
 approach still looks plausible; do not trigger recovery from `mug_lifted=false`
-alone. For a visually justified recovery on either arm, first open the failed
-arm only when authorized, then use MOVE_TO with `path_mode=reverse_approach`,
-`retreat_distance_m=0.065`, and `orientation_mode=preserve_current` to retrace
-that arm's measured approach. Do not replace unavailable path history with a
-fixed world-up retreat. After clearing the mug, MOVE_TO mug_pregrasp may use a
-planner-selected normalized pixel on the solid mug body or rim. The runtime
-unprojects that pixel through same-observation RGB-D and starts from measured TCP
-pose; it does not accept planner-provided world coordinates or joint actions.
-Use bounded MOVE_TO, ROTATE_WRIST and SET_GRIPPER calls only when the resulting
-motion is justified by the current view and state. Preserve support before
-opening, and do not open a potentially held unsupported mug. If grasp appears
-plausible but lift remains unverified, continue with one bounded VLA_ACT chunk
-when motion is safe and budget remains, then inspect the fresh evidence. ABORT
-if no safe bounded continuation remains.
+alone. For a visually justified failed grasp on either arm, use one recovery
+action: MOVE_TO to `mug_recovery_clearance` with
+`orientation_mode=preserve_current`. The target is grounded from the current
+mug position and fixed 10 cm above it. The runtime handles vertical clearance,
+overhead travel and descent as internal waypoints of this one call. Do not
+choose a new grasp orientation or add a separate wrist or re-staging skill. If
+the clearance move completes, require current `release_ready=true` and
+`mug_toppled=false`, then issue SET_GRIPPER(open). Hand control back to the
+frozen VLA only after opening completes, using a fresh call and fresh
+observations. If the move or opening fails, its execution is uncertain, or
+`mug_toppled=true`, ABORT. Continue with one bounded VLA_ACT chunk when the
+grasp appears plausible but lift remains unverified and motion is safe.
 
 If public status reports both the mug and table as not detected or unknown during
 GRASP, the runtime continues with one bounded VLA_ACT chunk at a time while the
@@ -57,17 +57,11 @@ episode budget remains and no hard safety condition is active. Do not claim the
 mug was grasped or lifted from continued motion alone. If the action/chunk cap is
 reached without confirmation, report the episode incomplete.
 
-If the retreat MOVE_TO returns a pre-motion `planning_failure` (zero executed
-physics ticks and unchanged command state), do not repeat that rejected move.
-You may continue with a bounded VLA_ACT chunk from the current measured pose
-only when the images show the mug still supported and the hand open/empty; the
-episode-level action/chunk limits still apply, and VLA_ACT owns the contact-rich
-re-approach. Otherwise ABORT. This exception does not apply to uncertain
-execution or any skill that may have moved the robot.
+If the retreat MOVE_TO fails, do not repeat it or return to VLA from the failed
+pose. ABORT and retain the fresh observation and failure result for review.
 
 There are no per-phase or total VLA-attempt allowances. Continue across bounded
 VLA feedback chunks when the images show safe progress and episode-level
 action/chunk budget remains. Each VLA call returns fresh observations at the
-feedback boundary. You may re-stage using the same fixed tools. Never interpret
-this partial milestone as a complete hanging success. Release does not establish
-correct rack contact.
+feedback boundary. Never interpret this partial milestone as a complete hanging
+success. Release does not establish correct rack contact.

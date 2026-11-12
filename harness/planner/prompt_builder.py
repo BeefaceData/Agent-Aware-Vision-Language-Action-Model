@@ -55,17 +55,21 @@ def user_content(context, *, limits, history, pixel_grounding=False):
     # The frozen VLA client still receives its original three camera keys.
     supervisor_cameras = ("head_camera", "perception_camera") \
         if "perception_camera" in observation.images else CAMERAS
+    visual = context.visual_context or {}
+    status = visual.get("status", {})
     available_targets = ["current_ee", "mug_pregrasp"]
+    if status.get("mug") == "grounded":
+        available_targets.append("mug_recovery_clearance")
     cached_rack_target = False
     if limits.get("task_scope") == "full_task":
         available_targets = ["current_ee"]
-        visual = context.visual_context or {}
-        status = visual.get("status", {})
         rack_reference = visual.get("rack_static_reference", {})
         cached_rack_target = (limits.get("vla_phase") == "hang"
                               and rack_reference.get("world_anchor_available") is True)
         if pixel_grounding or status.get("mug") == "grounded":
             available_targets.append("mug_pregrasp")
+        if status.get("mug") == "grounded":
+            available_targets.append("mug_recovery_clearance")
         if pixel_grounding or status.get("rack") == "grounded" or cached_rack_target:
             available_targets.append("rack_approach")
         if cached_rack_target:

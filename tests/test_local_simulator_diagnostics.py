@@ -37,6 +37,7 @@ def measured_robot():
         setattr(robot, f"get_{side}_arm_jointState", lambda: [0.] * 6 + [1.])
         setattr(robot, f"get_{side}_gripper_val", lambda: 1.)
         setattr(robot, f"get_{side}_ee_pose", arm_pose(x))
+        setattr(robot, f"get_{side}_tcp_pose", arm_pose(x + .12))
     return robot
 
 
@@ -75,8 +76,8 @@ class LocalSimulatorDiagnosticsTests(unittest.TestCase):
 
         observation = environment._accept(raw, 3)
 
-        self.assertEqual(observation.measured_tcp_poses["left"][0], 0.)
-        self.assertEqual(observation.measured_tcp_poses["right"][0], 1.)
+        self.assertEqual(observation.measured_tcp_poses["left"][0], .12)
+        self.assertEqual(observation.measured_tcp_poses["right"][0], 1.12)
         self.assertFalse(hasattr(observation, "object_poses"))
 
     def test_rgbd_flag_enables_only_local_task_depth(self):
@@ -147,6 +148,20 @@ class LocalSimulatorDiagnosticsTests(unittest.TestCase):
         self.assertEqual(environment._sequence, 1)
         self.assertEqual([e.get("phase") for e in events], ["task_action", "task_action"])
 
+    def test_analytic_qpos_sample_uses_public_task_action_boundary(self):
+        events = []
+        instance = simulator(Task(), events.append)
+        instance.task.robot = measured_robot()
+        environment = LocalEnvironmentClient(instance)
+        action = tuple(float(index) / 20 for index in range(14))
+
+        environment.apply_native_qpos(
+            action, controlled_arm="right", controlled_velocity=np.zeros(6))
+
+        self.assertEqual(len(instance.task.actions), 1)
+        np.testing.assert_allclose(instance.task.actions[0], action)
+        self.assertEqual(environment._sequence, 1)
+
     def test_fast_replay_returns_measured_state_without_camera_render(self):
         events = []
         instance = simulator(Task(), events.append)
@@ -163,8 +178,8 @@ class LocalSimulatorDiagnosticsTests(unittest.TestCase):
         self.assertEqual(state.sequence, 1)
         self.assertEqual(state.command_state[6], 1.0)
         self.assertEqual(state.command_state[13], 1.0)
-        self.assertEqual(state.measured_tcp_poses["left"][0], 0.0)
-        self.assertEqual(state.measured_tcp_poses["right"][0], 1.0)
+        self.assertEqual(state.measured_tcp_poses["left"][0], .12)
+        self.assertEqual(state.measured_tcp_poses["right"][0], 1.12)
         self.assertEqual(len(instance.task.actions), 1)
 
     def test_action_exception_is_logged_without_sensitive_exception_text(self):

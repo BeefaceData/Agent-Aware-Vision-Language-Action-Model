@@ -138,6 +138,8 @@ class SkillExecutor:
                 and not context.ambiguous
             )
             self.terminal = (reason in {"aborted", "cancelled", "execution_error", "task_success",
+                                        "failure_monitor_unavailable",
+                                        "grasp_monitor_watchdog_exhausted",
                                         "episode_budget_exhausted", "tracking_error", "safety_violation"}
                              and not recoverable_tracking_error
                              or self.calls >= self.budget.max_skill_calls)
@@ -147,7 +149,8 @@ class SkillExecutor:
                 call_id=call_id, skill=command.action,
                 completed=reason in {"completed", "predicate_satisfied", "failure_predicate_satisfied",
                                      "chunk_budget_exhausted", "policy_action_budget_exhausted",
-                                     "task_success", "aborted"},
+                                     "failure_monitor_unavailable",
+                                     "grasp_monitor_watchdog_exhausted", "task_success", "aborted"},
                 stop_reason=reason, executed_policy_actions=context.executed,
                 vla_chunks_requested=context.chunks, discarded_actions=context.discarded,
                 executed_physics_ticks=context.physics_ticks,

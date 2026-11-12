@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from harness.environment.client import EnvironmentClient
+from harness.predicates.base import PredicateResult
+from harness.predicates.registry import PredicateRegistry
 from harness.skills import SkillExecutor
 from harness.skills.schemas import EpisodeBudget
 from harness.skills.vla_act import VLAAct
@@ -60,6 +62,105 @@ COMMAND = {"action": "vla_act", "parameters": {
 
 
 class SkillTests(unittest.TestCase):
+    def test_failure_monitor_discards_unexecuted_actions_from_current_chunk(self):
+        class ClosedGripperMonitor:
+            source = "perception"
+
+            def begin_attempt(self, name, observation, *, arm):
+                return name == "grasp_attempt_failed" and arm == "right"
+
+            def evaluate(self, name, observation, *, arm="auto"):
+                failed = name == "grasp_attempt_failed" and observation.sequence >= 80
+                return PredicateResult(name=name, value=failed, source="perception",
+                    observation_sequence=observation.sequence,
+                    reason="closed_without_lift" if failed else "monitor_pending")
+
+        runtime = Runtime()
+        environment = EnvironmentClient(runtime.transport)
+        environment.reset(3)
+        logs = []
+        executor = SkillExecutor(environment, ModalVLAClient(runtime), log=logs.append,
+            predicates=PredicateRegistry(perception=ClosedGripperMonitor()))
+
+        result = executor.execute({"action": "vla_act", "stop": "mug_lifted",
+            "parameters": {"failure_stop": "grasp_attempt_failed", "failure_arm": "right",
+                           "max_chunks": 1, "chunk_size": 24, "max_policy_actions": 4}})
+
+        self.assertEqual(result.stop_reason, "failure_predicate_satisfied")
+        self.assertEqual(result.executed_policy_actions, 80)
+        self.assertEqual(result.vla_chunks_requested, 4)
+        self.assertEqual(result.discarded_actions, 16)
+        self.assertEqual(len(runtime.actions), 80)
+        discarded = [event["discarded_actions"] for event in logs
+                     if event.get("event_type") == "chunk_discarded"]
+        self.assertEqual(discarded, [16])
+
+    def test_monitored_lift_stops_the_unbounded_grasp_attempt(self):
+        class LiftMonitor:
+            source = "perception"
+
+            def begin_attempt(self, name, observation, *, arm):
+                return name == "grasp_attempt_failed" and arm == "right"
+
+            def evaluate(self, name, observation, *, arm="auto"):
+                lifted = name == "right_mug_lifted" and observation.sequence >= 5
+                return PredicateResult(name=name, value=lifted, source="perception",
+                    observation_sequence=observation.sequence,
+                    reason="lift_confirmed" if lifted else "monitor_pending")
+
+        runtime = Runtime()
+        environment = EnvironmentClient(runtime.transport)
+        environment.reset(3)
+        executor = SkillExecutor(environment, ModalVLAClient(runtime), log=lambda _: None,
+            predicates=PredicateRegistry(perception=LiftMonitor()))
+
+        result = executor.execute({"action": "vla_act", "stop": "right_mug_lifted",
+            "parameters": {"failure_stop": "grasp_attempt_failed", "failure_arm": "right",
+                           "max_chunks": 1, "chunk_size": 24, "max_policy_actions": 1}})
+
+        self.assertEqual(result.stop_reason, "predicate_satisfied")
+        self.assertEqual(result.executed_policy_actions, 5)
+        self.assertEqual(result.discarded_actions, 19)
+        self.assertEqual(len(runtime.actions), 5)
+
+    def test_episode_ceiling_is_only_a_watchdog_when_grasp_evidence_stays_unresolved(self):
+        class PendingMonitor:
+            source = "perception"
+
+            def begin_attempt(self, name, observation, *, arm):
+                return name == "grasp_attempt_failed" and arm == "right"
+
+            def evaluate(self, name, observation, *, arm="auto"):
+                return PredicateResult(name=name, value=False, source="perception",
+                    observation_sequence=observation.sequence, reason="monitor_pending")
+
+        runtime = Runtime()
+        environment = EnvironmentClient(runtime.transport)
+        environment.reset(3)
+        executor = SkillExecutor(environment, ModalVLAClient(runtime), log=lambda _: None,
+            predicates=PredicateRegistry(perception=PendingMonitor()),
+            budget=EpisodeBudget(max_policy_actions=4, max_vla_chunks=8))
+
+        result = executor.execute({"action": "vla_act", "stop": "right_mug_lifted",
+            "parameters": {"failure_stop": "grasp_attempt_failed", "failure_arm": "right",
+                           "max_chunks": 1, "chunk_size": 24, "max_policy_actions": 1}})
+
+        self.assertEqual(result.stop_reason, "grasp_monitor_watchdog_exhausted")
+        self.assertTrue(result.episode_terminal)
+        self.assertEqual(result.executed_policy_actions, 4)
+
+    def test_monitored_grasp_does_not_fall_back_to_an_action_cap_without_monitor(self):
+        runtime, executor, _ = setup_runtime()
+
+        result = executor.execute({"action": "vla_act", "stop": "right_mug_lifted",
+            "parameters": {"failure_stop": "grasp_attempt_failed", "failure_arm": "right",
+                           "max_chunks": 1, "chunk_size": 24, "max_policy_actions": 1}})
+
+        self.assertEqual(result.stop_reason, "failure_monitor_unavailable")
+        self.assertTrue(result.episode_terminal)
+        self.assertEqual(runtime.chunks, 0)
+        self.assertEqual(runtime.actions, [])
+
     def test_confirmed_planner_observation_skips_executor_refresh_and_traces_preflight(self):
         runtime = Runtime()
         environment = EnvironmentClient(runtime.transport)
@@ -141,20 +242,15 @@ class SkillTests(unittest.TestCase):
         self.assertTrue(all(event["environment_step_ms"] >= 0 for event in confirmed))
         self.assertTrue(all("requested_at_monotonic_seconds" in event for event in requested))
 
-    def test_vla_can_hold_one_arm_at_last_confirmed_command(self):
+    def test_vla_arm_locking_is_not_supported(self):
         runtime, executor, logs = setup_runtime()
         command = {"action": "vla_act", "parameters": {
             "max_chunks": 1, "chunk_size": 3, "max_policy_actions": 3,
             "lock_arm": "left"}}
-        executor.execute(command)
-        actions = np.asarray(runtime.actions, dtype=float)
-        # The locked arm follows only confirmed command state. The first action
-        # holds the reset target; the next follows the acknowledged state.
-        np.testing.assert_allclose(actions[0][:7], 0.0)
-        np.testing.assert_allclose(actions[0][7:], 0.1)
-        np.testing.assert_allclose(actions[1][:7], 1.0)
-        np.testing.assert_allclose(actions[1][7:], 0.1)
-        json.dumps(logs)  # Locked actions remain JSON-safe for durable event logs.
+        with self.assertRaisesRegex(ValueError, "lock_arm"):
+            executor.execute(command)
+        self.assertEqual(runtime.inputs, [])
+        self.assertEqual(logs, [])
 
     def test_native_success_stops_before_the_next_chunk_action(self):
         runtime, executor, _ = setup_runtime(success_at=1)

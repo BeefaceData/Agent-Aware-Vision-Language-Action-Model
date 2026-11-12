@@ -46,6 +46,7 @@ class ModalSam3Detector:
         """Select wrist-view fallback order without changing the head primary."""
         aliases = {
             "APPROACH_MUG": "grasp", "GRASP": "grasp", "GRASP_MUG": "grasp",
+            # Legacy trace phase names remain accepted for replay compatibility.
             "RETRY_OPEN": "grasp", "RETRY_RETREAT": "grasp",
             "RETRY_RESTAGE_FALLBACK": "grasp",
             "RIGHT_GRASP": "grasp", "RIGHT_GRASP_RETRY": "grasp",

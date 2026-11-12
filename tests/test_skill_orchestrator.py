@@ -24,13 +24,16 @@ class AcquisitionEnvironment(AnalyticEnvironment):
         self.policy_steps = 0
         self.succeeds_after = succeeds_after
         self.grasp_arm = grasp_arm
+        self.policy_x_limits = {
+            arm: float(self.arms[arm]["pose"][0]) + 0.08 for arm in ("left", "right")}
 
     def step(self, action):
         self.policy_steps += 1
         # Model a short measured approach so reverse-retreat tests exercise a
         # real per-arm trajectory history rather than a zero-motion fixture.
         for arm in ("left", "right"):
-            self.arms[arm]["pose"][0] += 0.02
+            self.arms[arm]["pose"][0] = min(
+                self.arms[arm]["pose"][0] + 0.02, self.policy_x_limits[arm])
         # Policy motion supersedes the preceding analytic target in this CPU
         # fixture; opening the gripper must not snap the TCP back to it.
         self.goal = None
@@ -47,6 +50,8 @@ class AcquisitionEnvironment(AnalyticEnvironment):
         held = self.succeeds_after is not None and self.policy_steps >= self.succeeds_after
         return evidence(obs.sequence, **{f"{self.grasp_arm}_contact": held,
                         f"{self.grasp_arm}_bilateral": held, "table_contact": not held,
+                        "left_tcp": (-0.2, 0.0, 0.8),
+                        "right_tcp": (-0.2, 0.0, 0.8),
                         "mug_position": (-0.2, 0.0, 0.80 if held else 0.75)})
 
 
@@ -112,67 +117,6 @@ class OrchestratorTests(unittest.TestCase):
                      if event.get("event_type") == "skill_requested"]
         self.assertEqual(requested, ["vla_act", "abort"])
 
-    def test_right_reorientation_tracking_error_returns_to_preserved_wrist_fallback(self):
-        from harness.planner.base import PlannerSelection
-        from harness.skills.schemas import SkillCommand
-
-        env = AcquisitionEnvironment(grasp_arm="right")
-        original_tick = env.tick
-        inject_tracking_error = True
-
-        def tick_with_small_right_arm_residual(*args, **kwargs):
-            nonlocal inject_tracking_error
-            original_tick(*args, **kwargs)
-            if inject_tracking_error:
-                env.arms["right"]["joints"][2] += 0.251
-
-        env.tick = tick_with_small_right_arm_residual
-        gates = PredicateRegistry(
-            HangingMugPredicates(env.evidence, source="development_oracle"))
-        run, _, skill_events = executor(env, predicates=gates, oracle=True)
-        assessments, decisions = [], []
-
-        class Planner:
-            def select(self, context):
-                nonlocal inject_tracking_error
-                decisions.append(context)
-                previous = context.previous
-                if previous is None:
-                    return PlannerSelection(SkillCommand(action="move_to", arm="right",
-                        parameters={"target": "current_ee", "offset_xyz": [0.02, 0.0, 0.0]},
-                        reason="Exercise second-retry wrist reorientation"),
-                        "RIGHT_RETRY_REORIENT")
-                if previous.stop_reason == "tracking_error":
-                    inject_tracking_error = False
-                    return PlannerSelection(SkillCommand(action="move_to", arm="right",
-                        parameters={"target": "current_ee", "orientation_mode": "preserve_current"},
-                        reason="Use the measured wrist orientation for fallback re-stage"),
-                        "RIGHT_RETRY_RESTAGE_FALLBACK")
-                return PlannerSelection(SkillCommand(action="abort",
-                    reason="Finish the CPU recovery-path regression"), "FAILED")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            store = ObservationStore(Path(tmp) / "observations")
-            summary = SkillOrchestrator(run, Planner(), log=assessments.append,
-                save_observation=store.save, episode_id="right-tracking-fallback", seed=8,
-                max_turns=4, completion_predicate="task_success").run()
-
-        result = next(event for event in assessments
-            if event.get("event_type") == "planner_turn_result"
-            and event.get("failure_type") == "tracking_error")
-        self.assertTrue(result["recoverable_controlled_tracking_error"])
-        self.assertFalse(result["result"]["episode_terminal"])
-        self.assertEqual(decisions[1].previous.stop_reason, "tracking_error")
-        self.assertEqual(decisions[1].previous.tracking_error.arm, "right")
-        commands = [event["command"]["action"] for event in skill_events
-                    if event.get("event_type") == "skill_requested"]
-        self.assertEqual(commands, ["move_to", "move_to", "abort"])
-        fallback = next(event for event in skill_events
-            if event.get("event_type") == "skill_requested" and event["call_id"] == 2)
-        self.assertEqual(fallback["command"]["parameters"]["orientation_mode"],
-                         "preserve_current")
-        self.assertEqual(summary["outcome"], "Finish the CPU recovery-path regression")
-
     def test_predicate_batch_uses_one_native_success_snapshot(self):
         from types import SimpleNamespace
         from harness.predicates.base import PredicateResult
@@ -203,8 +147,8 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(predicates), len(observed_success))
         self.assertTrue(all(value is False for value in observed_success))
 
-    def test_grasp_retry_settings_reject_fixed_axis_retreat(self):
-        with self.assertRaisesRegex(ValueError, "grasp_retry_requires_measured_reverse_retreat"):
+    def test_grasp_retry_settings_reject_non_clearance_retreat(self):
+        with self.assertRaisesRegex(ValueError, "grasp_retry_requires_fixed_mug_clearance"):
             GraspRetrySettings(retreat={
                 "target": "current_ee", "offset_xyz": (0.0, 0.0, 0.05)})
 
@@ -217,7 +161,14 @@ class OrchestratorTests(unittest.TestCase):
             source = "perception"
 
             def evaluate(self, name, observation, *, arm="auto"):
-                value = True if observation.sequence == 0 else None
+                if name == "mug_in_workspace":
+                    value = True
+                elif name == "mug_toppled":
+                    value = False
+                elif name == "release_ready":
+                    value = True if observation.sequence == 0 else None
+                else:
+                    value = None
                 return PredicateResult(name=name, value=value, source="perception",
                     observation_sequence=observation.sequence,
                     reason="supported_before_open" if value else "temporary_mask_dropout")
@@ -516,23 +467,29 @@ class OrchestratorTests(unittest.TestCase):
         self.assertFalse(is_recoverable_partial_planning_failure(
             result.model_copy(update={"executed_physics_ticks": 0})))
 
-    def run_recipe(self, env, *, retries=1, retry_offsets=(), turns=20, predicates=True,
+    def run_recipe(self, env, *, retries=1, turns=20, predicates=True,
                    prepare_failure=False, stage=True, vla_actions=4, failure_stop=None):
         gates = PredicateRegistry(HangingMugPredicates(env.evidence, source="development_oracle")) if predicates else None
         run, worker, events = executor(env, predicates=gates, oracle=predicates)
         stages, assessments = [], []
 
         def prepare(command, obs):
-            if command.action == "move_to" and command.parameters.target == "mug_pregrasp":
+            if (command.action == "move_to"
+                    and command.parameters.target in {"mug_pregrasp", "mug_recovery_clearance"}):
                 if prepare_failure:
                     raise ValueError("sensitive provider details must not enter assessments")
-                stages.append(obs.sequence)
-                pose = env.arm_state(command.arm)["pose"]
-                run.anchors.bind("mug_pregrasp", command.arm,
+                if command.parameters.target == "mug_pregrasp":
+                    stages.append(obs.sequence)
+                    pose = env.arm_state(command.arm)["pose"]
+                else:
+                    pose = env.arm_state(command.arm)["pose"].copy()
+                    pose[:3] = env.evidence(obs).mug_position
+                    pose[2] += 0.10
+                run.anchors.bind(command.parameters.target, command.arm,
                     Anchor(tuple(pose), obs.sequence, source="development_oracle"))
 
         planner = GraspRetryPlanner(GraspRetrySettings(max_retries=retries, arm=env.grasp_arm,
-            retry_stage_offsets=retry_offsets, stage_before_first_vla=stage,
+            stage_before_first_vla=stage,
             vla={"max_chunks": (vla_actions + 3) // 4, "chunk_size": 4,
                  "max_policy_actions": vla_actions, "failure_stop": failure_stop}))
         with tempfile.TemporaryDirectory() as tmp:
@@ -549,33 +506,28 @@ class OrchestratorTests(unittest.TestCase):
                 controller.run()
         return summary, run, worker, events, assessments, stages
 
-    def test_failed_attempt_restages_then_fresh_vla_lifts(self):
+    def test_failed_attempt_retreats_once_then_fresh_vla_lifts(self):
         for arm in ("left", "right"):
             with self.subTest(arm=arm):
                 summary, run, worker, events, assessments, stages = self.run_recipe(
-                    AcquisitionEnvironment(5, grasp_arm=arm))
+                    AcquisitionEnvironment(85, grasp_arm=arm))
                 requested = [e["command"] for e in events
                              if e.get("event_type") == "skill_requested"]
                 self.assertEqual([command["action"] for command in requested],
-                    ["move_to", "vla_act", "set_gripper", "move_to", "move_to", "vla_act"])
+                    ["move_to", "vla_act", "move_to", "set_gripper", "vla_act"])
                 self.assertTrue(all(command["arm"] == arm for command in requested
-                                    if command["action"] in ("set_gripper", "move_to")))
+                                    if command["action"] == "move_to"))
                 retreat = next(command["parameters"] for command in requested
                     if command["action"] == "move_to"
-                    and command["parameters"].get("path_mode") == "reverse_approach")
-                self.assertEqual(retreat["retreat_distance_m"], 0.05)
+                    and command["parameters"].get("target") == "mug_recovery_clearance")
                 self.assertEqual(retreat["orientation_mode"], "preserve_current")
-                retry_stage = [command["parameters"] for command in requested
-                    if command["action"] == "move_to"
-                    and command["parameters"].get("target") == "mug_pregrasp"][-1]
-                self.assertEqual(retry_stage["orientation_mode"], "preserve_current")
                 self.assertEqual(summary["outcome"], "acquisition_confirmed")
                 self.assertEqual(summary["phase"], "TRANSFER")
                 self.assertFalse(summary["task_success"])
                 self.assertEqual(summary["retries"], 1)
                 self.assertEqual(worker.policy_resets, 2)
-                self.assertEqual(worker.chunks, 2)
-                self.assertGreater(stages[1], stages[0])
+                self.assertEqual(worker.chunks, 22)
+                self.assertEqual(len(stages), 1)
                 self.assertTrue(run.terminal)
                 vla_results = [e["result"] for e in events
                     if e.get("event_type") == "skill_result"
@@ -586,68 +538,72 @@ class OrchestratorTests(unittest.TestCase):
                 discard_events = [e for e in events if e.get("event_type") == "chunk_discarded"]
                 self.assertEqual([event["discarded_actions"] for event in discard_events], [2])
                 self.assertEqual(len([a for a in assessments
-                                      if a["event_type"] == "planner_turn_result"]), 6)
+                                      if a["event_type"] == "planner_turn_result"]), 5)
 
-    def test_second_grasp_retry_restages_at_task_grasp_orientation(self):
+    def test_repeated_grasp_retries_use_same_retreat_without_reorientation(self):
         from types import SimpleNamespace
         from harness.skills.schemas import SkillType
 
         planner = GraspRetryPlanner(GraspRetrySettings(stage_before_first_vla=False))
         values = {"mug_lifted": False, "mug_grasp_confirmed": False,
-                  "release_ready": True}
+                  "release_ready": True, "mug_toppled": False}
 
-        def context(skill):
-            result = SimpleNamespace(
+        def context(skill=None):
+            is_clearance = skill == SkillType.MOVE_TO
+            is_motion = is_clearance or skill == SkillType.SET_GRIPPER
+            result = None if skill is None else SimpleNamespace(
                 episode_terminal=False, completed=True, execution_uncertain=False,
-                objective_satisfied=False, stop_reason="policy_action_budget_exhausted",
-                skill=skill, predicate=None, executed_physics_ticks=0,
+                objective_satisfied=False,
+                stop_reason="completed" if is_motion else "policy_action_budget_exhausted",
+                skill=skill, predicate=None,
+                executed_physics_ticks=28 if is_motion else 0,
+                position_error_m=0.001 if is_clearance else None,
+                orientation_error_rad=0.01 if is_clearance else None,
                 executed_policy_actions=0, vla_chunks_requested=0)
             return SimpleNamespace(previous=result, value=lambda name: values.get(name))
 
-        planner.select(context(SkillType.VLA_ACT))
-        planner.select(context(SkillType.SET_GRIPPER))
-        first_stage = planner.select(context(SkillType.MOVE_TO))
-        self.assertEqual(first_stage.phase, "APPROACH_MUG")
-        self.assertEqual(first_stage.command.parameters.orientation_mode, "preserve_current")
+        planner.select(context())
+        first_retreat = planner.select(context(SkillType.VLA_ACT))
+        first_open = planner.select(context(SkillType.MOVE_TO))
+        first_retry = planner.select(context(SkillType.SET_GRIPPER))
+        second_retreat = planner.select(context(SkillType.VLA_ACT))
+        second_open = planner.select(context(SkillType.MOVE_TO))
+        second_retry = planner.select(context(SkillType.SET_GRIPPER))
+        self.assertEqual(first_retreat.command.action, SkillType.MOVE_TO)
+        self.assertEqual(second_retreat.command.action, SkillType.MOVE_TO)
+        self.assertEqual(first_open.command.action, SkillType.SET_GRIPPER)
+        self.assertEqual(second_open.command.action, SkillType.SET_GRIPPER)
+        self.assertEqual(first_retreat.command.parameters.target, "mug_recovery_clearance")
+        self.assertEqual(second_retreat.command.parameters, first_retreat.command.parameters)
+        self.assertEqual(first_retry.command.action, SkillType.VLA_ACT)
+        self.assertEqual(second_retry.command.action, SkillType.VLA_ACT)
 
-        planner.select(context(SkillType.MOVE_TO))
-        planner.select(context(SkillType.VLA_ACT))
-        second_retreat = planner.select(context(SkillType.SET_GRIPPER))
-        self.assertEqual(second_retreat.command.parameters.retreat_distance_m, 0.10)
-        second_stage = planner.select(context(SkillType.MOVE_TO))
-
-        self.assertEqual(second_stage.phase, "APPROACH_MUG")
-        self.assertEqual(second_stage.command.parameters.orientation_mode, "target")
-
-    def test_retry_uses_bounded_configured_offset_after_fresh_anchor_binding(self):
-        summary, _, _, events, _, stages = self.run_recipe(AcquisitionEnvironment(5),
-            retry_offsets=((0.01, 0.0, 0.0),))
+    def test_retry_has_no_separate_pregrasp_restage(self):
+        summary, _, _, events, _, stages = self.run_recipe(AcquisitionEnvironment(85))
         moves = [e["command"] for e in events if e.get("event_type") == "skill_requested"
                  and e["command"]["action"] == "move_to"]
         self.assertEqual(summary["outcome"], "acquisition_confirmed")
-        self.assertEqual(len(stages), 2)
-        self.assertEqual(moves[0]["parameters"]["offset_xyz"], [0.0, 0.0, 0.0])
-        self.assertEqual(moves[-1]["parameters"]["offset_xyz"], [0.01, 0.0, 0.0])
-        with self.assertRaises(ValueError):
-            GraspRetrySettings(max_retries=1, retry_stage_offsets=((0.3, 0.0, 0.0),))
+        self.assertEqual(len(stages), 1)
+        self.assertEqual([move["parameters"]["target"] for move in moves],
+                         ["mug_pregrasp", "mug_recovery_clearance"])
 
     def test_retry_exhaustion_aborts_without_more_inference(self):
         summary, _, worker, events, _, _ = self.run_recipe(AcquisitionEnvironment())
         self.assertEqual(summary["outcome"], "grasp_retry_budget_exhausted")
         self.assertFalse(summary["milestone_reached"])
-        self.assertEqual(worker.chunks, 2)
+        self.assertEqual(worker.chunks, 40)
         self.assertEqual(events[-1]["result"]["skill"], "abort")
 
-    def test_no_lift_failure_monitor_stops_vla_early_then_uses_existing_retry(self):
+    def test_no_lift_monitor_runs_past_per_call_horizon_until_failure_then_retries(self):
         summary, _, worker, events, _, _ = self.run_recipe(AcquisitionEnvironment(),
             retries=1, stage=False, vla_actions=64, failure_stop="grasp_attempt_failed")
         results = [e["result"] for e in events if e.get("event_type") == "skill_result"]
         self.assertEqual([r["stop_reason"] for r in results if r["skill"] == "vla_act"],
                          ["failure_predicate_satisfied", "failure_predicate_satisfied"])
         self.assertEqual([r["executed_policy_actions"] for r in results if r["skill"] == "vla_act"],
-                         [40, 40])
+                         [80, 80])
         self.assertEqual(summary["outcome"], "grasp_retry_budget_exhausted")
-        self.assertEqual(worker.chunks, 20)
+        self.assertEqual(worker.chunks, 40)
 
     def test_recorded_empty_grasp_retries_and_successful_attempt_lifts_within_window(self):
         # Replay the observed miss -> backoff/restage -> successful retry shape
@@ -672,7 +628,8 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(summary["retries"], 1)
         self.assertEqual(worker.policy_resets, 2)
         self.assertEqual([event["command"]["action"] for event in events
-                          if event.get("event_type") == "skill_requested"], recorded["expected_skills"])
+                          if event.get("event_type") == "skill_requested"],
+                         recorded["expected_skills"])
 
     def test_natural_entry_stops_on_lift_and_discards_tail_without_staging(self):
         summary, _, worker, events, _, stages = self.run_recipe(AcquisitionEnvironment(1), stage=False)
@@ -687,7 +644,7 @@ class OrchestratorTests(unittest.TestCase):
         summary, _, worker, events, _, stages = self.run_recipe(AcquisitionEnvironment(), stage=False, retries=0)
         self.assertEqual(summary['outcome'], 'grasp_retry_budget_exhausted')
         self.assertEqual(stages, [])
-        self.assertEqual(worker.chunks, 1)
+        self.assertEqual(worker.chunks, 20)
         self.assertEqual([e['command']['action'] for e in events if e.get('event_type')=='skill_requested'], ['vla_act', 'abort'])
 
     def test_unknown_evidence_never_moves_or_calls_policy(self):
@@ -843,10 +800,10 @@ class OrchestratorTests(unittest.TestCase):
             left_bilateral=env.policy_steps > 0, table_contact=True)
         summary, _, worker, events, _, _ = self.run_recipe(env)
         self.assertEqual(summary["outcome"], "grasp_retry_budget_exhausted")
-        self.assertEqual(worker.chunks, 2)
+        self.assertEqual(worker.chunks, 40)
         commands = [e["command"]["action"] for e in events if e.get("event_type") == "skill_requested"]
-        self.assertEqual(commands, ["move_to", "vla_act", "set_gripper", "move_to", "move_to",
-                                    "vla_act", "abort"])
+        self.assertEqual(commands,
+                         ["move_to", "vla_act", "move_to", "set_gripper", "vla_act", "abort"])
 
     def test_held_unlifted_mug_without_verified_support_is_not_opened(self):
         env = AcquisitionEnvironment()
@@ -854,7 +811,7 @@ class OrchestratorTests(unittest.TestCase):
             left_bilateral=env.policy_steps > 0, table_contact=False)
         summary, _, worker, events, _, _ = self.run_recipe(env)
         self.assertEqual(summary["outcome"], "grasp_without_verified_lift")
-        self.assertEqual(worker.chunks, 1)
+        self.assertEqual(worker.chunks, 20)
         commands = [e["command"]["action"] for e in events if e.get("event_type") == "skill_requested"]
         self.assertEqual(commands, ["move_to", "vla_act", "abort"])
 

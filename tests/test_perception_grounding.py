@@ -49,6 +49,44 @@ class FakeDetector:
 
 
 class PerceptionGroundingTests(unittest.TestCase):
+    def test_recovery_clearance_is_fixed_above_grounded_mug(self):
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ()))
+        provider = RGBDPerceptionProvider(detector)
+        provider._fresh_result_for_anchor = lambda *args, **kwargs: SimpleNamespace(
+            objects={"mug": SimpleNamespace(position=(0.03, 0.02, 0.94))},
+            status={"mug": "grounded"})
+        measured = (0.12, -0.04, 0.95, 1.0, 0.0, 0.0, 0.0)
+
+        anchor = provider.bind_recovery_clearance_anchor(
+            "mug_recovery_clearance", "right", observation(4),
+            measured_tcp_pose=measured)
+
+        self.assertEqual(anchor.pose[:2], (0.03, 0.02))
+        self.assertAlmostEqual(anchor.pose[2], 1.04)
+        self.assertEqual(anchor.pose[3:], measured[3:])
+
+    def test_recovery_preparer_converts_tcp_target_to_planning_frame(self):
+        from harness.perception.preparation import PerceptionAnchorPreparer
+
+        detector = FakeDetector(lambda seq: DetectionBatch(seq, "head_camera", ()))
+        anchors = AnchorRegistry()
+        provider = RGBDPerceptionProvider(detector, anchors)
+        provider._fresh_result_for_anchor = lambda *args, **kwargs: SimpleNamespace(
+            objects={"mug": SimpleNamespace(position=(0.03, 0.02, 0.74))},
+            status={"mug": "grounded"})
+        environment = SimpleNamespace(arm_state=lambda _arm: {
+            "pose": (0.12, -0.04, 0.95, 1.0, 0.0, 0.0, 0.0),
+            "tcp_pose": (0.24, -0.04, 0.95, 1.0, 0.0, 0.0, 0.0),
+        })
+        prepare = PerceptionAnchorPreparer(provider, environment, anchors)
+        command = SkillCommand.model_validate({"action": "move_to", "arm": "right",
+            "parameters": {"target": "mug_recovery_clearance"}})
+
+        anchor = prepare(command, observation(4))
+
+        np.testing.assert_allclose(anchor.pose[:3], (-0.09, 0.02, 0.84), atol=1e-9)
+        self.assertEqual(anchor.source, "perception")
+
     def test_rack_masks_remain_enabled_until_depth_fit_is_confirmed(self):
         from unittest.mock import patch
         from tests.test_hang_targets import depth_rack_pose
@@ -903,6 +941,24 @@ class PerceptionGroundingTests(unittest.TestCase):
                 anchor = prepare(command, observation(5))
                 np.testing.assert_allclose(anchor.pose[:3], (.5, -.1, .8))
                 np.testing.assert_allclose(anchor.pose[3:], measured[3:])
+
+    def test_reverse_retreat_does_not_require_fresh_mug_detection(self):
+        from harness.perception.preparation import PerceptionAnchorPreparer
+
+        detector = FakeDetector(lambda sequence: DetectionBatch(sequence, "head_camera", ()))
+        anchors = AnchorRegistry()
+        provider = RGBDPerceptionProvider(detector, anchors)
+        environment = SimpleNamespace(arm_state=lambda _arm: {
+            "pose": (.5, -.5, .8, 1., 0., 0., 0.)})
+        prepare = PerceptionAnchorPreparer(provider, environment, anchors)
+        command = SkillCommand.model_validate({"action": "move_to", "arm": "right",
+            "parameters": {"target": "current_ee", "path_mode": "reverse_approach",
+                           "orientation_mode": "preserve_current"}})
+
+        # The measured approach path is sufficient for the normal retreat. A
+        # fresh semantic anchor is only required by the no-history fallback.
+        self.assertIsNone(prepare(command, observation(5)))
+        self.assertEqual(detector.calls[0][1], 5)
 
 
     def test_pose_anchor_needs_a_grounded_mug(self):

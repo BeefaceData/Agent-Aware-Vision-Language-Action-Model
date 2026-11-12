@@ -65,20 +65,22 @@ class VideoTests(unittest.TestCase):
         video = Mock()
         env = RecordingEnvironment(Mock(), video)
         current = [observation(0)]
-        def tick(*args, **kwargs):
+        def native_qpos(*args, **kwargs):
             current[0] = observation(current[0].sequence+1)
         with patch.object(LocalEnvironmentClient, 'reset', return_value=current[0]) as reset, \
              patch.object(LocalEnvironmentClient, 'observe', side_effect=lambda: current[0]), \
-             patch.object(LocalEnvironmentClient, 'tick', side_effect=tick) as native_tick, \
+             patch.object(LocalEnvironmentClient, 'apply_native_qpos', side_effect=native_qpos) as native_step, \
              patch.object(LocalEnvironmentClient, 'step', return_value=observation(28)) as step:
             env.reset(3)
-            for _ in range(27): env.tick('left', [], [], 1., {})
-            self.assertEqual(video.append.call_count, 2)  # reset + tick 25
+            for _ in range(27):
+                env.apply_native_qpos([0.] * 14, controlled_arm='left',
+                                      controlled_velocity=[0.] * 6)
+            self.assertEqual(video.append.call_count, 6)  # reset + ticks 5, 10, 15, 20, 25
             env.observe(); env.observe()
-            self.assertEqual(video.append.call_count, 3)  # endpoint, once
+            self.assertEqual(video.append.call_count, 7)  # endpoint, once
             env.step([0.]*14)
-            self.assertEqual(video.append.call_count, 4)
-            self.assertEqual(native_tick.call_count, 27)
+            self.assertEqual(video.append.call_count, 8)
+            self.assertEqual(native_step.call_count, 27)
             reset.assert_called_once_with(3)
             step.assert_called_once()
 

@@ -24,14 +24,17 @@ successful hanging. Accept completion only when the runtime reports
 
 2. **Recover a demonstrated grasp miss.** Intervene only when current public
    evidence supports a miss or stalled attempt and the action result is known,
-   not uncertain. Opening requires `release_ready=true`. For every grasp retry,
-   whichever arm failed, open that arm and retrace its own recent measured
-   approach path while preserving wrist orientation, then request fresh VLA
-   inference. Do not rotate the wrist during retreat or replay stale actions
-   from a previous VLA chunk. Use further
-   registered recovery only after the arm has cleared the mug and the target is
-   grounded. If evidence does not authorize a safe retry, continue a bounded
-   VLA segment when safe or abort on a hard safety condition.
+   not uncertain. For every grasp retry, whichever arm failed, issue exactly
+   one MOVE_TO to `mug_recovery_clearance`, the fixed pose grounded 10 cm above
+   the current mug, while preserving the current wrist orientation. The runtime
+   plans vertical clearance, overhead travel and descent inside that single
+   MOVE_TO. Do not choose a new grasp orientation or add a separate wrist or
+   re-staging action. After the clearance move succeeds, require current
+   `release_ready=true` and `mug_toppled=false`, then open the cleared gripper.
+   Request fresh VLA inference only after opening completes. Do not replay stale actions from a
+   previous VLA chunk. If the move fails, execution is uncertain, or public
+   evidence confirms the mug has toppled, abort instead of handing control back
+   from an unclear pose.
 
 3. **Let the VLA coordinate handoff.** The frozen policy controls both arms
    while the left arm places the mug on the table and withdraws and the right

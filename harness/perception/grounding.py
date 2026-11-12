@@ -12,7 +12,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .anchors import Anchor, AnchorRegistry
+from .anchors import Anchor, AnchorRegistry, MUG_RECOVERY_CLEARANCE_M
 from .geometry import pose7
 from .object_pose import (MUG, RACK, UPRIGHT_MAX_TILT_DEG, ObjectPose, masked_surface, object_pose,
                           pole_with_peg_pose, same_peg)
@@ -23,7 +23,12 @@ from harness.predicates.base import PredicateResult
 
 SEMANTIC_LABELS = frozenset({"mug", "rack", "table"})
 SYMBOLIC_ANCHORS = frozenset({
-    "mug_pregrasp", "rack_approach", "rack_seat", "table_approach"})
+    "mug_pregrasp", "mug_recovery_clearance", "rack_approach", "rack_seat",
+    "table_approach"})
+
+TOPPLED_EVIDENCE_REASONS = frozenset({
+    "mug_axis_tilted_not_upright", "mug_surface_faces_up_not_upright",
+})
 
 
 @dataclass(frozen=True)
@@ -682,6 +687,22 @@ class RGBDPerceptionProvider:
         return self._bind_standoff(name, arm, observation, np.asarray(target.position, dtype=float),
                                    measured_tcp_pose, offset_m)
 
+    def bind_recovery_clearance_anchor(self, name, arm, observation, *, measured_tcp_pose):
+        """Bind the fixed mug-relative endpoint for a waypoint recovery move."""
+        if name != "mug_recovery_clearance":
+            raise ValueError("unsupported_recovery_clearance_anchor")
+        result = self._fresh_result_for_anchor(name, arm, observation, 0.0)
+        mug = result.objects.get("mug")
+        if mug is None or result.status.get("mug") != "grounded":
+            raise ValueError("grounded_target_unavailable")
+        measured = pose7(measured_tcp_pose)
+        target = np.asarray(mug.position, dtype=float).copy()
+        target[2] += MUG_RECOVERY_CLEARANCE_M
+        anchor_pose = np.concatenate((target, measured[3:]))
+        self.anchors.bind(name, arm, Anchor(tuple(anchor_pose), observation.sequence,
+                                            "perception"))
+        return self.anchors.resolve(name, arm, observation)
+
     def bind_pose_approach_anchor(self, name, arm, observation, *, measured_tcp_pose,
                                   offset_m=0.12):
         """Like ``bind_approach_anchor``, but aimed with the depth-fitted poses.
@@ -750,6 +771,16 @@ class RGBDPerceptionProvider:
                           else "mug_absence_confirmation_pending")
             else:
                 value, reason = None, "scene_coverage_or_mug_detection_unavailable"
+        elif name == "mug_toppled":
+            if result.release_ready_reason in TOPPLED_EVIDENCE_REASONS:
+                value, reason = True, result.release_ready_reason
+            elif result.release_ready is True:
+                value, reason = False, "upright_table_support_confirmed"
+            elif (result.mug_pose is not None and result.mug_pose.trusted
+                  and result.mug_pose.tilt_deg() <= UPRIGHT_MAX_TILT_DEG):
+                value, reason = False, "trusted_upright_mug_pose"
+            else:
+                value, reason = None, "mug_orientation_or_support_unavailable"
         elif name == "rack_visible":
             value = "rack" in result.objects if result.status.get("rack") in ("grounded", "not_detected") else None
             reason = result.status.get("rack", "unknown")

@@ -1,14 +1,55 @@
 """R4/R5 acquisition hypothesis; not an admitted full-task controller."""
 
 from typing import Annotated, Literal
-from pydantic import Field, StrictBool, StrictFloat, StrictInt, model_validator
+from pydantic import Field, StrictBool, StrictInt, model_validator
 
 from harness.schemas import Model
-from harness.skills.schemas import MoveParameters, SkillCommand, VLAParameters
+from harness.skills.schemas import MoveParameters, SkillCommand, SkillType, VLAParameters
 from .base import PlannerSelection
 
 MAX_RETRY_STAGE_POSITION_ERROR_M = 0.03
 MAX_RETRY_STAGE_ORIENTATION_ERROR_RAD = 0.10
+
+
+def monitored_grasp_parameters(parameters, arm):
+    """Attach the runtime-owned local failed-grasp monitor to a VLA call."""
+    values = parameters.model_dump() if hasattr(parameters, "model_dump") else dict(parameters)
+    values.update(failure_stop="grasp_attempt_failed", failure_arm=arm)
+    return values
+
+
+def verified_recovery_clearance(result):
+    """Require measured completion of the clearance move before VLA resumes."""
+    return bool(
+        result is not None
+        and result.skill == SkillType.MOVE_TO
+        and result.completed
+        and result.stop_reason == "completed"
+        and not result.execution_uncertain
+        and result.executed_physics_ticks > 0
+        and result.position_error_m is not None
+        and result.position_error_m <= 0.015
+        and result.orientation_error_rad is not None
+        and result.orientation_error_rad <= 0.10
+    )
+
+
+def verified_recovery_gripper_open(result):
+    """Require measured gripper motion before starting a fresh VLA attempt."""
+    return bool(
+        result is not None
+        and result.skill == SkillType.SET_GRIPPER
+        and result.completed
+        and result.stop_reason == "completed"
+        and not result.execution_uncertain
+        and result.executed_physics_ticks > 0
+    )
+
+
+def retry_open_authorized(context):
+    """Open only with current proof of support and an upright mug."""
+    return (context.value("release_ready") is True
+            and context.value("mug_toppled") is False)
 
 
 def near_grounded_retry_stage(context, result):
@@ -28,25 +69,17 @@ class GraspRetrySettings(Model):
     max_retries: Annotated[StrictInt, Field(ge=0, le=5)] = 2
     stage: MoveParameters = Field(default_factory=lambda: MoveParameters(target="mug_pregrasp"))
     retreat: MoveParameters = Field(default_factory=lambda: MoveParameters(
-        target="current_ee", path_mode="reverse_approach", retreat_distance_m=0.05,
-        orientation_mode="preserve_current"))
-    # Optional finite pregrasp offsets, indexed by retry number. The trusted
-    # anchor preparer refreshes mug_pregrasp from the current observation first.
-    retry_stage_offsets: tuple[tuple[StrictFloat, StrictFloat, StrictFloat], ...] = Field(
-        default=(), max_length=5)
+        target="mug_recovery_clearance", orientation_mode="preserve_current"))
     vla: VLAParameters = Field(default_factory=lambda: VLAParameters(max_chunks=3, max_policy_actions=24))
 
     @model_validator(mode="after")
-    def validate_retry_offsets(self):
-        if any(sum(value*value for value in offset) > 0.20**2 for offset in self.retry_stage_offsets):
-            raise ValueError("retry stage offset exceeds 20cm")
-        if len(self.retry_stage_offsets) > self.max_retries:
-            raise ValueError("retry stage offset exceeds retry budget")
+    def validate_retreat(self):
         retreat = self.retreat
-        if (retreat.target != "current_ee" or retreat.offset_xyz != (0.0, 0.0, 0.0)
-                or retreat.path_mode != "reverse_approach"
+        if (retreat.target != "mug_recovery_clearance"
+                or retreat.offset_xyz != (0.0, 0.0, 0.0)
+                or retreat.path_mode != "target"
                 or retreat.orientation_mode != "preserve_current"):
-            raise ValueError("grasp_retry_requires_measured_reverse_retreat")
+            raise ValueError("grasp_retry_requires_fixed_mug_clearance")
         return self
 
 
@@ -56,9 +89,6 @@ class GraspRetryPlanner:
             (settings or GraspRetrySettings()).model_dump())
         self.phase = "APPROACH_MUG" if self.settings.stage_before_first_vla else "GRASP_MUG"
         self.retries = 0
-        self.stage_offset = self.settings.stage.offset_xyz
-        self.retry_stage_orientation_mode = None
-        self.reorientation_attempted = False
 
     def resume_development_retry(self, *, retries=1):
         """Start at the first recovery action after a replayed failed grasp."""
@@ -66,7 +96,7 @@ class GraspRetryPlanner:
             raise ValueError("planner_already_started")
         if type(retries) is not int or not 1 <= retries <= self.settings.max_retries:
             raise ValueError("invalid_development_retry_count")
-        self.phase = "RETRY_OPEN"
+        self.phase = "RETRY_RETREAT"
         self.retries = retries
 
     def select(self, context):
@@ -82,11 +112,6 @@ class GraspRetryPlanner:
                     self.phase = "GRASP_MUG"
                     return self._grasp_selection(
                         "Continue the contact approach with the frozen VLA from a near pre-grasp")
-                if (self.phase == "APPROACH_MUG" and self.reorientation_attempted
-                        and previous.skill.value == "move_to"
-                        and previous.stop_reason in {"trajectory_limits", "planning_failure"}):
-                    self.reorientation_attempted = False
-                    return self._fallback_restage()
                 return self._abort("previous_skill_failed")
             if self.phase == "APPROACH_MUG":
                 self.phase = "GRASP_MUG"
@@ -99,71 +124,55 @@ class GraspRetryPlanner:
                     return self._abort("grasp_without_verified_lift")
                 if self.retries >= self.settings.max_retries:
                     return self._abort("grasp_retry_budget_exhausted")
-                if not _retry_open_authorized(context, arm=self.settings.arm,
-                        failed_predicate=context.value("mug_grasp_confirmed")):
-                    return self._abort("retry_open_not_authorized")
                 self.retries += 1
-                if self.retries <= len(self.settings.retry_stage_offsets):
-                    self.stage_offset = self.settings.retry_stage_offsets[self.retries-1]
-                self.phase = "RETRY_OPEN"
-            elif self.phase == "RETRY_OPEN":
                 self.phase = "RETRY_RETREAT"
             elif self.phase == "RETRY_RETREAT":
-                self.phase = "APPROACH_MUG"
-                self.retry_stage_orientation_mode = (
-                    "preserve_current" if self.retries == 1 else "target")
-                self.reorientation_attempted = self.retries > 1
+                if not verified_recovery_clearance(previous):
+                    return self._abort("grasp_retry_clearance_unverified")
+                if not retry_open_authorized(context):
+                    return self._abort("grasp_retry_open_not_authorized")
+                self.phase = "RETRY_OPEN"
+                return self.retry_open_selection()
+            elif self.phase == "RETRY_OPEN":
+                if not verified_recovery_gripper_open(previous):
+                    return self._abort("grasp_retry_open_unverified")
+                self.phase = "GRASP_MUG"
+                return self._grasp_selection(
+                    "Resume the frozen VLA from verified clearance with an open gripper")
 
         if context.value("mug_lifted") is None:
             return self._abort("lift_evidence_unavailable")
         if self.phase == "APPROACH_MUG":
             parameters = self.settings.stage.model_dump()
-            parameters["offset_xyz"] = self.stage_offset
-            if self.retry_stage_orientation_mode is not None:
-                parameters["orientation_mode"] = self.retry_stage_orientation_mode
-                self.retry_stage_orientation_mode = None
             command = dict(action="move_to", arm=self.settings.arm, parameters=parameters,
-                           reason=("Re-stage without changing wrist orientation" if
-                                   parameters["orientation_mode"] == "preserve_current" else
-                                   "Stage at a freshly grounded mug pregrasp"))
+                           reason="Stage at a freshly grounded mug pre-approach")
         elif self.phase == "GRASP_MUG":
             return self._grasp_selection("Bounded frozen-policy acquisition")
-        elif self.phase == "RETRY_OPEN":
-            command = dict(action="set_gripper", arm=self.settings.arm,
-                           parameters={"value": 1.0}, reason="Open supported or empty hand before retry")
         else:
-            retreat = self.settings.retreat.model_dump()
-            if self.retries > 1:
-                retreat["retreat_distance_m"] = 0.10
-            command = dict(action="move_to", arm=self.settings.arm,
-                           parameters=retreat, reason="Retreat before re-grounding pregrasp")
+            return self.retry_retreat_selection()
         return PlannerSelection(SkillCommand.model_validate(command), self.phase, self.retries)
 
     def _grasp_selection(self, reason):
         command = SkillCommand(action="vla_act", arm="both", stop="mug_lifted",
-            parameters=self.settings.vla.model_dump(), reason=reason)
+            parameters=monitored_grasp_parameters(self.settings.vla, self.settings.arm),
+            reason=reason)
         return PlannerSelection(command, "GRASP_MUG", self.retries)
 
-    def _fallback_restage(self):
-        """Keep the measured wrist orientation if target reorientation is infeasible."""
-        parameters = self.settings.stage.model_dump()
-        parameters["offset_xyz"] = self.stage_offset
-        parameters["orientation_mode"] = "preserve_current"
-        command = SkillCommand(action="move_to", arm=self.settings.arm,
-            parameters=parameters,
-            reason="Re-stage at the mug while preserving the measured wrist orientation")
-        self.phase = "APPROACH_MUG"
-        return PlannerSelection(command, "RETRY_RESTAGE_FALLBACK", self.retries)
+    def retry_retreat_selection(self, *, arm=None, phase="RETRY_RETREAT", retries=None):
+        """Move once to the grounded fixed clearance above the mug."""
+        command = SkillCommand(action="move_to", arm=arm or self.settings.arm,
+            parameters=self.settings.retreat.model_dump(),
+            reason="Move to the fixed grounded clearance above the mug before fresh VLA inference")
+        return PlannerSelection(command, phase,
+                                self.retries if retries is None else retries)
+
+    def retry_open_selection(self, *, arm=None, phase="RETRY_OPEN", retries=None):
+        """Open only after clearance; the skill enforces verified object support."""
+        command = SkillCommand(action="set_gripper", arm=arm or self.settings.arm,
+            parameters={"value": 1.0},
+            reason="Normalize the cleared gripper before fresh VLA inference")
+        return PlannerSelection(command, phase,
+                                self.retries if retries is None else retries)
 
     def _abort(self, reason):
         return PlannerSelection(SkillCommand(action="abort", reason=reason), "FAILED", self.retries)
-
-
-def _retry_open_authorized(context, *, arm, failed_predicate):
-    """Allow a retry open after a verified miss on a publicly grounded mug."""
-    if context.value("release_ready") is True:
-        return True
-    arm_lift = "right_mug_lifted" if arm == "right" else "mug_lifted"
-    visual = getattr(context, "visual_context", None) or {}
-    return (failed_predicate is False and context.value(arm_lift) is False
-            and visual.get("status", {}).get("mug") == "grounded")

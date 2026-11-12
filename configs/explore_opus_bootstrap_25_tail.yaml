@@ -17,8 +17,7 @@ variants:
         arm: left
         max_retries: 1
         stage: {target: mug_pregrasp, offset_xyz: [0.0, 0.0, 0.05]}
-        retreat: {target: current_ee, path_mode: reverse_approach,
-                  retreat_distance_m: 0.065, orientation_mode: preserve_current}
+        retreat: {target: mug_recovery_clearance, orientation_mode: preserve_current}
         vla: {max_chunks: 32, chunk_size: 8, max_policy_actions: 256}
       budget: {max_skill_calls: 8, max_analytic_ticks: 3000,
                max_policy_actions: 512, max_vla_chunks: 64}

@@ -535,33 +535,41 @@ def development_anchor_fallback(public_prepare, oracle_prepare, log):
     keeps perception as the first source and records each privileged fallback.
     """
     def prepare(command, observation):
-        try:
+        action = command.action.value if hasattr(command.action, "value") else command.action
+        if action != "move_to":
             return public_prepare(command, observation)
+        target = command.parameters.target
+        recovery_clearance = target == "mug_recovery_clearance"
+        try:
+            prepared = public_prepare(command, observation)
         except (TypeError, ValueError) as exc:
-            target = command.parameters.target
-            needs_mug_anchor = (target == "mug_pregrasp" or
-                (target == "current_ee" and
-                 command.parameters.path_mode == "reverse_approach"))
+            needs_mug_anchor = target in {"mug_pregrasp", "mug_recovery_clearance"}
             perception_unavailable = (isinstance(exc, TypeError) or
                                       str(exc) == "grounded_target_unavailable")
             if not needs_mug_anchor or not perception_unavailable:
                 raise
-            log({"event_type": "perception_anchor_oracle_fallback",
+            reason = ("grounded_target_unavailable"
+                      if isinstance(exc, ValueError) else "perception_type_error")
+            error_type = type(exc).__name__
+        else:
+            if prepared is not None or not recovery_clearance:
+                return prepared
+            reason, error_type = "public_recovery_clearance_unavailable", None
+
+        log({"event_type": "perception_anchor_oracle_fallback",
+             "target": target, "arm": command.arm,
+             "observation_sequence": observation.sequence,
+             "reason": reason, "error_type": error_type,
+             "information_source": "development_oracle"})
+        try:
+            return oracle_prepare(command, observation)
+        except TypeError as oracle_exc:
+            log({"event_type": "development_oracle_anchor_unavailable",
                  "target": target, "arm": command.arm,
                  "observation_sequence": observation.sequence,
-                 "reason": ("grounded_target_unavailable"
-                            if isinstance(exc, ValueError) else "perception_type_error"),
-                 "error_type": type(exc).__name__,
+                 "error_type": type(oracle_exc).__name__,
                  "information_source": "development_oracle"})
-            try:
-                return oracle_prepare(command, observation)
-            except TypeError as oracle_exc:
-                log({"event_type": "development_oracle_anchor_unavailable",
-                     "target": target, "arm": command.arm,
-                     "observation_sequence": observation.sequence,
-                     "error_type": type(oracle_exc).__name__,
-                     "information_source": "development_oracle"})
-                raise ValueError("grounded_target_unavailable") from None
+            raise ValueError("grounded_target_unavailable") from None
     return prepare
 
 

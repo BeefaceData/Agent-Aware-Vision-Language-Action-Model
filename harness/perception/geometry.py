@@ -11,6 +11,81 @@ def pose7(value):
     return pose
 
 
+def rotation_to_quaternion(rotation):
+    """Convert a right-handed 3x3 rotation matrix to a wxyz quaternion."""
+    matrix = np.asarray(rotation, dtype=float)
+    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+        raise ValueError("invalid_rotation")
+    if (not np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-5)
+            or np.linalg.det(matrix) < 0.999):
+        raise ValueError("rotation_not_right_handed")
+    trace = float(np.trace(matrix))
+    if trace > 0:
+        scale = np.sqrt(trace + 1.0) * 2.0
+        quaternion = np.array([0.25 * scale,
+            (matrix[2, 1] - matrix[1, 2]) / scale,
+            (matrix[0, 2] - matrix[2, 0]) / scale,
+            (matrix[1, 0] - matrix[0, 1]) / scale])
+    else:
+        index = int(np.argmax(np.diag(matrix)))
+        if index == 0:
+            scale = np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
+            quaternion = np.array([(matrix[2, 1] - matrix[1, 2]) / scale,
+                0.25 * scale, (matrix[0, 1] + matrix[1, 0]) / scale,
+                (matrix[0, 2] + matrix[2, 0]) / scale])
+        elif index == 1:
+            scale = np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
+            quaternion = np.array([(matrix[0, 2] - matrix[2, 0]) / scale,
+                (matrix[0, 1] + matrix[1, 0]) / scale, 0.25 * scale,
+                (matrix[1, 2] + matrix[2, 1]) / scale])
+        else:
+            scale = np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
+            quaternion = np.array([(matrix[1, 0] - matrix[0, 1]) / scale,
+                (matrix[0, 2] + matrix[2, 0]) / scale,
+                (matrix[1, 2] + matrix[2, 1]) / scale, 0.25 * scale])
+    quaternion /= np.linalg.norm(quaternion)
+    return quaternion
+
+
+def pose_matrix(value):
+    """Return a homogeneous transform for a world-frame wxyz pose."""
+    pose = pose7(value)
+    w, x, y, z = pose[3:]
+    rotation = np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
+        [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)],
+    ])
+    transform = np.eye(4)
+    transform[:3, :3], transform[:3, 3] = rotation, pose[:3]
+    return transform
+
+
+def matrix_pose(transform):
+    """Return a world-frame wxyz pose from a homogeneous transform."""
+    transform = np.asarray(transform, dtype=float)
+    if (transform.shape != (4, 4) or not np.isfinite(transform).all()
+            or not np.allclose(transform[3], (0, 0, 0, 1), atol=1e-7)):
+        raise ValueError("invalid_transform")
+    quaternion = rotation_to_quaternion(transform[:3, :3])
+    return np.concatenate((transform[:3, 3], quaternion))
+
+
+def planning_pose_for_tcp_target(planning_pose, tcp_pose, target_tcp_pose):
+    """Convert a desired TCP pose to the pose expected by RoboTwin planning.
+
+    RoboTwin plans a gripper control frame returned by ``get_*_ee_pose`` while
+    contact predicates measure ``get_*_tcp_pose``. Preserve their measured
+    rigid transform so mug-relative targets place the physical TCP, not the
+    control frame, at the requested world pose.
+    """
+    planning = pose_matrix(planning_pose)
+    tcp = pose_matrix(tcp_pose)
+    target_tcp = pose_matrix(target_tcp_pose)
+    planning_to_tcp = np.linalg.inv(planning) @ tcp
+    return matrix_pose(target_tcp @ np.linalg.inv(planning_to_tcp))
+
+
 def world_yaw(pose, degrees):
     pose = pose7(pose)
     half = np.deg2rad(degrees) / 2

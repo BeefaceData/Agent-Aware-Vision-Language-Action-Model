@@ -6,66 +6,9 @@ TCP poses. It has no simulator imports and does not decide when a hang is safe.
 
 import numpy as np
 
-from .geometry import pose7
+from .geometry import (matrix_pose as _matrix_pose, pose7,
+                       pose_matrix as _pose_matrix)
 from .rgbd import RGBDCamera
-
-
-def _rotation_to_quaternion(rotation):
-    """Convert a right-handed 3x3 rotation matrix to RoboTwin's wxyz format."""
-    matrix = np.asarray(rotation, dtype=float)
-    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
-        raise ValueError("invalid_rotation")
-    if (not np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-5)
-            or np.linalg.det(matrix) < 0.999):
-        raise ValueError("rotation_not_right_handed")
-    trace = float(np.trace(matrix))
-    if trace > 0:
-        scale = np.sqrt(trace + 1.0) * 2.0
-        q = np.array([0.25 * scale,
-                      (matrix[2, 1] - matrix[1, 2]) / scale,
-                      (matrix[0, 2] - matrix[2, 0]) / scale,
-                      (matrix[1, 0] - matrix[0, 1]) / scale])
-    else:
-        index = int(np.argmax(np.diag(matrix)))
-        if index == 0:
-            scale = np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
-            q = np.array([(matrix[2, 1] - matrix[1, 2]) / scale, 0.25 * scale,
-                          (matrix[0, 1] + matrix[1, 0]) / scale,
-                          (matrix[0, 2] + matrix[2, 0]) / scale])
-        elif index == 1:
-            scale = np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
-            q = np.array([(matrix[0, 2] - matrix[2, 0]) / scale,
-                          (matrix[0, 1] + matrix[1, 0]) / scale, 0.25 * scale,
-                          (matrix[1, 2] + matrix[2, 1]) / scale])
-        else:
-            scale = np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
-            q = np.array([(matrix[1, 0] - matrix[0, 1]) / scale,
-                          (matrix[0, 2] + matrix[2, 0]) / scale,
-                          (matrix[1, 2] + matrix[2, 1]) / scale, 0.25 * scale])
-    q /= np.linalg.norm(q)
-    return q
-
-
-def _pose_matrix(value):
-    pose = pose7(value)
-    w, x, y, z = pose[3:]
-    rotation = np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-        [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)],
-    ])
-    transform = np.eye(4)
-    transform[:3, :3], transform[:3, 3] = rotation, pose[:3]
-    return transform
-
-
-def _matrix_pose(transform):
-    transform = np.asarray(transform, dtype=float)
-    if (transform.shape != (4, 4) or not np.isfinite(transform).all()
-            or not np.allclose(transform[3], (0, 0, 0, 1), atol=1e-7)):
-        raise ValueError("invalid_transform")
-    q = _rotation_to_quaternion(transform[:3, :3])
-    return np.concatenate((transform[:3, 3], q))
 
 
 def frame_from_axes(origin, x_direction, plane_direction):

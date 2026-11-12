@@ -1,4 +1,4 @@
-"""A bounded attempt, never an episode runner or an environment reset."""
+"""A VLA attempt that can run until evidence stops it; never resets an episode."""
 
 import time
 
@@ -17,31 +17,47 @@ class VLAAct:
         if env.native_success:
             context.native_success_seen = True
             return "task_success"
-        # These limits bound only learned-policy work. Analytic skills remain
-        # available so a planner can recover after VLA budget exhaustion.
+        # The episode ceilings remain a watchdog. A monitored grasp uses its
+        # lift/failure predicates as normal stop conditions, not the per-call
+        # horizon selected for ordinary planner feedback.
         if context.action_limit < 1:
             return "policy_action_budget_exhausted"
         if context.chunk_limit < 1:
             return "chunk_budget_exhausted"
+        failure_monitor_active = False
         if parameters.failure_stop is not None:
-            if not context.begin_predicate_attempt(parameters.failure_stop, parameters.failure_arm):
-                return "predicate_unavailable"
-            context.log({"event_type": "failure_monitor_started",
-                         "predicate": parameters.failure_stop,
-                         "arm": parameters.failure_arm,
-                         "observation": context.observation.sequence})
+            failure_monitor_active = context.begin_predicate_attempt(
+                parameters.failure_stop, parameters.failure_arm)
+            if not failure_monitor_active:
+                context.log({"event_type": "failure_monitor_unavailable",
+                             "predicate": parameters.failure_stop,
+                             "arm": parameters.failure_arm,
+                             "observation": context.observation.sequence})
+            else:
+                context.log({"event_type": "failure_monitor_started",
+                             "predicate": parameters.failure_stop,
+                             "arm": parameters.failure_arm,
+                             "observation": context.observation.sequence})
+
+        if parameters.failure_stop is not None and not failure_monitor_active:
+            return "failure_monitor_unavailable"
+
         def predicate_stop():
             if command.stop not in (None, "task_success", "chunk_budget_exhausted"):
-                # Public visual predicates are checked once when this bounded
+                # Public visual predicates are checked once when an ordinary
                 # VLA segment returns to the planner. Polling them on every
                 # action would cause repeated Opus/SAM requests and make the
                 # planner's configured feedback horizon meaningless.
-                if command.stop in context.feedback_boundary_predicates:
-                    return None
-                value = context.check_predicate(command.stop)
+                if command.stop not in context.feedback_boundary_predicates:
+                    value = context.check_predicate(command.stop)
+                    if value is None: return "predicate_unavailable"
+                    if value: return "predicate_satisfied"
+            if failure_monitor_active:
+                lifted_predicate = ("right_mug_lifted" if parameters.failure_arm == "right"
+                                    else "mug_lifted")
+                value = context.check_predicate(lifted_predicate, parameters.failure_arm)
                 if value is None: return "predicate_unavailable"
                 if value: return "predicate_satisfied"
-            if parameters.failure_stop is not None:
                 value = context.check_predicate(parameters.failure_stop, parameters.failure_arm)
                 if value is None: return "predicate_unavailable"
                 if value: return "failure_predicate_satisfied"
@@ -57,11 +73,17 @@ class VLAAct:
                     poses.clear()
             context.log({"event_type": "policy_history_reset"})
         self._remember_tcp_poses(context, context.observation)
-        configured_chunk_limit = min(parameters.max_chunks, context.chunk_limit)
+        # When the runtime has started a local grasp monitor, continue across
+        # planner-feedback-sized chunks until lift/failure evidence arrives.
+        # The episode-wide action/chunk ceilings remain emergency watchdogs.
+        configured_chunk_limit = (context.chunk_limit if failure_monitor_active else
+                                  min(parameters.max_chunks, context.chunk_limit))
+        configured_action_limit = (context.action_limit if failure_monitor_active else
+                                   min(parameters.max_policy_actions, context.action_limit))
         while context.chunks < configured_chunk_limit:
             if context.cancelled():
                 return "cancelled"
-            remaining = min(parameters.max_policy_actions, context.action_limit) - context.executed
+            remaining = configured_action_limit - context.executed
             if remaining <= 0:
                 break
             observation = env.observe()
@@ -91,18 +113,8 @@ class VLAAct:
                     stopped = predicate_stop()
                     if stopped:
                         return stopped
-                    if context.executed >= min(parameters.max_policy_actions, context.action_limit):
+                    if context.executed >= configured_action_limit:
                         break
-                    if parameters.lock_arm is not None:
-                        # Hold the inactive arm at its latest confirmed target.
-                        # Refresh after each acknowledged action; stale chunk
-                        # tails are still discarded by the stop/budget checks.
-                        start = 0 if parameters.lock_arm == "left" else 7
-                        stop = start + 7
-                        held = np.asarray(context.observation.command_state[start:stop], dtype=float)
-                        if held.shape != (7,) or not np.isfinite(held).all():
-                            raise ValueError("invalid_locked_arm_state")
-                        action = np.concatenate((action[:start], held, action[stop:])).tolist()
                     action_started = time.perf_counter()
                     context.log({"event_type": "action_requested", "action": action,
                                  "observation": context.observation.sequence,
@@ -136,6 +148,9 @@ class VLAAct:
                     context.log({"event_type": "chunk_discarded", "discarded_actions": pending})
         if command.stop in ("chunk_budget_exhausted", "task_success"):
             context.check_predicate(command.stop)
+        if failure_monitor_active and (context.executed >= context.action_limit
+                                      or context.chunks >= context.chunk_limit):
+            return "grasp_monitor_watchdog_exhausted"
         if (context.executed >= context.action_limit
                 or context.executed >= parameters.max_policy_actions):
             return "policy_action_budget_exhausted"
@@ -154,7 +169,6 @@ class VLAAct:
             value = tuple(float(component) for component in pose)
             if not history or history[-1] != value:
                 history.append(value)
-
 
 class Abort:
     def execute(self, context, command):

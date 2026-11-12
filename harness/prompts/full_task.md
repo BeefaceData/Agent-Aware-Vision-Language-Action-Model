@@ -43,16 +43,21 @@ intervention; it is not the default task controller. The
 `runtime_limits.recovery_basis` field states why recovery skills are available.
 For any arm's grasp attempt, consider a retry only after public evidence
 supports a miss or stalled attempt and the completed VLA result is unambiguous.
+For an admitted retry, complete the grounded clearance move first; only then,
+with `release_ready=true` and `mug_toppled=false`, open the cleared gripper and
+start a fresh VLA call. Never interleave opening with the clearance motion.
 Treat a false lift as an assessment opportunity, not an automatic failed-grasp
 verdict: inspect the current views and continue VLA if the approach is
-progressing. If a miss is visible and `release_ready=true`, open the failed
-arm, retrace at least 6.5 cm of that same arm's recent measured approach path
-in reverse while preserving wrist orientation, then invoke fresh VLA inference.
-Do not replace missing path history with a fixed world-up retreat or rotate the
-wrist during retreat. Any wrist correction happens only after the arm has
-cleared the mug. Do not open the gripper without current public release support.
-Unknown evidence is not proof of success; use the next bounded feedback chunk
-when safe, and do not wait for a long trajectory before reassessing.
+progressing. For a demonstrated miss, issue one MOVE_TO to
+`mug_recovery_clearance` with `orientation_mode=preserve_current`. This fixed
+symbolic target is grounded 10 cm above the mug's current position. The runtime
+reaches it through internal vertical-clearance, overhead and descent waypoints;
+do not issue those as separate tools. Do not choose a new grasp orientation or
+add a separate wrist or re-staging skill. After successful clearance and the
+authorized opening, invoke fresh VLA inference from the new observation. If
+either analytic action fails, execution is uncertain, or
+`mug_toppled=true`, ABORT. Unknown evidence is not proof of success; use
+the next bounded feedback chunk when safe.
 
 Use MOVE_TO for measured-start staging, retreat, or free-space transport only
 when the matching fresh symbolic target appears in `available_targets`. Targets

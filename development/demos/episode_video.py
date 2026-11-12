@@ -1,6 +1,6 @@
 """Opt-in sampled RGB replay; recording never advances simulator physics.
 
-One frame per policy target and every 25 analytic ticks, encoded at 30 fps.
+One frame per policy target and every 5 analytic ticks, encoded at 30 fps.
 This is a diagnostic sampling convention, not a real-time motion recording.
 """
 
@@ -13,6 +13,7 @@ from harness.environment.local import LocalEnvironmentClient
 from harness.environment.base import CAMERAS
 
 VIDEO_FPS = 30
+ANALYTIC_FRAME_INTERVAL_TICKS = 5
 
 
 class EpisodeVideo:
@@ -58,7 +59,9 @@ class EpisodeVideo:
 
     def metadata(self):
         return dict(path="episode.mp4", frame_index="video_frames.jsonl", frames=self.frames,
-                    fps=VIDEO_FPS, timing="sampled: one frame/policy target; one/25 analytic ticks; boundary frames",
+                    fps=VIDEO_FPS,
+                    timing=("sampled: one frame/policy target; one/5 analytic ticks; "
+                            "boundary frames"),
                     real_time=False, closed=self.closed,
                     cameras=list(self.cameras or CAMERAS))
 
@@ -94,10 +97,10 @@ class RecordingEnvironment(LocalEnvironmentClient):
         self._record(observation, self.policy_kind)
         return observation
 
-    def tick(self, *args, **kwargs):
-        super().tick(*args, **kwargs)
+    def apply_native_qpos(self, *args, **kwargs):
+        super().apply_native_qpos(*args, **kwargs)
         self.analytic_ticks += 1
-        if self.analytic_ticks % 25 == 0:
+        if self.analytic_ticks % ANALYTIC_FRAME_INTERVAL_TICKS == 0:
             self._record(super().observe(), "analytic")
 
     def observe(self):

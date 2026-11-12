@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "description": "CPU replay contracts for controller behavior. These contain no simulator geometry, contact labels, camera frames, or planner inputs.",
-  "provenance": "The missed-grasp stop and successful-retry bounds summarize the recorded seed-3 run reviewed on 2026-10-19. Other cases are deterministic control-flow scenarios.",
+  "provenance": "The successful retry lift bound summarizes the recorded seed-3 run reviewed on 2026-10-19. The 80-observation failed-grasp threshold is the current runtime predicate setting. Other cases are deterministic control-flow scenarios.",
   "scenarios": {
     "seed4_retreat_endpoint_tracking_miss": {
       "source": "opus_plan_fallback_retry_20261020/attempts/attempt_0001",
@@ -13,10 +13,10 @@
       "expected_outcome": "target_not_reached"
     },
     "empty_grasp_then_successful_retry": {
-      "failure_window_closed_actions": 40,
+      "failure_window_closed_actions": 80,
       "retry_lift_after_policy_action": 27,
       "expected_vla_actions": [
-        40,
+        80,
         27
       ],
       "expected_vla_stops": [
@@ -25,9 +25,8 @@
       ],
       "expected_skills": [
         "vla_act",
+        "move_to",
         "set_gripper",
-        "move_to",
-        "move_to",
         "vla_act"
       ],
       "expected_outcome": "acquisition_confirmed"
@@ -35,13 +34,13 @@
     "right_grasp_unconfirmed_retry": {
       "initial_attempt_stop": "policy_action_budget_exhausted",
       "expected_recovery_skills": [
-        "set_gripper",
         "move_to",
+        "set_gripper",
         "vla_act"
       ],
       "retry_count": 1,
       "requires_release_ready": true,
-      "retreat_target": "current_ee"
+      "retreat_target": "mug_recovery_clearance"
     },
     "left_transfer_then_hang": {
       "transfers": true,
@@ -78,7 +77,7 @@
       "acquires": false,
       "uncertain": false,
       "expected_outcome": "grasp_retry_budget_exhausted",
-      "expected_policy_chunks": 1
+      "expected_policy_chunks": 20
     }
   }
 }

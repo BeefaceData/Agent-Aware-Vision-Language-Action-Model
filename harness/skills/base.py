@@ -34,8 +34,7 @@ class ExecutionContext:
     measured_tcp_history: object = None
     motion_waypoints: tuple | None = None
     minimum_retreat_clearance_m: float | None = None
-    reverse_retreat_fallback_level: int = 0
-    last_reverse_retreat_fallback_pose: object = None
+    reverse_retreat_translation_waypoints: int = 0
     allow_oracle: bool = False
     oracle_used: bool = False
     position_error: float | None = None

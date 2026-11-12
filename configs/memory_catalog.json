@@ -14,16 +14,15 @@
       "operating_conditions": ["Design rule from the realignment plan; not an empirically validated operating range."]
     },
     {
-      "id": "restage_before_retry",
-      "phases": ["GRASP_MUG", "RETRY_STAGE", "RETRY_OPEN", "RETRY_RETREAT"],
+      "id": "single_retreat_then_vla_retry",
+      "phases": ["GRASP_MUG", "RETRY_RETREAT", "RIGHT_RETRY_RETREAT"],
       "source": "public",
       "planner_reviewed": true,
       "evidence_level": "hypothesis",
       "category": "retry",
       "skill": "vla_act",
-      "statement": "After a failed acquisition, consider guarded opening, retreat and fresh symbolic pregrasp before another bounded VLA attempt. Abort if support or motion safety is uncertain.",
-      "operating_conditions": ["Design hypothesis only; do not open an unsupported held mug or bypass executor limits."],
-      "recommended_staging": {"target": "mug_pregrasp"}
+      "statement": "After a demonstrated grasp miss, move once to mug_recovery_clearance, the fixed target grounded 10 cm above the current mug, while preserving the current wrist orientation. Then make a fresh VLA attempt. Abort if the move fails, execution is uncertain, or the mug is confirmed toppled.",
+      "operating_conditions": ["Design hypothesis only; abort if retreat fails or execution is uncertain."]
     }
   ]
 }

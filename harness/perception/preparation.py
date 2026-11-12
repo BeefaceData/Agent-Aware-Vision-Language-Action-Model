@@ -4,7 +4,7 @@ import numpy as np
 
 from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from .anchors import Anchor
-from .geometry import pose7
+from .geometry import planning_pose_for_tcp_target, pose7
 from .grounding import RGBDPerceptionProvider, SYMBOLIC_ANCHORS
 
 
@@ -50,7 +50,14 @@ class PerceptionAnchorPreparer:
                 if result.observation_sequence != observation.sequence:
                     raise ValueError("grounding_missing_or_stale")
                 measured = self.environment.arm_state(command.arm)["pose"]
-                return self._bind_approach("mug_pregrasp", command.arm, observation, measured)
+                try:
+                    return self._bind_approach("mug_pregrasp", command.arm, observation, measured)
+                except ValueError as exc:
+                    # Legacy reverse-path commands may still fall back to their
+                    # measured history when public mug grounding is unavailable.
+                    if str(exc) in ("grounded_target_unavailable", "pose_target_unavailable"):
+                        return None
+                    raise
             return None
         if target not in SYMBOLIC_ANCHORS:
             raise ValueError("unsupported_perception_anchor")
@@ -75,7 +82,17 @@ class PerceptionAnchorPreparer:
         result = self.provider.observe(observation)
         if result.observation_sequence != observation.sequence:
             raise ValueError("grounding_missing_or_stale")
-        measured = self.environment.arm_state(command.arm)["pose"]
+        arm_state = self.environment.arm_state(command.arm)
+        measured = arm_state["pose"]
+        if target == "mug_recovery_clearance":
+            measured_tcp = arm_state.get("tcp_pose", measured)
+            tcp_anchor = self.provider.bind_recovery_clearance_anchor(
+                target, command.arm, observation, measured_tcp_pose=measured_tcp)
+            planning_pose = planning_pose_for_tcp_target(
+                measured, measured_tcp, tcp_anchor.pose)
+            self.anchors.bind(target, command.arm, Anchor(
+                tuple(planning_pose), observation.sequence, tcp_anchor.source))
+            return self.anchors.resolve(target, command.arm, observation)
         return self._bind_approach(target, command.arm, observation, measured)
 
     def _bind_approach(self, target, arm, observation, measured):

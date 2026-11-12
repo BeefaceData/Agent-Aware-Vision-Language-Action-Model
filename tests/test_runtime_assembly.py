@@ -138,15 +138,18 @@ class BuildPlannerTests(unittest.TestCase):
         self.assertIsInstance(assembly.build_planner("scripted", settings,
             development_start_phase="hang_recovery"), HangingRecoveryPlanner)
 
-    def test_development_resume_starts_left_recovery_open(self):
+    def test_development_resume_starts_left_recovery_with_retreat(self):
         planner = assembly.build_planner("scripted", RunSettings.model_validate({
             "recipe": {"max_retries": 1}}), development_start_phase="left_grasp_retry")
-        self.assertEqual(planner.phase, "RETRY_OPEN")
+        self.assertEqual(planner.phase, "RETRY_RETREAT")
         self.assertEqual(planner.retries, 1)
         selected = planner.select(SimpleNamespace(previous=None,
             value=lambda name: False if name == "mug_lifted" else True))
         self.assertEqual((selected.phase, selected.command.action.value),
-                         ("RETRY_OPEN", "set_gripper"))
+                         ("RETRY_RETREAT", "move_to"))
+        self.assertEqual(selected.command.parameters.target, "mug_recovery_clearance")
+        self.assertEqual(selected.command.parameters.path_mode, "target")
+        self.assertEqual(selected.command.parameters.orientation_mode, "preserve_current")
 
     def test_development_resume_skips_left_transfer_for_right_grasp(self):
         settings = RunSettings.model_validate({"handoff": HANDOFF})

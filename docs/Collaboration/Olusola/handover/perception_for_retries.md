@@ -285,7 +285,9 @@ because it is the median of the visible surface.
    path_mode=reverse_approach, retreat_distance_m=0.065,
    orientation_mode=preserve_current)` ->
    `move_to(right, mug_pregrasp)` (re-grounded from the current observation) ->
-   `vla_act` with at most 176 policy actions and `stop="right_mug_lifted"`.
+   monitored `vla_act` chunks until `right_mug_lifted` or
+   `grasp_attempt_failed` is confirmed. The episode-wide policy ceiling is only a
+   watchdog if neither predicate can be resolved.
 3. If `right_mug_lifted` is still not True: abort `right_grasp_retry_budget_exhausted`.
 
 If `right_mug_lifted` is `None` at the decision point the planner aborts

@@ -25,8 +25,9 @@ Test the acquisition/grasp portion of `hanging_mug`, especially whether the mug 
 Read [the pose handover](Olusola/handover/pose_estimation_for_retries.md) and
 [the perception handover](Olusola/handover/perception_for_retries.md). The depth
 cylinder fit and rack pole/peg fit run inside `RGBDPerceptionProvider.observe()`
-and reuse the observation's masks. Trusted mug axes now aim pregrasp re-staging
-and reverse-retreat fallback targets when `perception.depth_pose_anchors` is on.
+and reuse the observation's masks. Trusted mug axes now aim the grasp
+pre-approach and measured reverse-retreat targets when
+`perception.depth_pose_anchors` is on.
 The measured wrist orientation is preserved. Missing or untrusted fits retain
 the existing public semantic target; an unavailable public target can use the
 logged development-oracle fallback only with `--development-oracle`.
@@ -46,10 +47,17 @@ confirmed, then stops. The mug-handle contact frame still needs Opus or the
 explicit development oracle; the fitted handle point has not been validated for
 precise hanging. A pose alone does not confirm grasp or hanging success.
 
-Use one T4 simulator job at a time. This merge and its CPU checks do not establish
-live recovery success. Next, replay a saved failed-grasp prefix with the focused
-right-grasp preset and inspect target placement, retreat, fresh VLA retry, and
-public/oracle evidence sources in the recording and trace.
+The grasp-retry sequence is one measured reverse retreat while holding the
+current wrist orientation. After clearance, the skill may return to the measured
+orientation from the confirmed pre-approach state using a bounded shortest
+rotation, then hands control to a fresh VLA call. It does not open the gripper,
+choose a new grasp orientation, or add a separate wrist or re-staging skill.
+Apply this sequence to either arm. If the retreat fails or execution is
+uncertain, abort for review.
+
+Use one T4 simulator job at a time. The latest recorded right-grasp run used two
+retries but did not confirm a lift; inspect it before evaluating the simplified
+sequence.
 
 ## Constraints
 

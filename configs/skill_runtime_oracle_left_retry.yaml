@@ -1,5 +1,5 @@
-# Development-only: replay the controlled empty-grasp boundary, then test
-# open -> measured backoff -> fresh pregrasp -> frozen VLA retry with oracle gates.
+# Development-only: replay an empty-grasp boundary, move to the fixed grounded
+# mug clearance, then return control to the frozen VLA with oracle gates.
 record_video: true
 max_turns: 12
 perception:
@@ -14,9 +14,7 @@ recipe:
     max_physics_ticks: 2000
     target: mug_pregrasp
   retreat:
-    target: current_ee
-    path_mode: reverse_approach
-    retreat_distance_m: 0.065
+    target: mug_recovery_clearance
     orientation_mode: preserve_current
   vla:
     max_chunks: 8

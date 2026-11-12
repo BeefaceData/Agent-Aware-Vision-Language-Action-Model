@@ -39,7 +39,8 @@ SYMBOLIC_GROUNDING_REJECTIONS = frozenset({
     "grounded_target_out_of_reach",
 })
 SYMBOLIC_ANCHOR_TARGETS = frozenset({
-    "mug_pregrasp", "rack_approach", "rack_seat", "table_approach",
+    "mug_pregrasp", "mug_recovery_clearance", "rack_approach", "rack_seat",
+    "table_approach",
 })
 HANG_TARGETS = frozenset({"rack_approach", "rack_seat"})
 PIXEL_GROUNDED_TARGETS = frozenset({"mug_pregrasp", "rack_approach"})
@@ -61,7 +62,7 @@ UNCONFIRMED_STOP_FAILURES = {
     "handoff_confirmed": "handoff_unconfirmed",
     "task_success": "task_success_unconfirmed",
 }
-BASE_PREDICATES = ("mug_grasp_confirmed", "mug_in_workspace", "mug_lifted", "right_mug_lifted", "handoff_confirmed",
+BASE_PREDICATES = ("mug_grasp_confirmed", "mug_in_workspace", "mug_toppled", "mug_lifted", "right_mug_lifted", "handoff_confirmed",
                    "release_ready", "mug_placed_on_table", "mug_staged_on_table",
                    "left_transfer_complete", "grasp_attempt_failed", "task_success")
 PERCEPTION_PREDICATES = ("mug_near_rack", "rack_contact_detected", "mug_released")
@@ -286,6 +287,14 @@ class SkillOrchestrator:
                     turns = turn
                     phase, outcome = "FAILED", "mug_out_of_workspace"
                     break
+                mug_toppled = next((item for item in predicates
+                                    if item.name == "mug_toppled"), None)
+                if mug_toppled is not None and mug_toppled.value is True:
+                    self._abort_for_terminal_mug_state(
+                        mug_toppled, observation, turn, reason="mug_toppled")
+                    turns = turn
+                    phase, outcome = "FAILED", "mug_toppled"
+                    break
                 if success:
                     phase, outcome = "COMPLETE", "task_success"
                     break
@@ -353,11 +362,7 @@ class SkillOrchestrator:
                 self.invariant_check()  # Recheck after the potentially slow provider/planner call.
                 target_anchor = self._rack_seat_target(command, observation, prepared)
                 error_stage = "skill_execution"
-                previous = executor.execute(command, confirmed_observation=observation,
-                    allow_recoverable_tracking_error=(
-                        phase == "RIGHT_RETRY_REORIENT"
-                        and command.action == SkillType.MOVE_TO
-                        and command.arm == "right"))
+                previous = executor.execute(command, confirmed_observation=observation)
                 release_gate = getattr(executor.predicates, "rack_seat_gate", None)
                 if release_gate is not None:
                     release_gate.record(command, previous, target_anchor)
@@ -389,6 +394,13 @@ class SkillOrchestrator:
                 if mug_workspace is not None and mug_workspace.value is False:
                     self._abort_for_lost_mug(mug_workspace, after, turn)
                     phase, outcome = "FAILED", "mug_out_of_workspace"
+                    break
+                mug_toppled = next((item for item in post
+                                    if item.name == "mug_toppled"), None)
+                if mug_toppled is not None and mug_toppled.value is True:
+                    self._abort_for_terminal_mug_state(
+                        mug_toppled, after, turn, reason="mug_toppled")
+                    phase, outcome = "FAILED", "mug_toppled"
                     break
                 recoverable_failure = any(flags.values())
                 if previous.episode_terminal or (not previous.completed and not recoverable_failure):
@@ -437,10 +449,15 @@ class SkillOrchestrator:
 
     def _abort_for_lost_mug(self, predicate, observation, turn):
         """Stop every task phase when evidence confirms the mug left the workspace."""
+        self._abort_for_terminal_mug_state(
+            predicate, observation, turn, reason="mug_out_of_workspace")
+
+    def _abort_for_terminal_mug_state(self, predicate, observation, turn, *, reason):
+        """Apply a confirmed global mug-state stop before another skill runs."""
         self.log({"event_type": "global_stop_predicate", "planner_turn": turn,
             "predicate": predicate.model_dump(mode="json"),
-            "reason": "mug_out_of_workspace"})
-        result = self.executor.execute({"action": "abort", "reason": "mug_out_of_workspace"},
+            "reason": reason})
+        result = self.executor.execute({"action": "abort", "reason": reason},
                                        confirmed_observation=observation)
         self.log({"event_type": "global_stop_result", "planner_turn": turn,
             "result": result.model_dump(mode="json")})

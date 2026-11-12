@@ -23,9 +23,6 @@ class VLAParameters(Model):
     max_chunks: Annotated[StrictInt, Field(ge=1, le=32)] = 1
     chunk_size: Annotated[StrictInt, Field(ge=1, le=24)] = 8
     max_policy_actions: Annotated[StrictInt, Field(ge=1, le=768)] = 768
-    # Freeze one arm at its most recent commanded target while the other arm
-    # performs a bounded VLA phase. Action layout is left[0:7], right[7:14].
-    lock_arm: Literal["left", "right"] | None = None
     # Optional evidence-based early stop for a bounded VLA attempt. This is
     # configured by the runtime, not an unbounded model-selected action.
     failure_stop: Literal["grasp_attempt_failed"] | None = None

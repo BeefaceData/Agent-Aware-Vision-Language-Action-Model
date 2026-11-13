@@ -7,7 +7,7 @@ produces). Pose maths is plain NumPy; SAPIEN is imported only when a camera is
 added to a live scene.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -90,6 +90,22 @@ def camera_to_world(position_m, target_m):
 # camera behind the rack, (0.35, 0.40, 1.15), let the rack fill the foreground.
 DEFAULT_PERCEPTION_CAMERA = FixedCamera("perception_camera", position_m=(-0.30, 0.45, 1.20),
                                         target_m=(0.0, -0.10, 0.80), fovy_deg=60.0)
+SUPERVISED_PERCEPTION_CAMERA = replace(DEFAULT_PERCEPTION_CAMERA, width=640, height=480)
+
+# Complementary azimuth around the same workspace target, not around an oracle
+# object pose. It may expose the other handle face; visibility is unvalidated.
+SUPERVISED_REVERSE_CAMERA = FixedCamera("perception_reverse_camera",
+    position_m=(0.30, -0.65, 1.20), target_m=DEFAULT_PERCEPTION_CAMERA.target_m,
+    fovy_deg=60., width=640, height=480)
+
+
+def supervised_camera_specs(*, complementary_view=False):
+    """Keep the existing view by default; optional extra rendering changes no actions."""
+    if type(complementary_view) is not bool:
+        raise ValueError("invalid_complementary_view_option")
+    if complementary_view:
+        return (SUPERVISED_PERCEPTION_CAMERA, SUPERVISED_REVERSE_CAMERA)
+    return (SUPERVISED_PERCEPTION_CAMERA,)
 
 
 def add_fixed_camera(scene, spec):

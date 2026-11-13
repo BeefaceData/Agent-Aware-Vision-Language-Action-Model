@@ -68,6 +68,75 @@ def _matrix_pose(transform):
     return np.concatenate((transform[:3, 3], q))
 
 
+def measured_peg_centerline(camera, points_uv, width_uv, *, max_depth_gap_m=.06):
+    """Register a visible shaft using opposing mid-shaft silhouette samples.
+
+    Pixel semantics remain caller evidence. No CAD pose or hidden endpoint is
+    inferred. The three axis points establish orientation; the opposing width
+    samples establish a centerline offset on that same observed shaft.
+    """
+    frame = _pose_matrix(grounded_frame_from_pixels(camera, points_uv,
+        max_depth_gap_m=max_depth_gap_m))
+    width_uv = np.asarray(width_uv, dtype=float)
+    if width_uv.shape != (2, 2) or not np.isfinite(width_uv).all():
+        raise ValueError("visible_peg_cross_section_required")
+    surfaces, errors = [], []
+    for u, v in width_uv:
+        x, y = np.rint((u, v)).astype(int)
+        h, w = camera.depth_m.shape
+        if not (1 <= x < w-1 and 1 <= y < h-1):
+            raise ValueError("surface_neighborhood_out_of_bounds")
+        patch = camera.depth_m[y-1:y+2, x-1:x+2]
+        if np.any(patch <= 0) or np.ptp(patch) > max_depth_gap_m:
+            raise ValueError("surface_depth_discontinuous")
+        point = np.asarray(camera.unproject(u, v, radius=1))
+        error = max(np.linalg.norm(np.asarray(camera.unproject(u+du, v+dv, radius=1))-point)
+                    for du, dv in ((1,0),(-1,0),(0,1),(0,-1))) + float(np.ptp(patch))
+        surfaces.append(point)
+        errors.append(float(error))
+    axis = frame[:3, 0]
+    width_vector = surfaces[1]-surfaces[0]
+    axial_width = float(width_vector @ axis)
+    radius = float(np.linalg.norm(width_vector-axis*axial_width)/2)
+    radius_error = sum(errors)/2
+    if radius <= radius_error or abs(axial_width) > sum(errors):
+        raise ValueError("peg_radius_subpixel_or_wrong_cross_section")
+    midpoint = (surfaces[0]+surfaces[1])/2
+    origin = frame[:3, 3]
+    baseline = np.linalg.norm(np.asarray(camera.unproject(*points_uv[1], radius=1))-origin)
+    along = float((midpoint-origin) @ axis)
+    if not radius <= along <= baseline-radius:
+        raise ValueError("peg_cross_section_not_midshaft")
+    correction = midpoint-origin-axis*along
+    if np.linalg.norm(correction) > radius+sum(errors):
+        raise ValueError("peg_cross_section_axis_inconsistent")
+    frame[:3, 3] += correction
+    return dict(pose_world_wxyz=_matrix_pose(frame), radius_m=radius,
+        radius_uncertainty_m=radius_error, centerline_offset_m=float(np.linalg.norm(correction)),
+        position_sensitivity_m=sum(errors),
+        basis="current public opposing mid-shaft surfaces; no CAD registration",
+        systematic_calibration_error="unknown")
+
+
+def frame_from_axes(origin, x_direction, plane_direction):
+    """A right-handed frame at ``origin`` as a pose: +x along ``x_direction``,
+    +y towards ``plane_direction`` within their plane, +z = x cross y."""
+    x_axis = np.asarray(x_direction, dtype=float)
+    y_axis = np.asarray(plane_direction, dtype=float)
+    if np.linalg.norm(x_axis) < 1e-9:
+        raise ValueError("degenerate_frame_axes")
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = y_axis - x_axis * float(y_axis @ x_axis)
+    if np.linalg.norm(y_axis) < 1e-6:
+        raise ValueError("degenerate_frame_axes")
+    y_axis /= np.linalg.norm(y_axis)
+    z_axis = np.cross(x_axis, y_axis)
+    return _matrix_pose(np.block([
+        [np.column_stack((x_axis, y_axis, z_axis)), np.asarray(origin, dtype=float).reshape(3, 1)],
+        [np.zeros((1, 3)), np.ones((1, 1))],
+    ]))
+
+
 def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
                                min_axis_length_m=0.008, max_axis_length_m=0.30):
     """Build a 3D frame from ordered ``origin, x-axis, xy-plane`` RGB pixels.
@@ -110,14 +179,7 @@ def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
     y_length = float(np.linalg.norm(y_axis))
     if not min_axis_length_m <= y_length <= max_axis_length_m:
         raise ValueError("plane_axis_baseline_out_of_bounds")
-    y_axis /= y_length
-    z_axis = np.cross(x_axis, y_axis)
-    z_axis /= np.linalg.norm(z_axis)
-    y_axis = np.cross(z_axis, x_axis)
-    return _matrix_pose(np.block([
-        [np.column_stack((x_axis, y_axis, z_axis)), origin.reshape(3, 1)],
-        [np.zeros((1, 3)), np.ones((1, 1))],
-    ]))
+    return frame_from_axes(origin, x_axis, y_axis)
 
 
 def tcp_targets_for_mug_alignment(tcp_pose, mug_function_pose, rack_function_pose,

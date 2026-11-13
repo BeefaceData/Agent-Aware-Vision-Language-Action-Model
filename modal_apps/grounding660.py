@@ -119,9 +119,11 @@ def saved_geometry_gates(observation, report):
             frame = grounded_frame_from_pixels(camera, report.peg_keypoints_px)
             seat, tip = (np.asarray(camera.unproject(*uv, radius=1)) for uv in report.peg_keypoints_px[:2])
             peg.update(status="validated", reason="public_axis_depth_geometry_only",
-                axis_pose_world_wxyz=frame, axis_length_m=float(np.linalg.norm(tip-seat)))
+                axis_pose_world_wxyz=np.asarray(frame, dtype=float).tolist(),
+                axis_length_m=float(np.linalg.norm(tip-seat)))
             if report.peg_width_px is not None:
                 registration = measured_peg_centerline(camera, report.peg_keypoints_px, report.peg_width_px)
+                registration["pose_world_wxyz"] = np.asarray(registration["pose_world_wxyz"], dtype=float).tolist()
                 peg.update(radius_status="validated", registration=registration)
         except ValueError as exc:
             peg.update(status="rejected", reason=str(exc))

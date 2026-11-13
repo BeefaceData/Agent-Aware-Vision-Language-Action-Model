@@ -91,6 +91,27 @@ class ModalGrounding660Tests(unittest.TestCase):
                       result["recovery_eligibility"]["blockers"])
         self.assertFalse(result["motion_authorized"])
 
+    def test_validated_peg_geometry_is_json_serializable(self):
+        import json
+        import numpy as np
+        from types import SimpleNamespace
+        from tests.test_hanging_supervised import visible
+        from modal_apps.grounding660 import saved_geometry_gates
+        report = visible().model_copy(update={"peg_keypoints_px": [(1., 1.), (5., 1.), (1., 5.)],
+                                              "peg_width_px": [(3., 0.), (3., 2.)]})
+        camera = Mock()
+        camera.unproject.side_effect = lambda u, v, radius=1: (u*.01, v*.01, 1.)
+        observation = SimpleNamespace(camera_frames={"perception_camera": camera})
+        registration = dict(pose_world_wxyz=np.arange(7.), radius_m=.005)
+        with patch("development.hanging.aperture_frame.estimate",
+                   return_value=dict(status="rejected", reason="synthetic", motion_authorized=False)), \
+                patch("harness.perception.pose_grounding.grounded_frame_from_pixels", return_value=np.arange(7.)), \
+                patch("harness.perception.pose_grounding.measured_peg_centerline", return_value=registration):
+            result = saved_geometry_gates(observation, report)
+        self.assertEqual(result["peg"]["status"], "validated")
+        self.assertEqual(result["peg"]["radius_status"], "validated")
+        json.dumps(result, allow_nan=False)  # numpy poses must not break results.json
+
     def test_clearance_result_is_separate_from_recovery_and_motion(self):
         from types import SimpleNamespace
         from tests.test_hanging_supervised import visible

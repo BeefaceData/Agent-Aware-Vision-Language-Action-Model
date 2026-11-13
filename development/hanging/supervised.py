@@ -39,6 +39,12 @@ class SupervisedOptions:
     max_turns: int = 80
     complementary_view: bool = False
     perception_view: str = "default"
+    # The supervisor never ends an episode before motion; the policy keeps
+    # control for this many actions after a confirmed lift before any takeover.
+    # In the seed-5 policy-only success the hang finished about 105 actions
+    # after the usual entry.
+    hand_back_to_policy: bool = True
+    policy_grace_actions: int = 160
 
     def validate(self):
         from development.hanging.baseline import validate_options
@@ -52,6 +58,10 @@ class SupervisedOptions:
         from harness.environment.perception_cameras import PERCEPTION_VIEWS
         if self.perception_view not in PERCEPTION_VIEWS:
             raise ValueError("invalid_perception_view_option")
+        if type(self.hand_back_to_policy) is not bool:
+            raise ValueError("invalid_hand_back_option")
+        if type(self.policy_grace_actions) is not int or not 0 <= self.policy_grace_actions <= self.max_actions:
+            raise ValueError("invalid_policy_grace_actions")
 
 
 class HangingRecoveryHook:
@@ -62,9 +72,17 @@ class HangingRecoveryHook:
     """
     def __init__(self, environment, provider, store, *, episode_id, deadline, log,
                  policy_chunk_size=16, visibility_action_budget=900, visibility_check_budget=20,
-                 pause_policy_on_entry=True, require_current_lift=False):
-        if type(pause_policy_on_entry) is not bool:
+                 pause_policy_on_entry=True, require_current_lift=False,
+                 hand_back_to_policy=False, policy_grace_actions=0):
+        if type(pause_policy_on_entry) is not bool or type(hand_back_to_policy) is not bool:
             raise ValueError("invalid_hanging_takeover_mode")
+        if type(policy_grace_actions) is not int or policy_grace_actions < 0:
+            raise ValueError("invalid_hanging_policy_grace")
+        if hand_back_to_policy and pause_policy_on_entry:
+            raise ValueError("hand_back_requires_policy_owned_waiting")
+        self.hand_back_to_policy = hand_back_to_policy
+        self.policy_grace_actions = policy_grace_actions
+        self.handed_back = None
         if type(policy_chunk_size) is not int or policy_chunk_size <= 0:
             raise ValueError("invalid_hanging_policy_chunk_size")
         if (type(visibility_action_budget) is not int or visibility_action_budget <= 0
@@ -119,7 +137,44 @@ class HangingRecoveryHook:
             progress_reason="validated_temporal_handle_to_peg_measurements_unavailable",
             **evidence))
 
+    def _policy_turn(self, observation, remaining, reason):
+        """One frozen-policy chunk while the policy keeps or regains control."""
+        if time.monotonic() >= self.deadline or not all(
+                remaining.get(name, 0) > 0 for name in ("policy_actions", "vla_chunks", "skill_calls")):
+            return None  # The ordinary executor/orchestrator limits end the episode.
+        size = min(self.policy_chunk_size, remaining["policy_actions"])
+        command = SkillCommand(action=SkillType.VLA_ACT, stop="chunk_budget_exhausted",
+            parameters=dict(max_chunks=1, chunk_size=size, max_policy_actions=size))
+        return dict(status="recovery_deferred", reason=reason, stages={},
+                    policy_command=command.model_dump(mode="json"),
+                    observation_sequence=observation.sequence, control_owner="policy")
+
     def consider(self, selection, observation, *, remaining):
+        """With ``hand_back_to_policy`` the supervisor never ends an episode on its own.
+
+        The policy keeps control for ``policy_grace_actions`` after a confirmed
+        lift. Any stop that happens before motion (geometry unavailable or
+        rejected, lift evidence lost, no budget, or a planner abort) hands control
+        back to the frozen policy for the rest of the episode, so supervision can
+        only add an intervention, never cut a policy rollout short. An executed
+        recovery attempt still ends the episode with its own result.
+        """
+        if not self.hand_back_to_policy:
+            return self._consider(selection, observation, remaining=remaining)
+        if self.handed_back is not None:
+            return self._policy_turn(observation, remaining, "handed_back_to_policy")
+        if selection.command.action == SkillType.ABORT:
+            report = dict(status="recovery_stopped", reason="planner_abort_overridden", stages={})
+        else:
+            report = self._consider(selection, observation, remaining=remaining)
+        if report is None or report.get("status") == "recovery_deferred" or report.get("stages"):
+            return report
+        self.handed_back = report.get("reason") or report.get("status")
+        self._decision(observation, "hand_back_to_policy", self.handed_back, control_owner="policy",
+                       supervisor_report=report.get("status"))
+        return self._policy_turn(observation, remaining, "handed_back_to_policy")
+
+    def _consider(self, selection, observation, *, remaining):
         if selection.command.action == SkillType.ABORT:
             return None
         if self._blocked_takeover is not None:
@@ -163,6 +218,13 @@ class HangingRecoveryHook:
             self._decision(observation, "take_over_hanging", "confirmed_right_mug_lifted",
                            control_owner="hanging_controller", policy_paused=True)
         elapsed_actions = max(0, self.entry_policy_remaining-remaining.get("policy_actions", 0))
+        if elapsed_actions < self.policy_grace_actions:
+            # The policy may finish the hang itself: step in only if it has not
+            # after the grace period. No geometry request is spent meanwhile.
+            self._decision(observation, "policy_grace_period", "policy_may_complete_hang",
+                           control_owner="policy", policy_actions_since_entry=elapsed_actions,
+                           policy_grace_actions=self.policy_grace_actions)
+            return self._policy_turn(observation, remaining, "policy_grace_period")
         if elapsed_actions < self.next_visibility_action:
             return self._wait_for_visibility_check(observation, remaining, elapsed_actions)
         if self.visibility_checks >= self.visibility_check_budget or elapsed_actions >= self.visibility_action_budget:
@@ -283,7 +345,9 @@ def run_controller(environment, vla, provider, store, planner, options, *, episo
     hook = HangingRecoveryHook(environment, provider, store, episode_id=episode_id,
                                deadline=deadline, log=log, policy_chunk_size=options.chunk_size,
                                visibility_action_budget=options.max_actions,
-                               pause_policy_on_entry=False, require_current_lift=True)
+                               pause_policy_on_entry=False, require_current_lift=True,
+                               hand_back_to_policy=options.hand_back_to_policy,
+                               policy_grace_actions=options.policy_grace_actions)
     return SkillOrchestrator(executor, planner, log=log, save_observation=store.save,
         episode_id=episode_id, seed=options.seed, max_turns=options.max_turns,
         completion_predicate="task_success", prepare=prepare, invariant_check=invariant,
@@ -386,6 +450,7 @@ def run(robotwin_root, output, options, *, fixture_loader=None):
                 report["video_metadata_error"] = type(exc).__name__
         if shared is not None:
             report["model_requests"] = shared.requests
+            report["claude_usage"] = shared.usage_summary()
         if provider is not None:
             report["perception_requests"] = provider.requests
         report["elapsed_seconds"] = time.monotonic()-started

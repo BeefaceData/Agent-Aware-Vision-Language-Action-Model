@@ -889,6 +889,30 @@ class SupervisedHangingTests(unittest.TestCase):
             self.assertEqual(result.status, "rejected")
             self.assertEqual(result.reason, "right_arm_not_holding_mug")
 
+    def test_shared_client_records_tokens_latency_and_failed_calls_per_tool(self):
+        from types import SimpleNamespace
+        from development.hanging.public_provider import BoundedVisionClient
+        usage = SimpleNamespace(input_tokens=1200, output_tokens=300, cache_read_input_tokens=0,
+                                cache_creation_input_tokens=0)
+        response = SimpleNamespace(content=[SimpleNamespace(type="tool_use", name="report_public_hanging")],
+                                   usage=usage)
+        inner = SimpleNamespace(messages=SimpleNamespace(create=Mock(
+            side_effect=[response, RuntimeError("synthetic outage"), response])))
+        shared = BoundedVisionClient(inner, model="claude-test", deadline=time.monotonic()+10)
+        tool = [{"name": "report_public_hanging"}]
+        shared.messages.create(tools=tool, messages=[])
+        with self.assertRaises(RuntimeError):
+            shared.messages.create(tools=tool, messages=[])
+        shared.messages.create(tools=tool, messages=[])
+        summary = shared.usage_summary()
+        total = summary["total"]
+        self.assertEqual((total["requests"], total["failed"]), (3, 1))
+        self.assertEqual((total["input_tokens"], total["output_tokens"]), (2400, 600))
+        self.assertEqual(summary["by_tool"]["report_public_hanging"]["requests"], 3)
+        self.assertGreaterEqual(total["latency_seconds_total"], 0.)
+        import json
+        json.dumps(summary)
+
     def test_shared_client_caps_requests_deadline_and_no_forced_thinking_mode(self):
         call = SimpleNamespace(type="tool_use", name="report", input={})
         sdk = SimpleNamespace(messages=SimpleNamespace(create=Mock(return_value=SimpleNamespace(content=[call]))))
@@ -1064,8 +1088,8 @@ class SupervisedHangingTests(unittest.TestCase):
         events=[]
         with tempfile.TemporaryDirectory() as directory,patch("development.hanging.supervised.recover_current") as recover:
             summary=run_controller(environment,vla,provider,ObservationStore(Path(directory)/"observations"),planner,
-                SupervisedOptions("claude-test",max_actions=2,chunk_size=1,max_turns=2),episode_id="episode",
-                deadline=time.monotonic()+10,log=events.append)
+                SupervisedOptions("claude-test",max_actions=2,chunk_size=1,max_turns=2,policy_grace_actions=0),
+                episode_id="episode",deadline=time.monotonic()+10,log=events.append)
             recover.assert_not_called()
         self.assertEqual(summary["policy_actions"],2)
         self.assertNotEqual(summary["outcome"],"recovery_blocked")
@@ -1106,6 +1130,84 @@ class SupervisedHangingTests(unittest.TestCase):
                 self.assertEqual(hook.attempts,0)
                 self.assertNotIn("clearance_validated",result)
                 recover.assert_not_called()
+
+    def hand_back_hook(self, provider, environment, **options):
+        return HangingRecoveryHook(environment, provider, Mock(), episode_id="episode",
+            deadline=time.monotonic()+10, log=lambda event: None, pause_policy_on_entry=False,
+            require_current_lift=True, hand_back_to_policy=True, **options)
+
+    def lifted_provider(self, sequence):
+        provider = Mock()
+        provider.evaluate.return_value = PredicateResult(name="right_mug_lifted", value=True,
+            source="perception", observation_sequence=sequence, reason="synthetic grasp")
+        provider.lift_current.return_value = True
+        return provider
+
+    def test_policy_keeps_control_during_grace_period_without_geometry_requests(self):
+        environment = PublicEnvironment(x=0.); environment.sequence = 416
+        provider = self.lifted_provider(416)
+        hook = self.hand_back_hook(provider, environment, policy_grace_actions=160)
+        selection = PlannerSelection(SkillCommand(action="vla_act"), "HANG")
+        for remaining_actions in (484, 400, 325):  # 0, 84 and 159 actions after entry
+            result = hook.consider(selection, environment.observe(),
+                remaining=dict(policy_actions=remaining_actions, vla_chunks=40, skill_calls=40, analytic_ticks=12000))
+            self.assertEqual(result["status"], "recovery_deferred")
+            self.assertEqual(result["reason"], "policy_grace_period")
+            self.assertEqual(result["control_owner"], "policy")
+        provider.propose.assert_not_called()
+        provider.propose.return_value = runtime.ProposalResult("unknown", "complete_visible_aperture_unavailable")
+        after = hook.consider(selection, environment.observe(),
+            remaining=dict(policy_actions=324, vla_chunks=40, skill_calls=40, analytic_ticks=12000))
+        provider.propose.assert_called_once()  # Geometry is checked only after the grace period.
+        self.assertEqual(after["status"], "recovery_deferred")
+
+    def test_stops_before_motion_hand_control_back_to_the_policy(self):
+        remaining = dict(policy_actions=400, vla_chunks=30, skill_calls=30, analytic_ticks=12000)
+        selection = PlannerSelection(SkillCommand(action="vla_act"), "HANG")
+        cases = [("rejected geometry", runtime.ProposalResult("rejected", "visible_material_not_planar")),
+                 ("provider error", RuntimeError("synthetic provider failure"))]
+        for name, outcome in cases:
+            with self.subTest(name=name):
+                environment = PublicEnvironment(x=0.); environment.sequence = 416
+                provider = self.lifted_provider(416)
+                if isinstance(outcome, Exception):
+                    provider.propose.side_effect = outcome
+                else:
+                    provider.propose.return_value = outcome
+                hook = self.hand_back_hook(provider, environment)
+                with patch("development.hanging.supervised.recover_current") as recover:
+                    first = hook.consider(selection, environment.observe(), remaining=remaining)
+                    self.assertEqual(first["status"], "recovery_deferred")
+                    self.assertEqual(first["reason"], "handed_back_to_policy")
+                    self.assertIn("policy_command", first)
+                    self.assertIsNotNone(hook.handed_back)
+                    # Later turns, including a planner abort, stay with the policy.
+                    for later in (selection, PlannerSelection(SkillCommand(action="abort"), "HANG")):
+                        again = hook.consider(later, environment.observe(), remaining=remaining)
+                        self.assertEqual(again["reason"], "handed_back_to_policy")
+                    recover.assert_not_called()
+        # Lift evidence lost after entry also hands back instead of ending the run.
+        environment = PublicEnvironment(x=0.); environment.sequence = 416
+        provider = self.lifted_provider(416)
+        provider.propose.return_value = runtime.ProposalResult("unknown", "aperture_awaiting_two_frame_agreement")
+        hook = self.hand_back_hook(provider, environment)
+        hook.consider(selection, environment.observe(), remaining=remaining)
+        provider.evaluate.return_value = PredicateResult(name="right_mug_lifted", value=None,
+            source="perception", observation_sequence=416, reason="public_evidence_unknown")
+        lost = hook.consider(selection, environment.observe(), remaining=dict(remaining, policy_actions=360))
+        self.assertEqual(lost["reason"], "handed_back_to_policy")
+        self.assertEqual(hook.handed_back, "right_grasp_evidence_expired")
+
+    def test_hand_back_yields_to_episode_limits(self):
+        environment = PublicEnvironment(x=0.); environment.sequence = 416
+        hook = self.hand_back_hook(self.lifted_provider(416), environment)
+        hook.handed_back = "visibility_budget_exhausted"
+        selection = PlannerSelection(SkillCommand(action="vla_act"), "HANG")
+        self.assertIsNone(hook.consider(selection, environment.observe(),
+            remaining=dict(policy_actions=0, vla_chunks=5, skill_calls=5, analytic_ticks=12000)))
+        with self.assertRaisesRegex(ValueError, "hand_back_requires"):
+            HangingRecoveryHook(environment, Mock(), Mock(), episode_id="e", deadline=time.monotonic()+1,
+                log=lambda event: None, hand_back_to_policy=True)
 
     def test_awaiting_agreement_or_rack_reference_waits_like_hidden_opening(self):
         for reason in ("aperture_awaiting_two_frame_agreement", "validated_rack_reference_unavailable"):
@@ -1331,7 +1433,8 @@ class SupervisedHangingTests(unittest.TestCase):
                 patch.object(runtime, "validate_current_geometry", side_effect=validate), \
                 patch.object(runtime, "confirm_visible_handle", return_value={"status": "confirmed_visible_subset"}):
             result = run_controller(environment, vla, Provider(), ObservationStore(Path(directory)/"observations"),
-                planner, SupervisedOptions("claude-test"), episode_id="episode-a", deadline=time.monotonic()+20,
+                planner, SupervisedOptions("claude-test", policy_grace_actions=0), episode_id="episode-a",
+                deadline=time.monotonic()+20,
                 log=lambda event: None)
         self.assertEqual(result["outcome"], "recovery_sequence_completed_support_unverified")
         self.assertEqual(result["policy_actions"], 1)

@@ -141,7 +141,25 @@ class BoundedVisionClient:
     def __init__(self, client, *, model, deadline, maximum_requests=161):
         self.client, self.model, self.deadline = client, model, deadline
         self.maximum_requests, self.requests = maximum_requests, 0
+        self.call_log = []
         self.messages = SimpleNamespace(create=self.create)
+
+    def usage_summary(self):
+        """Per-tool request counts, tokens and latency for the run report."""
+        def totals(records):
+            latencies = [r["latency_seconds"] for r in records if "latency_seconds" in r]
+            return dict(requests=len(records), failed=sum(not r["ok"] for r in records),
+                **{name: sum(r.get(name, 0) for r in records) for name in (
+                    "input_tokens", "output_tokens", "cache_read_input_tokens",
+                    "cache_creation_input_tokens")},
+                latency_seconds_total=sum(latencies),
+                latency_seconds_max=max(latencies, default=0.),
+                latency_seconds_mean=sum(latencies)/len(latencies) if latencies else 0.)
+        by_tool = {}
+        for record in self.call_log:
+            by_tool.setdefault(record["tool"] or "unknown", []).append(record)
+        return dict(model=self.model, total=totals(self.call_log),
+                    by_tool={tool: totals(records) for tool, records in by_tool.items()})
 
     def create(self, **request):
         if self.requests >= self.maximum_requests or time.monotonic() >= self.deadline:
@@ -151,7 +169,20 @@ class BoundedVisionClient:
                        tool_choice={"type": "auto", "disable_parallel_tool_use": True},
                        extra_body={"thinking": {"type": "adaptive"},
                                    "output_config": {"effort": "low"}})
-        response = self.client.messages.create(**request)
+        tool = next((t.get("name") for t in request.get("tools") or () if isinstance(t, dict)), None)
+        started = time.monotonic()
+        record = dict(tool=tool, ok=False)
+        self.call_log.append(record)  # Failed calls are recorded too: they still cost.
+        try:
+            response = self.client.messages.create(**request)
+        finally:
+            record["latency_seconds"] = time.monotonic()-started
+        usage = getattr(response, "usage", None)
+        for name in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                     "cache_creation_input_tokens"):
+            value = getattr(usage, name, None)
+            record[name] = value if isinstance(value, int) else 0
+        record["ok"] = True
         calls = [block for block in response.content if getattr(block, "type", None) == "tool_use"]
         allowed = {tool["name"] for tool in request["tools"]}
         if len(calls) != 1 or calls[0].name not in allowed:

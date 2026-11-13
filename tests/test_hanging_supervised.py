@@ -66,6 +66,39 @@ class SupervisedHangingTests(unittest.TestCase):
                 provider.evaluate.assert_called_once_with("right_mug_lifted", observation, arm="right")
                 provider.propose.assert_not_called()
 
+    def test_carried_forward_lift_does_not_start_takeover(self):
+        environment = PublicEnvironment(x=0.)
+        environment.sequence = 40
+        observation = environment.observe()
+        provider = Mock()
+        provider.evaluate.return_value = PredicateResult(name="right_mug_lifted", value=True,
+            source="perception", observation_sequence=observation.sequence,
+            reason="bounded_temporal_lift_persistence")
+        provider.lift_current.return_value = False
+        hook = HangingRecoveryHook(environment, provider, Mock(), episode_id="test",
+            deadline=time.monotonic()+10, log=lambda _: None)
+        selection = PlannerSelection(SkillCommand(action="vla_act"), "HANG")
+        self.assertIsNone(hook.consider(selection, observation, remaining={}))
+        provider.propose.assert_not_called()
+        self.assertIsNone(hook.entry_sequence)
+
+    def test_provider_lift_current_rejects_temporal_persistence_only(self):
+        environment = PublicEnvironment(x=0.)
+        observation = environment.observe()
+        provider = PublicRGBDHangingProvider(Mock(), model="claude-test", episode_id="episode",
+                                             store=Mock(), log=lambda event: None)
+        provider._corroborated_count = 3
+        provider._lift_motion_supported = True
+        report = visible().model_copy(update={"task_state_confidence": None})
+        with patch.object(provider, "observe", return_value=report):
+            provider._lift_corroboration = dict(status="unknown", reason="public_lift_geometry_unavailable")
+            carried = provider.evaluate("right_mug_lifted", observation)
+            self.assertIs(carried.value, True)
+            self.assertEqual(carried.reason, "bounded_temporal_lift_persistence")
+            self.assertFalse(provider.lift_current(observation))
+            provider._lift_corroboration = dict(status="confirmed", reason="lift_corroborated")
+            self.assertTrue(provider.lift_current(observation))
+
     def test_default_takeover_requires_current_public_lift_not_raised_tcp_or_handoff_history(self):
         environment = PublicEnvironment(x=0.)
         environment.sequence = 17
@@ -97,6 +130,7 @@ class SupervisedHangingTests(unittest.TestCase):
         provider.evaluate.return_value = PredicateResult(name="right_mug_lifted", value=True,
             source="perception", observation_sequence=observation.sequence, reason="confirmed lift")
         provider.propose.return_value = runtime.ProposalResult("unknown", "complete_visible_aperture_unavailable")
+        provider.lift_current.return_value = True
         hook = HangingRecoveryHook(environment, provider, Mock(), episode_id="test",
             deadline=time.monotonic()+10, log=lambda _: None)
         selection = PlannerSelection(SkillCommand(action="vla_act"), "HANG")
@@ -123,6 +157,7 @@ class SupervisedHangingTests(unittest.TestCase):
                 provider.evaluate.return_value = PredicateResult(name="right_mug_lifted", value=True,
                     source="perception", observation_sequence=observation.sequence, reason="confirmed lift")
                 provider.propose.return_value = runtime.ProposalResult("confirmed", "synthetic proposal")
+                provider.lift_current.return_value = True
                 hook = HangingRecoveryHook(environment, provider, Mock(), episode_id="test",
                     deadline=time.monotonic()+(-1 if expired else 10), log=lambda _: None)
                 with patch("development.hanging.supervised.recover_current") as recover:
@@ -1018,6 +1053,7 @@ class SupervisedHangingTests(unittest.TestCase):
             reason="synthetic grasp; aperture unavailable")
         provider.planner_summary.return_value={}
         provider.propose.return_value=runtime.ProposalResult("unknown","complete_visible_aperture_unavailable")
+        provider.lift_current.return_value=True
         planner=Mock()
         planner.select.return_value=PlannerSelection(SkillCommand(action="vla_act"),"HANG")
         vla=Mock();vla.infer.return_value=np.zeros((1,14))
@@ -1245,6 +1281,8 @@ class SupervisedHangingTests(unittest.TestCase):
                     source="perception", observation_sequence=observation.sequence, reason="synthetic public evidence")
             def planner_summary(self, observation):
                 return {}
+            def lift_current(self, observation):
+                return observation.sequence > 17
             def propose(self, observation, measured_tcp, *, episode_id):
                 return runtime.ProposalResult("confirmed", "synthetic proposal")
         _, proposal, _ = runtime_fixtures.RuntimeRecoveryTests().fixture()

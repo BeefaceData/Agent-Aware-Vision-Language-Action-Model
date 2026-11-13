@@ -121,6 +121,12 @@ class HangingRecoveryHook:
         current_lift = (grasp.value is True and (not self.require_current_lift or
             (grasp.name == "right_mug_lifted" and grasp.source == "perception"
              and grasp.observation_sequence == observation.sequence)))
+        if current_lift and self.require_current_lift and self.entry_sequence is None:
+            # The provider stamps every result with the current sequence and may
+            # carry a lift forward across a bounded gap. Entry needs this frame's
+            # own corroboration; providers without that check fail closed.
+            lift_current = getattr(self.provider, "lift_current", None)
+            current_lift = callable(lift_current) and lift_current(observation) is True
         if not current_lift:
             if self.entry_sequence is not None:
                 reason = "right_grasp_lost" if grasp.value is False else "right_grasp_evidence_expired"

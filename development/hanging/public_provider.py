@@ -59,7 +59,10 @@ class VisibleHangingReport(Model):
     peg_confidence: StrictFloat | None = Field(default=None, ge=0, le=1)
 
 
-PUBLIC_PROMPT = """Report only visible public image evidence; never robot actions,
+# Lift carried forward from an earlier corroborated frame, not this frame's evidence.
+LIFT_PERSISTENCE_REASON = "bounded_temporal_lift_persistence"
+
+PUBLIC_PROMPT ="""Report only visible public image evidence; never robot actions,
 world coordinates, object dimensions, hidden geometry or simulator state.
 Images are labeled by camera, observation and pixel size. Full-resolution UV
 origin is top-left. If uncertain use null/false and explain; gripper closure alone
@@ -1201,12 +1204,21 @@ class PublicRGBDHangingProvider:
                 "association_or_clearance_failed"):
             value = False if state_confident and report.right_held is False else None
         return PredicateResult(name=name, value=value, source="perception", observation_sequence=observation.sequence,
-                               reason=("bounded_temporal_lift_persistence" if temporal and value is True
+                               reason=(LIFT_PERSISTENCE_REASON if temporal and value is True
                                        and self._lift_corroboration["status"] != "confirmed" else
                                        "three_corroborated_public_reports" if temporal and value is True
                                        and name in ("right_mug_lifted", "mug_lifted") else
                                        "two_public_visual_reports" if value is True else
                                        "public_visual_contradiction" if value is False else "public_evidence_unknown"))
+
+    def lift_current(self, observation):
+        """Whether this exact observation corroborated the right-hand lift.
+
+        ``evaluate`` may keep a lift True for a bounded gap after the last
+        corroborated frame; starting a takeover needs this frame's own evidence.
+        """
+        result = self.evaluate("right_mug_lifted", observation, arm="right")
+        return result.value is True and result.reason != LIFT_PERSISTENCE_REASON
 
     def planner_summary(self, observation):
         report = self.observe(observation)

@@ -468,6 +468,44 @@ def hanging_recovery(model: str, package: str = "data/runs/hang_replay_candidate
         print(f"Recovery video and report: {target}; remote robotwin-runs/{run_id}")
 
 
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              timeout=80 * 60, retries=0, max_containers=1, single_use_containers=True,
+              secrets=[modal.Secret.from_name("anthropic")])
+def run_supervised_hanging(run_id: str, options: dict):
+    sys.path.insert(0, "/root")
+    from development.hanging.supervised import SupervisedOptions, run
+    from development.hanging.public_provider import load_verified_fixture_assets
+    try:
+        return run(ROBOTWIN, Path(RUNS)/run_id, SupervisedOptions(**options),
+                   fixture_loader=load_verified_fixture_assets)
+    finally:
+        runs_volume.commit()
+
+
+@app.local_entrypoint()
+def supervised_hanging(model: str, seed: int = 4, max_actions: int = 900,
+                       chunk_size: int = 16, time_limit_minutes: int = 30,
+                       max_turns: int = 80, output: str = "", complementary_view: bool = False):
+    """One serial full-task supervisor run; no recorded entry or demo override."""
+    from development.hanging.supervised import SupervisedOptions
+    options = SupervisedOptions(model, seed, max_actions, chunk_size, time_limit_minutes, max_turns,
+                                complementary_view=complementary_view)
+    options.validate()
+    run_id = f"supervised_hanging_seed{seed}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{time.time_ns()}"
+    target = Path(output).resolve() if output else REPO/"data/runs"/run_id
+    if target.exists():
+        raise ValueError("supervised_output_already_exists")
+    print(f"One serial supervisor episode on {GPU}; seed={seed}; actions<={max_actions}; "
+          f"limit={time_limit_minutes} min; model calls<=161; recovery attempts<=1", flush=True)
+    try:
+        report = run_supervised_hanging.remote(run_id, options.__dict__)
+        print(json.dumps(report, indent=2))
+    finally:
+        if _wait_for_volume(run_id):
+            _download_run(run_id, target, skip_observations=False)
+        print(f"Video, RGB-D and report: {target}; remote robotwin-runs/{run_id}")
+
+
 @app.local_entrypoint()
 def baseline(seed: int = 3, max_actions: int = 900, chunk_size: int = 8,
              time_limit_minutes: int = 30, output: str = "", perception_camera: str = ""):

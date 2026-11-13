@@ -28,6 +28,320 @@ class Limits:
     pixel_uncertainty_px: float = 1.
 
 
+def depth_components(mask):
+    """Four-connected observed raster components; never fill missing pixels."""
+    remaining = set(map(tuple, np.argwhere(mask)))
+    while remaining:
+        first = remaining.pop()
+        queue, found = deque([first]), [first]
+        while queue:
+            y, x = queue.popleft()
+            for point in ((y-1,x), (y+1,x), (y,x-1), (y,x+1)):
+                if point in remaining:
+                    remaining.remove(point)
+                    queue.append(point)
+                    found.append(point)
+        yield np.asarray(found, dtype=int)
+
+
+def surface_material_components(mask, depth):
+    """Separate observed material patches; continuity does not prove handle identity.
+
+    Use the same 10 mm neighbor step as the reviewed-material gap check. Never
+    pool disconnected patches into a plane or bridge an opening/body depth edge.
+    Raster order makes sampling reproducible across repeated offline checks.
+    """
+    remaining = np.asarray(mask, dtype=bool) & np.isfinite(depth) & (depth > 0)
+    remaining = remaining.copy()
+    for y, x in np.argwhere(remaining):
+        if not remaining[y, x]:
+            continue
+        remaining[y, x] = False
+        queue, found = deque([(y, x)]), []
+        while queue:
+            sy, sx = queue.popleft()
+            found.append((sy, sx))
+            for ny, nx in ((sy-1, sx), (sy+1, sx), (sy, sx-1), (sy, sx+1)):
+                if (0 <= ny < remaining.shape[0] and 0 <= nx < remaining.shape[1]
+                        and remaining[ny, nx]
+                        and abs(float(depth[ny, nx]-depth[sy, sx])) <= .01):
+                    remaining[ny, nx] = False
+                    queue.append((ny, nx))
+        yield np.asarray(sorted(found), dtype=int)
+
+
+def body_excluded_material_domain(camera, body_pose, *, observation_sequence):
+    """Exclude the fitted cylinder from sample selection, not from the opening.
+
+    This is an offline sampling aid. Geometric fit quality is not semantic
+    identity, and points outside the body can still belong to robot fingers.
+    No hidden handle surface or collision clearance is established here.
+    """
+    from harness.perception.object_pose import ObjectPose, SURFACE_TOLERANCE_M
+
+    if (not isinstance(camera, RGBDCamera) or not isinstance(body_pose, ObjectPose)
+            or body_pose.label != "mug" or not body_pose.trusted
+            or body_pose.observation_sequence != observation_sequence):
+        raise ValueError("current_trusted_body_pose_required")
+    axis = np.asarray(body_pose.axis, dtype=float)
+    origin = np.asarray(body_pose.position, dtype=float)
+    radius = body_pose.radius_m
+    if (axis.shape != (3,) or origin.shape != (3,)
+            or not np.isfinite(axis).all() or not np.isfinite(origin).all()
+            or not np.isclose(np.linalg.norm(axis), 1.)
+            or radius is None or not np.isfinite(radius) or radius <= 0):
+        raise ValueError("invalid_body_cylinder")
+    height, width = camera.depth_m.shape
+    y, x = np.mgrid[:height, :width]
+    rays = np.stack((x, y, np.ones_like(x)), axis=-1) @ np.linalg.inv(camera.intrinsic).T
+    transform = np.linalg.inv(camera.world_to_camera)
+    points = (rays*camera.depth_m[..., None]) @ transform[:3, :3].T + transform[:3, 3]
+    offsets = points-origin
+    radial = offsets-np.einsum("...i,i->...", offsets, axis)[..., None]*axis
+    return (np.isfinite(camera.depth_m) & (camera.depth_m > 0)
+            & (np.linalg.norm(radial, axis=-1) > radius+SURFACE_TOLERANCE_M))
+
+
+def _observed_convex_contour(hole, left, top):
+    """An inscribed convex subset, never a completion of an occluded boundary."""
+    from PIL import Image, ImageDraw
+
+    core = hole.copy()
+    core[[0, -1], :] = False
+    core[:, [0, -1]] = False
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            core[1:-1, 1:-1] &= hole[1+dy:hole.shape[0]-1+dy, 1+dx:hole.shape[1]-1+dx]
+    points = sorted((int(x), int(y)) for y, x in np.argwhere(core))
+    if len(points) < 8:
+        return None
+    def cross(a, b, c):
+        return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
+    edges = []
+    for ordered in (points, reversed(points)):
+        edge = []
+        for point in ordered:
+            while len(edge) >= 2 and cross(edge[-2], edge[-1], point) <= 0:
+                edge.pop()
+            edge.append(point)
+        edges.append(edge[:-1])
+    hull = edges[0]+edges[1]
+    if len(hull) < 8:
+        return None
+    # Every filled pixel must already be observed as opening. A convex hull
+    # across a concavity or missing depth must not manufacture free space.
+    image = Image.new("1", (hole.shape[1], hole.shape[0]))
+    ImageDraw.Draw(image).polygon(hull, fill=1)
+    if np.any(np.asarray(image, dtype=bool) & ~hole):
+        return None
+    if len(hull) > 16:
+        hull = [hull[i] for i in np.linspace(0, len(hull)-1, 16, dtype=int)]
+    return [[float(x+left), float(y+top)] for x, y in hull]
+
+
+def depth_contrast_aperture(camera, region_xyxy, *, limits=Limits(), exclusion_mask=None,
+                            background_opening=False, material_domain=None,
+                            separate_material_surfaces=False):
+    """Find enclosed recessed-wall candidates, independent of RGB contrast.
+
+    A closed foreground arch and a 5-80 mm observed depth recess are required;
+    background-opening mode permits a farther observed background return.
+    A mug mouth/gripper can also produce this pattern: semantic identity remains
+    unknown, and this offline detector never supplies motion authorization.
+    Optional component isolation is conservative: disconnected but coplanar
+    arch fragments may lose sufficient plane span. It is not used by recovery.
+    """
+    result = dict(status="unavailable", reason="no_enclosed_depth_contrast_loop",
+                  motion_authorized=False, semantics="unknown", candidates=[])
+    if not isinstance(camera, RGBDCamera):
+        raise ValueError("rgbd_camera_required")
+    box = np.asarray(region_xyxy)
+    h,w = camera.depth_m.shape
+    if (box.shape != (4,) or box.dtype.kind not in "iu" or not
+            (1 <= box[0] < box[2] < w-1 and 1 <= box[1] < box[3] < h-1)):
+        raise ValueError("depth_loop_region_invalid")
+    left,top,right,bottom = map(int,box)
+    if exclusion_mask is None:
+        exclusion_mask = np.zeros((h,w),dtype=bool)
+    if np.asarray(exclusion_mask).shape != (h,w) or np.asarray(exclusion_mask).dtype != bool:
+        raise ValueError("aperture_exclusion_mask_invalid")
+    excluded = exclusion_mask[top:bottom,left:right]
+    if material_domain is None:
+        material_domain=np.ones((h,w),dtype=bool)
+    if np.asarray(material_domain).shape != (h,w) or np.asarray(material_domain).dtype != bool:
+        raise ValueError("aperture_material_domain_invalid")
+    depth = camera.depth_m[top:bottom,left:right]
+    valid = depth > 0
+    if valid.sum() < 64:
+        result["reason"] = "depth_loop_insufficient_depth"
+        return result
+    thresholds = np.unique(np.quantile(depth[valid], np.linspace(.02,.75,24)))
+    seen = set()
+    for threshold in thresholds:
+        near = valid & (depth <= threshold)
+        for pixels in depth_components(~near):
+            ys,xs = pixels.T
+            if (len(pixels)<12 or len(pixels)>depth.size//3 or (ys==0).any()
+                    or (xs==0).any() or (ys==depth.shape[0]-1).any() or (xs==depth.shape[1]-1).any()
+                    or not valid[ys,xs].all()):
+                continue
+            if excluded[ys,xs].any():
+                continue  # Removing body/fingers must not manufacture a hole.
+            signature = (int(xs.min()),int(ys.min()),int(xs.max()),int(ys.max()))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            hole = np.zeros_like(near);hole[ys,xs]=True
+            grown = hole.copy()
+            for _ in range(12):
+                previous = grown.copy()
+                grown[1:] |= previous[:-1];grown[:-1] |= previous[1:]
+                grown[:,1:] |= previous[:,:-1];grown[:,:-1] |= previous[:,1:]
+            material = grown & near & ~excluded & material_domain[top:bottom,left:right]
+            # Leave three pixels for 3x3 samples and the estimator's +/-1 px
+            # sensitivity probes; diagonal edge pixels must also be excluded.
+            for _ in range(3):
+                previous=material.copy()
+                material[1:] &= previous[:-1];material[:-1] &= previous[1:]
+                material[:,1:] &= previous[:,:-1];material[:,:-1] &= previous[:,1:]
+                material[1:,1:] &= previous[:-1,:-1];material[:-1,:-1] &= previous[1:,1:]
+                material[1:,:-1] &= previous[:-1,1:];material[:-1,1:] &= previous[1:,:-1]
+            # Ordered radial boundary samples must actually lie in the hole;
+            # reject incomplete/nonconvex boundaries in the unchanged estimator.
+            center=np.array([xs.mean(),ys.mean()])
+            offsets=np.column_stack((xs,ys))-center
+            angles=np.arctan2(offsets[:,1],offsets[:,0])
+            contour=[]
+            for angle in np.linspace(-np.pi,np.pi,16,endpoint=False):
+                delta=np.abs(np.angle(np.exp(1j*(angles-angle))))
+                choices=np.where(delta < np.pi/16)[0]
+                if not len(choices):break
+                index=choices[np.argmax(np.linalg.norm(offsets[choices],axis=1))]
+                contour.append([float(xs[index]+left),float(ys[index]+top)])
+            if len(contour)!=16:continue
+            radial_contour = contour
+            components = (surface_material_components(material, depth) if separate_material_surfaces
+                          else (np.argwhere(material),))
+            for component in components:
+                if len(component) < limits.minimum_samples:
+                    continue
+                my, mx = component.T
+                recess = float(np.median(depth[ys, xs])-np.median(depth[my, mx]))
+                if recess < .005 or (not background_opening and recess > .08):
+                    continue
+                contour = radial_contour
+                sample=np.linspace(0,len(mx)-1,min(24,len(mx))).astype(int)
+                samples=np.column_stack((mx[sample]+left,my[sample]+top)).astype(float)
+                fit=estimate(camera,contour,samples,limits=limits)
+                contour_basis = "radial_observed_boundary"
+                if fit.get("reason") == "contour_requires_ordered_strictly_convex_visible_polygon":
+                    refined = _observed_convex_contour(hole, left, top)
+                    if refined is not None:
+                        contour = refined
+                        contour_basis = "inscribed_observed_background_not_complete_boundary"
+                        fit = estimate(camera, contour, samples, limits=limits)
+                statistics = None
+                try:
+                    points = _material_points(camera,samples,limits,np.asarray(contour))
+                    centered=points-points.mean(axis=0)
+                    _,singular,axes=np.linalg.svd(centered,full_matrices=False)
+                    statistics=dict(sample_count=len(points),singular_values_m=singular.tolist(),
+                        principal_rms_span_m=(singular/np.sqrt(len(points))).tolist(),
+                        bbox_dimensions_m=np.ptp(points,axis=0).tolist(),
+                        maximum_plane_residual_m=float(np.max(np.abs(centered@axes[-1]))))
+                except (ValueError,np.linalg.LinAlgError):
+                    pass
+                result["candidates"].append(dict(contour_px=contour,material_px=samples.tolist(),
+                                                  depth_recess_m=recess,aperture=fit,sample_statistics=statistics,
+                                                  contour_basis=contour_basis,
+                                                  material_component_size=len(component),
+                                                  sampling_basis=("single_depth_connected_surface"
+                                                      if separate_material_surfaces else "combined_material_mask")))
+                if len(result["candidates"])>=8:break
+            if len(result["candidates"])>=8:break
+        if len(result["candidates"])>=8:break
+    accepted=[c for c in result["candidates"] if c["aperture"]["status"]=="candidate_not_motion_validated"]
+    result["candidate_search_truncated"] = len(result["candidates"]) >= 8
+    if len(accepted)==1:
+        result.update(status="geometric_candidate_semantics_unknown",reason="visible_depth_loop_requires_identity_review")
+    elif len(accepted)>1:
+        result["reason"]="ambiguous_depth_loops"
+    elif result["candidates"]:
+        result["reason"]="depth_loop_plane_or_contour_rejected"
+    return result
+
+
+def extract_handle_arch(observation, body_polygon_px, *, finger_boxes_tcp=None,
+                        finger_geometry_source=None, limits=Limits()):
+    """Exclude known robot volumes and the public primary body depth component.
+
+    Finger boxes are conservative [minimum,maximum] metre bounds expressed in
+    measured TCP coordinates, supplied from calibrated robot geometry. Never
+    infer these boxes from commanded closure or a TCP point. No simulator object
+    geometry is read, and hidden/removed contours are never completed.
+    """
+    result=dict(status="unavailable",reason="finger_geometry_unavailable",motion_authorized=False,
+                semantics="unknown",candidates=[],sample_count=0)
+    if finger_boxes_tcp is None or not isinstance(finger_geometry_source,str) or not finger_geometry_source.strip():
+        return result
+    boxes=np.asarray(finger_boxes_tcp,dtype=float)
+    if (boxes.ndim!=3 or boxes.shape[1:]!=(2,3) or not len(boxes)
+            or not np.isfinite(boxes).all() or np.any(boxes[:,0]>=boxes[:,1])):
+        raise ValueError("finger_envelopes_invalid")
+    camera=(observation.camera_frames or {}).get("perception_camera")
+    if camera is None or not observation.measured_tcp_poses:
+        result["reason"]="measured_tcp_or_public_rgbd_unavailable"
+        return result
+    from harness.perception.pose_grounding import _pose_matrix
+    from PIL import Image,ImageDraw
+    h,w=camera.depth_m.shape
+    polygon=_pixels(body_polygon_px,3,(h,w))
+    image=Image.new("1",(w,h))
+    ImageDraw.Draw(image).polygon([tuple(p) for p in polygon],fill=1)
+    body=np.asarray(image,dtype=bool)&(camera.depth_m>0)
+    if body.sum()<12:
+        result["reason"]="primary_body_depth_unavailable"
+        return result
+    body &= np.abs(camera.depth_m-np.median(camera.depth_m[body]))<=.03
+    components=list(depth_components(body))
+    if not components:
+        result["reason"]="primary_body_depth_unavailable"
+        return result
+    largest=max(components,key=len)
+    body[:]=False;body[largest[:,0],largest[:,1]]=True
+    foreground=(camera.depth_m>0)&(np.abs(camera.depth_m-np.median(camera.depth_m[body]))<=.06)
+    attached=np.zeros_like(body)
+    for component in depth_components(foreground):
+        if body[component[:,0],component[:,1]].any():
+            attached[component[:,0],component[:,1]]=True
+    y,x=np.mgrid[:h,:w]
+    rays=np.stack((x,y,np.ones_like(x)),axis=-1)@np.linalg.inv(camera.intrinsic).T
+    camera_points=rays*camera.depth_m[...,None]
+    camera_to_world=np.linalg.inv(camera.world_to_camera)
+    world=camera_points@camera_to_world[:3,:3].T+camera_to_world[:3,3]
+    world_to_tcp=np.linalg.inv(_pose_matrix(observation.measured_tcp_poses["right"]))
+    local=world@world_to_tcp[:3,:3].T+world_to_tcp[:3,3]
+    fingers=np.zeros((h,w),dtype=bool)
+    for low,high in boxes:
+        fingers |= np.all((local>=low)&(local<=high),axis=-1)&(camera.depth_m>0)
+    # Dilate exclusions for sample neighborhoods and one-pixel perturbation.
+    excluded=body|fingers
+    for _ in range(2):
+        previous=excluded.copy()
+        excluded[1:] |= previous[:-1];excluded[:-1] |= previous[1:]
+        excluded[:,1:] |= previous[:,:-1];excluded[:,:-1] |= previous[:,1:]
+    padding=48*max(1,w/320,h/240)
+    low=np.maximum([1,1],np.floor(polygon.min(0)-padding)).astype(int)
+    high=np.minimum([w-2,h-2],np.ceil(polygon.max(0)+padding)).astype(int)
+    found=depth_contrast_aperture(camera,tuple([*low,*high]),limits=limits,
+                                  exclusion_mask=excluded,background_opening=True,material_domain=attached)
+    found.update(finger_geometry_source=finger_geometry_source,
+                 excluded_finger_pixels=int(fingers.sum()),excluded_body_pixels=int(body.sum()),
+                 sample_count=sum((c.get("sample_statistics") or {}).get("sample_count",0)
+                                  for c in found["candidates"]))
+    return found
+
+
 def _pixels(values, minimum, shape):
     points = np.asarray(values, dtype=float)
     if (points.ndim != 2 or points.shape[1] != 2 or len(points) < minimum
@@ -194,6 +508,38 @@ def aperture_dimensions(camera, contour, plane_center, normal):
         systematic_measurement_error_bound_m=None)
 
 
+def inset_material_samples(camera, contour_px, material_px, *, limits=Limits()):
+    """Move at most two pixels into the local depth-consistent material interior.
+
+    Do not change sensitivity probes or cross the opening. Every chosen patch
+    must survive the original four cardinal probes on the same local surface.
+    Geometry/semantic validation of the resulting complete fit remains required.
+    """
+    contour = _pixels(contour_px, 8, camera.depth_m.shape)
+    pixels = _pixels(material_px, limits.minimum_samples, camera.depth_m.shape)
+    offsets = sorted(((x, y) for x in range(-2, 3) for y in range(-2, 3)
+                      if x*x+y*y <= 4), key=lambda p: (p[0]*p[0]+p[1]*p[1], p))
+    adjusted = []
+    for pixel in pixels:
+        original_depth = camera.sample_depth(*pixel, radius=1)
+        for offset in offsets:
+            candidate = pixel+offset
+            try:
+                if abs(camera.sample_depth(*candidate, radius=1)-original_depth) > .003:
+                    continue
+                probes = np.array([candidate+delta for delta in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1))])
+                _material_points(camera, probes, limits, contour)
+            except ValueError:
+                continue
+            adjusted.append(candidate)
+            break
+        else:
+            raise ValueError("surface_consistent_material_inset_unavailable")
+    if len(np.unique(np.rint(adjusted), axis=0)) != len(pixels):
+        raise ValueError("duplicate_depth_samples")
+    return np.asarray(adjusted).tolist()
+
+
 def estimate(camera, contour_px, material_px, *, limits=Limits(), allow_demo_override=False):
     """Fit visible material, intersect contour rays, and quantify sensitivity.
 
@@ -237,6 +583,7 @@ def estimate(camera, contour_px, material_px, *, limits=Limits(), allow_demo_ove
         largest_gap = float(np.max(np.diff(np.r_[angles, angles[0]+2*np.pi])))
         result["uncertainty"]["material_angular_gap_deg"] = float(np.degrees(largest_gap))
         singular = np.linalg.svd(points-points.mean(axis=0), compute_uv=False)
+        result["geometry_diagnostics"]["principal_rms_span_m"] = (singular/np.sqrt(len(points))).tolist()
         condition = float(singular[0]/singular[1])
         spread = 360.-float(np.degrees(largest_gap))
         result["uncertainty"].update(visible_arch_spread_deg=spread, plane_condition_number=condition)

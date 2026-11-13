@@ -43,6 +43,32 @@ class OptionErrorTests(unittest.TestCase):
     def test_perception_factory_requires_rgbd_capture(self):
         self.assertIn("rgbd_enabled", option_error(cli(perception_factory="m:f"), RunSettings()))
 
+    def test_depth_pose_anchors_need_a_perception_provider(self):
+        settings = RunSettings.model_validate({"perception": {"rgbd_enabled": True, "depth_pose_anchors": True}})
+
+        self.assertEqual(option_error(cli(), settings), "perception.depth_pose_anchors requires --perception-factory")
+
+    def test_depth_pose_anchors_use_the_depth_rack_frame_when_the_planner_can_ground_the_handle(self):
+        from harness.perception.anchors import AnchorRegistry
+        from harness.perception.grounding import RGBDPerceptionProvider
+        from harness.perception.hang_targets import DepthRackFrame
+
+        anchors = AnchorRegistry()
+        perception = RGBDPerceptionProvider(SimpleNamespace(detect=lambda *args, **kwargs: ()), anchors)
+        anthropic = SimpleNamespace(client=SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs: None)),
+                                    settings=SimpleNamespace(model="model"))
+        scripted = SimpleNamespace()
+
+        _predicates, with_client = assembly.public_perception_evidence(
+            perception, SimpleNamespace(), anchors, planner=anthropic, depth_pose_anchors=True)
+        _predicates, without_client = assembly.public_perception_evidence(
+            perception, SimpleNamespace(), anchors, planner=scripted, depth_pose_anchors=True)
+
+        self.assertIsInstance(with_client.hang_target_cache, DepthRackFrame)
+        self.assertTrue(with_client.depth_pose_anchors)
+        self.assertIsNone(without_client.hang_target_cache)
+        self.assertTrue(without_client.depth_pose_anchors)
+
     def test_full_task_scope_requires_anthropic_planner(self):
         settings = RunSettings.model_validate(
             {"anthropic": {"model": "claude-test", "task_scope": "full_task"}})

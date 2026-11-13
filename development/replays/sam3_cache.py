@@ -24,6 +24,7 @@ from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.perception.replay import load_public_observation
 
 CACHE_FILE = "sam3_cache.json"
+PARTIAL_CACHE_FILE = "sam3_cache.partial.json"
 # The full-task configs use the "mug rack" prompt (configs/*rgbd*.yaml).
 DEFAULT_RACK_PROMPT_PROFILE = "explore_mug_rack"
 

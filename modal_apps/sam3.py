@@ -34,7 +34,8 @@ RACK_PROFILES = {"default": ("rack", 0.60),
                  "explore_mug_rack": ("mug rack", 0.18)}
 # The camera name only labels the request; the policy cameras plus
 # harness.environment.layout.PERCEPTION_CAMERAS (this image does not ship the harness).
-CAMERAS = frozenset({"head_camera", "left_camera", "right_camera", "perception_camera"})
+CAMERAS = frozenset({"head_camera", "left_camera", "right_camera", "perception_camera",
+                     "perception_reverse_camera"})
 REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements"
 
 

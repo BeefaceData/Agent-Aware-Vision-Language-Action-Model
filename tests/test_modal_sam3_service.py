@@ -9,6 +9,12 @@ class ModalSam3ServiceTests(unittest.TestCase):
         validate_detection_request(b"encoded-image", 0, "perception_camera",
                                    "explore_mug_rack", True)
 
+    def test_server_accepts_every_harness_camera(self):
+        # The SAM 3 image does not ship the harness, so its list is a copy.
+        from harness.environment.layout import CAMERAS as POLICY_CAMERAS, PERCEPTION_CAMERAS
+        from modal_apps.sam3 import CAMERAS as SERVER_CAMERAS
+        self.assertLessEqual(set(POLICY_CAMERAS) | set(PERCEPTION_CAMERAS), set(SERVER_CAMERAS))
+
     def test_rejections_identify_the_invalid_field(self):
         valid = [b"encoded-image", 0, "perception_camera", "explore_mug_rack", True]
         for index, value, code in ((0, b"", "image_bytes"), (1, True, "observation_sequence"),

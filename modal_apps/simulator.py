@@ -469,7 +469,9 @@ def hanging_recovery(model: str, package: str = "data/runs/hang_replay_candidate
 
 
 @app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
-              timeout=80 * 60, retries=0, max_containers=1, single_use_containers=True,
+              # 75-minute run cap plus 30 minutes for start-up, video and the
+              # volume commit, so a hard kill never skips saving the run.
+              timeout=(75 + 30) * 60, retries=0, max_containers=1, single_use_containers=True,
               secrets=[modal.Secret.from_name("anthropic")])
 def run_supervised_hanging(run_id: str, options: dict):
     sys.path.insert(0, "/root")

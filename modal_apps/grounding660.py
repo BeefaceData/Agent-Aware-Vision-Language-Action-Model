@@ -89,11 +89,16 @@ def parse_observations(value=""):
     return selected
 
 
-def saved_geometry_gates(observation, report):
-    """Measure unreviewed proposals without entry, fixture or motion overrides."""
+def saved_geometry_gates(observation, report, *, agree=None, rack_reference=None):
+    """Measure unreviewed proposals without entry, fixture or motion overrides.
+
+    ``agree(aperture)`` returns the runtime's two-frame agreement for an aperture
+    that passed; ``rack_reference`` is the provider's kept rack reference.
+    """
     import numpy as np
     from development.hanging.aperture_frame import estimate, inset_material_samples
-    from development.hanging.public_provider import measured_bounds
+    from development.hanging.public_provider import (MINIMUM_PROPOSAL_CONFIDENCE, SELF_CONFIRMED_CONFIDENCE,
+                                                     measured_bounds)
     from harness.perception.pose_grounding import grounded_frame_from_pixels, measured_peg_centerline, _pose_matrix
 
     camera = observation.camera_frames["perception_camera"]
@@ -131,11 +136,17 @@ def saved_geometry_gates(observation, report):
                      reason="validated_aperture_required", fixture="not_supplied",
                      rack_reference="current_frame_only")
     aperture_ok = aperture["status"] == "candidate_not_motion_validated"
-    semantics_ok = (report.confidence >= .85 and report.complete_visible_opening
+    # Same rule as the runtime: one frame at high model confidence, otherwise
+    # agreement with an earlier frame's opening after the measured TCP motion.
+    agreement = (agree(aperture) if aperture_ok and agree is not None
+                 else dict(status="not_evaluated"))
+    confident = (report.confidence >= SELF_CONFIRMED_CONFIDENCE
+                 or (report.confidence >= MINIMUM_PROPOSAL_CONFIDENCE and agreement["status"] == "agreed"))
+    semantics_ok = (confident and report.complete_visible_opening
                     and report.body_polygon_px is not None)
     if aperture_ok and semantics_ok:
         try:
-            bounds = measured_bounds(observation, report, aperture)
+            bounds = measured_bounds(observation, report, aperture, rack_reference=rack_reference)
             clearance.update(status="validated", clearance_validated=True,
                 reason="visible_optical_clearance_only", bounds=bounds)
         except ValueError as exc:
@@ -156,6 +167,8 @@ def saved_geometry_gates(observation, report):
     if clearance["status"] != "validated":
         blockers.append(clearance["reason"])
     return dict(aperture=aperture, material_inset=inset, peg=peg, clearance=clearance,
+        two_frame_agreement=agreement,
+        rack_reference_sequence=None if rack_reference is None else rack_reference[0].sequence,
         recovery_eligibility=dict(status="unavailable", blockers=list(dict.fromkeys(blockers))),
         motion_authorized=False, proposal_review="unreviewed_model_proposal")
 
@@ -217,7 +230,11 @@ def saved_crop_files(archives, model, *, client=None):
                     result = provider.crop_geometry(observation, report) if row["crop_needed"] else report
                     row["crop_attempted"] = shared.requests > before_crop
                     row["mapped_proposal"] = result.model_dump(mode="json")
-                    row.update(saved_geometry_gates(observation, result))
+                    tcp = (observation.measured_tcp_poses or {}).get("right")
+                    agree = None if tcp is None else (
+                        lambda aperture, o=observation, t=tcp: provider._aperture_agrees(o, t, aperture))
+                    row.update(saved_geometry_gates(observation, result, agree=agree,
+                        rack_reference=provider._current_rack_reference(observation)))
                     row["peg_keypoints_available"] = result.peg_keypoints_px is not None
                     picture = Image.fromarray(observation.images["perception_camera"])
                     draw = ImageDraw.Draw(picture)

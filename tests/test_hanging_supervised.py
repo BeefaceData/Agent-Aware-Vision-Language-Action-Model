@@ -951,8 +951,12 @@ class SupervisedHangingTests(unittest.TestCase):
             handle_back=SurfacePixel(camera="right_camera", uv=(50., 50.-20./.992))))
         bounds = measured_bounds(observation, report, aperture)
         self.assertAlmostEqual(bounds["handle_thickness_m"], .008, places=6)
-        self.assertGreater(bounds["peg_radius_m"], .001)
-        self.assertLess(bounds["peg_radius_m"], .002)
+        self.assertGreaterEqual(bounds["measured_peg_radius_m"], .001)
+        self.assertLess(bounds["measured_peg_radius_m"], .002)
+        # A reading below the physical peg radius never enlarges the clearance.
+        from development.hanging.public_provider import PHYSICAL_PEG_RADIUS_M
+        self.assertGreaterEqual(bounds["peg_radius_m"], PHYSICAL_PEG_RADIUS_M)
+        self.assertEqual(bounds["peg_radius_basis"], "physical_fixture_radius_floor")
         self.assertEqual(bounds["systematic_calibration_error"], "unknown")
         self.assertIn("public_registration",bounds)
         import json
@@ -1102,6 +1106,25 @@ class SupervisedHangingTests(unittest.TestCase):
                 self.assertEqual(hook.attempts,0)
                 self.assertNotIn("clearance_validated",result)
                 recover.assert_not_called()
+
+    def test_awaiting_agreement_or_rack_reference_waits_like_hidden_opening(self):
+        for reason in ("aperture_awaiting_two_frame_agreement", "validated_rack_reference_unavailable"):
+            with self.subTest(reason=reason):
+                environment=PublicEnvironment(x=0.);environment.sequence=400
+                provider=Mock()
+                provider.evaluate.return_value=PredicateResult(name="right_mug_lifted",value=True,
+                    source="perception",observation_sequence=400,reason="synthetic grasp")
+                provider.lift_current.return_value=True
+                provider.propose.return_value=runtime.ProposalResult("unknown",reason)
+                hook=HangingRecoveryHook(environment,provider,Mock(),episode_id="episode",
+                    deadline=time.monotonic()+10,log=lambda event:None,pause_policy_on_entry=False)
+                with patch("development.hanging.supervised.recover_current") as recover:
+                    result=hook.consider(PlannerSelection(SkillCommand(action="vla_act"),"HANG"),
+                        environment.observe(),
+                        remaining=dict(policy_actions=500,vla_chunks=30,skill_calls=10,analytic_ticks=12000))
+                    self.assertEqual(result["status"],"recovery_deferred")
+                    self.assertIn("policy_command",result)
+                    recover.assert_not_called()
 
     def test_visibility_wait_never_retries_rejected_geometry(self):
         environment=PublicEnvironment(x=0.);environment.sequence=400
@@ -1373,8 +1396,10 @@ class DirectPublicGeometryTests(unittest.TestCase):
         rear_extrinsic = np.diag([-1.,1.,-1.,1.])
         rear_extrinsic[0,3],rear_extrinsic[2,3] = translation,2.
         back = RGBDCamera(np.full(front.depth_m.shape,.98,np.float32),front.intrinsic,rear_extrinsic)
+        # A real observation always carries the three policy cameras.
         observation = replace(observation,
-            images={**observation.images,"right_camera":observation.images["perception_camera"]},
+            images={**{name: observation.images["perception_camera"] for name in CAMERAS},
+                    **observation.images},
             camera_frames={**observation.camera_frames,"right_camera":back})
         report = visible().model_copy(update=dict(complete_visible_opening=True,
             contour_px=proposal.contour_px.tolist(),material_px=proposal.material_px.tolist(),
@@ -1397,7 +1422,7 @@ class DirectPublicGeometryTests(unittest.TestCase):
                     # perception-only channel, not a changed policy camera.
                     images = dict(observation.images)
                     frames = dict(observation.camera_frames)
-                    images["perception_reverse_camera"] = images.pop("right_camera")
+                    images["perception_reverse_camera"] = images["right_camera"]
                     frames["perception_reverse_camera"] = frames.pop("right_camera")
                     observation = replace(observation,images=images,camera_frames=frames)
                     report = report.model_copy(update={"handle_back":SurfacePixel(
@@ -1433,6 +1458,52 @@ class DirectPublicGeometryTests(unittest.TestCase):
         np.testing.assert_allclose(targets_by_case[1]["rack_seat"][:3]-targets_by_case[0]["rack_seat"][:3],
                                    [.08,0.,0.],atol=1e-7)
 
+    def test_low_confidence_opening_needs_a_second_agreeing_frame(self):
+        from harness.perception.pose_grounding import _matrix_pose
+        observation,report,tcp = self.scene()
+        report = report.model_copy(update={"confidence": .7})
+        provider = PublicRGBDHangingProvider(Mock(),model="offline",episode_id="direct-test",
+            store=Mock(),log=lambda _:None)
+        grasp = PredicateResult(name="right_mug_lifted",value=True,source="perception",
+            observation_sequence=17,reason="Synthetic grasp")
+        with patch.object(provider,"observe",return_value=report),patch.object(provider,"evaluate",return_value=grasp):
+            first = provider.propose(observation,tcp,episode_id="direct-test")
+        self.assertEqual((first.status,first.reason),("unknown","aperture_awaiting_two_frame_agreement"))
+        self.assertIsNone(first.proposal)
+        # Direct agreement checks: the opening moves rigidly with the measured TCP.
+        def pose(x):
+            frame = np.eye(4); frame[:3,3] = (x,0.,1.)
+            return dict(frame_pose_world_wxyz=list(_matrix_pose(frame)))
+        def tcp_at(x):
+            return (x,0.,.9,1.,0.,0.,0.)
+        later = lambda seq: replace(observation,sequence=seq)
+        provider._aperture_candidate = None
+        self.assertEqual(provider._aperture_agrees(later(20),tcp_at(0.),pose(0.))["status"],"awaiting_second_frame")
+        agreed = provider._aperture_agrees(later(24),tcp_at(.02),pose(.022))
+        self.assertEqual(agreed["status"],"agreed",agreed)
+        self.assertEqual(provider._aperture_agrees(later(28),tcp_at(.04),pose(.052))["status"],"disagreed")
+        far = provider._aperture_agrees(later(28+provider.lift_evidence_max_gap+1),tcp_at(.04),pose(.04))
+        self.assertEqual(far["status"],"awaiting_second_frame")
+
+    def test_first_validated_rack_reference_is_kept(self):
+        observation,report,tcp = self.scene()
+        provider = PublicRGBDHangingProvider(Mock(),model="offline",episode_id="direct-test",
+            store=Mock(),log=lambda _:None)
+        provider._cache_rack(observation,report)
+        kept = provider._current_rack_reference(observation)
+        self.assertIsNotNone(kept)
+        moved = report.model_copy(update={"peg_keypoints_px":[(16.,15.),(66.,15.),(16.,30.)]})
+        provider._cache_rack(replace(observation,sequence=18),moved)
+        self.assertIs(provider._current_rack_reference(replace(observation,sequence=18)),kept)
+        # A low-confidence peg alone is never kept: it needs an agreeing second frame.
+        fresh = PublicRGBDHangingProvider(Mock(),model="offline",episode_id="direct-test",
+            store=Mock(),log=lambda _:None)
+        unsure = report.model_copy(update={"peg_confidence":.6})
+        fresh._cache_rack(observation,unsure)
+        self.assertIsNone(fresh._current_rack_reference(observation))
+        fresh._cache_rack(replace(observation,sequence=18),unsure)
+        self.assertIsNotNone(fresh._current_rack_reference(replace(observation,sequence=18)))
+
     def test_missing_opposing_faces_or_peg_width_never_produces_a_target_proposal(self):
         observation,report,tcp = self.scene()
         for changes in ({"handle_back":None},{"peg_width_px":None},{"opposite_handle_faces_visible":False}):
@@ -1445,7 +1516,10 @@ class DirectPublicGeometryTests(unittest.TestCase):
                         provider,"evaluate",return_value=grasp):
                     result = provider.propose(observation,tcp,episode_id="direct-test")
                 self.assertEqual(result.status,"unknown")
-                self.assertEqual(result.reason,"visible_thickness_and_peg_cross_section_required")
+                # Without a peg width no rack reference can be kept at all.
+                expected = ("validated_rack_reference_unavailable" if "peg_width_px" in changes
+                            else "visible_thickness_and_peg_cross_section_required")
+                self.assertEqual(result.reason,expected)
                 self.assertIsNone(result.proposal)
 
 

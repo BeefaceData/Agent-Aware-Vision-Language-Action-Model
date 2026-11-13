@@ -62,6 +62,18 @@ class VisibleHangingReport(Model):
 # Lift carried forward from an earlier corroborated frame, not this frame's evidence.
 LIFT_PERSISTENCE_REASON = "bounded_temporal_lift_persistence"
 
+# Model confidence is not calibrated. A geometry proposal scored at least
+# SELF_CONFIRMED_CONFIDENCE stands on one frame, as before. A proposal scored
+# between MINIMUM_PROPOSAL_CONFIDENCE and that must instead be confirmed by an
+# independent second frame whose depth geometry agrees: the handle opening
+# after allowing for the measured TCP motion (rigid grasp), the static peg
+# directly. The agreement limits equal the estimator's own default 5 mm centre
+# and 5 degree normal sensitivity limits.
+SELF_CONFIRMED_CONFIDENCE = .85
+MINIMUM_PROPOSAL_CONFIDENCE = .5
+AGREEMENT_CENTER_M = .005
+AGREEMENT_NORMAL_DEG = 5.
+
 PUBLIC_PROMPT ="""Report only visible public image evidence; never robot actions,
 world coordinates, object dimensions, hidden geometry or simulator state.
 Images are labeled by camera, observation and pixel size. Full-resolution UV
@@ -602,6 +614,10 @@ def measured_bounds(observation, report, aperture, *, rack_reference=None, fixtu
     radius_error = (first_error+second_error)/2
     if radius <= radius_error or abs(width_vector@axis) > first_error+second_error:
         raise ValueError("peg_radius_subpixel_or_wrong_cross_section")
+    # Edge depth tends to read a thin peg narrow. Never let a measurement below
+    # the rack fixture's physical radius enlarge the computed clearance.
+    measured_radius = radius
+    radius = max(radius, PHYSICAL_PEG_RADIUS_M)
     front, front_error = read_surface(observation, report.handle_front)
     back, back_error = read_surface(observation, report.handle_back)
     frame = _pose_matrix(aperture["frame_pose_world_wxyz"])
@@ -634,6 +650,9 @@ def measured_bounds(observation, report, aperture, *, rack_reference=None, fixtu
     registration["pose_world_wxyz"] = np.asarray(registration["pose_world_wxyz"]).tolist()
     return dict(handle_thickness_m=thickness, thickness_uncertainty_m=thickness_error,
         peg_radius_m=radius+radius_error, peg_radius_uncertainty_m=radius_error,
+        measured_peg_radius_m=measured_radius,
+        peg_radius_basis=("measured" if measured_radius >= PHYSICAL_PEG_RADIUS_M
+                          else "physical_fixture_radius_floor"),
         peg_length_m=length, radial_clearance_m=gap, axial_clearance_m=axial,
         position_uncertainty_m=max(seat_error, tip_error)+registration["position_sensitivity_m"],
         orientation_uncertainty_rad=float(np.arctan2(seat_error+tip_error, length)),
@@ -669,6 +688,7 @@ class PublicRGBDHangingProvider:
         self._geometry_retry_key = self._geometry_retry_report = None
         self._rack_reference = None
         self._rack_reference_episode = None
+        self._peg_candidate = self._aperture_candidate = None
         self._lift_corroboration = {"status": "unknown", "reason": "not_evaluated"}
         self.lift_evidence_max_gap = lift_evidence_max_gap
         self.table_plane_max_age = table_plane_max_age
@@ -854,17 +874,68 @@ class PublicRGBDHangingProvider:
                 fixture_axis(observation, report.peg_keypoints_px)
                 minimum_confidence = 0.
             else:
-                if confidence < .85 or not report.peg_keypoints_px or not report.peg_width_px:
+                if (confidence < MINIMUM_PROPOSAL_CONFIDENCE
+                        or not report.peg_keypoints_px or not report.peg_width_px):
                     return
                 for uv in (*report.peg_keypoints_px, *report.peg_width_px):
                     read_surface(observation, SurfacePixel(camera="perception_camera", uv=uv))
-                minimum_confidence = .85
+                camera = observation.camera_frames["perception_camera"]
+                # The width must give a real mid-shaft cross-section here, not
+                # only later in measured_bounds, before this frame can be kept.
+                measured_peg_centerline(camera, report.peg_keypoints_px, report.peg_width_px)
+                if self._rack_reference is not None:
+                    return  # The rack is static: keep the first validated reference.
+                if confidence < SELF_CONFIRMED_CONFIDENCE and not self._peg_agrees(observation, report):
+                    return
+                minimum_confidence = MINIMUM_PROPOSAL_CONFIDENCE
             StaticRackFrameCache(minimum_confidence=minimum_confidence).cache(
                 observation, self._rack_report(observation, report))
         except (ValueError, TypeError):
             return
         self._rack_reference = (observation.copy(), report)
         self._rack_reference_episode = self.episode_id
+        self.log(dict(event_type="rack_reference_kept", observation_sequence=observation.sequence,
+                      peg_confidence=confidence))
+
+    def _peg_agrees(self, observation, report):
+        """Two frames' peg seat and tip coincide in the world (the rack is static)."""
+        camera = observation.camera_frames["perception_camera"]
+        seat, tip = (np.asarray(camera.unproject(*uv, radius=1), dtype=float)
+                     for uv in report.peg_keypoints_px[:2])
+        identity = (self.episode_id, calibration_sha256(camera))
+        previous, self._peg_candidate = self._peg_candidate, (identity, observation.sequence, seat, tip)
+        if previous is None or previous[0] != identity or not 0 < observation.sequence-previous[1]:
+            return False
+        error = max(float(np.linalg.norm(seat-previous[2])), float(np.linalg.norm(tip-previous[3])))
+        agreed = error <= AGREEMENT_CENTER_M
+        self.log(dict(event_type="peg_two_frame_agreement", observation_sequence=observation.sequence,
+                      previous_sequence=previous[1], landmark_error_m=error, agreed=agreed))
+        return agreed
+
+    def _aperture_agrees(self, observation, measured_tcp, aperture):
+        """This frame's opening matches the previous one moved by the measured TCP motion."""
+        camera = observation.camera_frames["perception_camera"]
+        if aperture.get("frame_pose_world_wxyz") is None:
+            return dict(status="aperture_frame_unavailable", observation_sequence=observation.sequence)
+        frame = _pose_matrix(aperture["frame_pose_world_wxyz"])
+        tcp = _pose_matrix(measured_tcp)
+        identity = (self.episode_id, calibration_sha256(camera))
+        previous = self._aperture_candidate
+        self._aperture_candidate = (identity, observation.sequence, tcp, frame[:3, 3].copy(), frame[:3, 0].copy())
+        result = dict(status="awaiting_second_frame", observation_sequence=observation.sequence)
+        if (previous is None or previous[0] != identity
+                or not 0 < observation.sequence-previous[1] <= self.lift_evidence_max_gap):
+            return result
+        _, sequence, old_tcp, old_center, old_normal = previous
+        delta = tcp @ np.linalg.inv(old_tcp)
+        predicted_center = delta[:3, :3] @ old_center + delta[:3, 3]
+        predicted_normal = delta[:3, :3] @ old_normal
+        center_error = float(np.linalg.norm(frame[:3, 3]-predicted_center))
+        normal_error = float(np.degrees(np.arccos(np.clip(abs(predicted_normal @ frame[:3, 0]), 0., 1.))))
+        agreed = center_error <= AGREEMENT_CENTER_M and normal_error <= AGREEMENT_NORMAL_DEG
+        result.update(status="agreed" if agreed else "disagreed", previous_sequence=sequence,
+                      center_error_m=center_error, normal_error_deg=normal_error)
+        return result
 
     @staticmethod
     def _rack_report(observation, report):
@@ -1249,9 +1320,13 @@ class PublicRGBDHangingProvider:
             return ProposalResult("rejected", "right_arm_not_holding_mug")
         if self.evaluate("right_mug_lifted", observation, arm="right").value is not True:
             return ProposalResult("unknown", "public_hanging_entry_not_confirmed")
+        if self.fixture is None and self._current_rack_reference(observation) is None:
+            # observe() normally offers each new frame's peg already; a crop
+            # below carries no peg fields, so offer the full-frame report here.
+            self._cache_rack(observation, report)
         if self.needs_geometry_crop(report):
             report = self.crop_geometry(observation, report)
-        if (report.confidence < .85 or not report.complete_visible_opening
+        if (report.confidence < MINIMUM_PROPOSAL_CONFIDENCE or not report.complete_visible_opening
                 or report.contour_px is None or report.material_px is None or report.body_polygon_px is None):
             return ProposalResult("unknown", "complete_visible_aperture_unavailable")
         camera = observation.camera_frames["perception_camera"]
@@ -1265,10 +1340,18 @@ class PublicRGBDHangingProvider:
                 return ProposalResult("rejected", str(exc))
         if aperture["status"] != "candidate_not_motion_validated":
             return ProposalResult("rejected", aperture["reason"])
+        agreement = self._aperture_agrees(observation, measured_tcp, aperture)
+        self.log(dict(event_type="aperture_two_frame_agreement", geometry_confidence=report.confidence,
+                      self_confirmed=report.confidence >= SELF_CONFIRMED_CONFIDENCE, **agreement))
+        if report.confidence < SELF_CONFIRMED_CONFIDENCE and agreement["status"] != "agreed":
+            return ProposalResult("unknown", "aperture_awaiting_two_frame_agreement")
         try:
             cached_rack = self._current_rack_reference(observation)
-            rack_reference = (cached_rack if self.fixture is not None else
-                              (None if report.peg_keypoints_px and report.peg_width_px else cached_rack))
+            if self.fixture is None and cached_rack is None:
+                # Only a validated, kept rack reference supplies the peg; the
+                # current frame's own peg qualifies through _cache_rack first.
+                return ProposalResult("unknown", "validated_rack_reference_unavailable")
+            rack_reference = cached_rack
             fixture = self._fixture_for(observation)
             if isinstance(self.fixture, VerifiedFixtureAssets) and not report.opposite_handle_faces_visible:
                 registration = register_public_fixture(observation, report, fixture,

@@ -247,10 +247,13 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 result, environment, calls, checks, events = self.run_wiring(sequence)
                 self.assertEqual(list(result["stages"]), ["approach", "seat", "release", "retreat"])
                 self.assertTrue(all(stage["completed"] for stage in result["stages"].values()))
-                self.assertEqual(calls[0][0], sequence)
-                self.assertGreater(calls[1][0], sequence)
-                self.assertFalse(np.array_equal(calls[0][1], calls[1][1]))
+                # One fit at approach; the seat reuses it after confirming the
+                # handle moved rigidly with the measured TCP in a fresh image.
+                self.assertEqual([call[0] for call in calls], [sequence])
                 self.assertEqual(checks, 1)
+                reuse = [e for e in events if e.get("event_type") == "aperture_target_reuse"]
+                self.assertEqual(len(reuse), 1)
+                self.assertGreater(reuse[0]["observation_sequence"], sequence)
                 self.assertEqual(result["seat_settling"]["ticks"], 25)
                 self.assertEqual(result["public_support"], "unknown")
                 self.assertEqual(result["retention"]["status"], "unknown")
@@ -258,15 +261,22 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 self.assertEqual(result["post_retreat_observation_only_ticks"], 250)
                 self.assertEqual(result["analytic_ticks"], environment.ticks)
 
-    def test_fresh_grasp_or_depth_loss_prevents_seating_opening_and_retreat(self):
-        for options, reason in [({"reject_after_approach": True}, "right_arm_grasp_unknown"),
-                                ({"depth_failure": True}, "insufficient_visible_handle_support")]:
-            with self.subTest(options=options):
-                result, environment, calls, checks, events = self.run_wiring(81, **options)
-                self.assertEqual(list(result["stages"]), ["approach"])
-                self.assertEqual(result["reason"], reason)
-                self.assertEqual(result["stopped_at"], "seat")
-                self.assertEqual(environment.arms["right"]["gripper"], 0.)
+    def test_untracked_handle_prevents_seating_opening_and_retreat(self):
+        # A slipped or lost grasp leaves the handle away from where the rigid
+        # TCP prediction puts it, so the fresh-image confirmation rejects.
+        result, environment, calls, checks, events = self.run_wiring(81, depth_failure=True)
+        self.assertEqual(list(result["stages"]), ["approach"])
+        self.assertEqual(result["reason"], "insufficient_visible_handle_support")
+        self.assertEqual(result["stopped_at"], "seat")
+        self.assertEqual(environment.arms["right"]["gripper"], 0.)
+        self.assertEqual(len(calls), 1)
+
+    def test_seat_does_not_depend_on_refitting_the_handle_near_the_rack(self):
+        # Before the fix a second full fit was required for the seat; a hidden
+        # opening near the rack then stopped recovery although tracking held.
+        result, environment, calls, checks, events = self.run_wiring(81, reject_after_approach=True)
+        self.assertEqual(list(result["stages"]), ["approach", "seat", "release", "retreat"])
+        self.assertEqual(len(calls), 1)
 
     def test_alignment_loss_during_opening_stops_before_retreat(self):
         result, environment, calls, checks, events = self.run_wiring(81, lose_alignment=True)

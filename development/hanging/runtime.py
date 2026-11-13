@@ -190,16 +190,43 @@ def recover_current(environment, store, *, episode_id, deadline, provider=None, 
     anchors = AnchorRegistry()
     gate = RackSeatReleaseGate(environment, position_tolerance_m=.005,
                               orientation_tolerance_rad=.05, unavailable_is_false=True)
-    initial_material = initial_tcp = None
+    initial_material = initial_tcp = initial_targets = initial_camera = None
     assessment = dict(status="unknown", reason="entry_not_assessed")
 
+    def confirm_tracking(observation, measured_tcp):
+        # Predict where the first fit's handle material is now, assuming it
+        # moved rigidly with the measured TCP, and confirm it in this image.
+        delta = _pose_matrix(measured_tcp) @ np.linalg.inv(initial_tcp)
+        expected = initial_material @ delta[:3, :3].T + delta[:3, 3]
+        camera = observation.camera_frames[initial_camera]
+        xyz = expected @ camera.world_to_camera[:3, :3].T + camera.world_to_camera[:3, 3]
+        if np.any(xyz[:, 2] <= 0):
+            raise ValueError("tracked_aperture_behind_camera")
+        uv = xyz @ camera.intrinsic.T
+        confirmation = confirm_visible_handle(camera, uv[:, :2]/uv[:, 2, None], expected)
+        log(dict(event_type="fresh_handle_confirmation", observation_sequence=observation.sequence,
+                 measured_tcp_pose=np.asarray(measured_tcp).tolist(), confirmation=confirmation))
+        if confirmation["status"] != "confirmed_visible_subset":
+            raise ValueError(confirmation["reason"])
+
     def prepare(command, observation):
-        nonlocal initial_material, initial_tcp, assessment
+        nonlocal initial_material, initial_tcp, initial_targets, initial_camera, assessment
         if command.action.value != "move_to":
             return None
         if time.monotonic() >= deadline:
             raise ValueError("recovery_time_limit")
         measured_tcp = environment.arm_state("right")["pose"]
+        if initial_targets is not None:
+            # Seat and later moves reuse the first validated fit. With a rigid
+            # grasp its TCP targets stay valid as the hand moves, so the seat
+            # never depends on refitting a handle that is partly hidden near the
+            # rack; the fresh image only confirms the handle moved with the hand.
+            confirm_tracking(observation, measured_tcp)
+            for name, pose in initial_targets.items():
+                anchors.bind(name, "right", Anchor(tuple(pose), observation.sequence, source="perception"))
+            log(dict(event_type="aperture_target_reuse", observation_sequence=observation.sequence,
+                     basis="first validated fit; rigid grasp confirmed in current image"))
+            return anchors.resolve(command.parameters.target, "right", observation)
         try:
             proposed = provider.propose(observation, np.asarray(measured_tcp).copy(), episode_id=episode_id)
         except Exception as exc:
@@ -212,26 +239,13 @@ def recover_current(environment, store, *, episode_id, deadline, provider=None, 
         if grounded.status != "confirmed":
             raise ValueError(grounded.reason)
         geometry = grounded.geometry
-        current_tcp = _pose_matrix(measured_tcp)
-        if initial_material is None:
-            initial_material = np.asarray(geometry.aperture["material_points_world"])
-            initial_tcp = current_tcp
-        else:
-            delta = current_tcp @ np.linalg.inv(initial_tcp)
-            expected = initial_material @ delta[:3, :3].T + delta[:3, 3]
-            camera = observation.camera_frames[geometry.proposal.camera]
-            xyz = expected @ camera.world_to_camera[:3, :3].T + camera.world_to_camera[:3, 3]
-            if np.any(xyz[:, 2] <= 0):
-                raise ValueError("tracked_aperture_behind_camera")
-            uv = xyz @ camera.intrinsic.T
-            confirmation = confirm_visible_handle(camera, uv[:, :2]/uv[:, 2, None], expected)
-            log(dict(event_type="fresh_handle_confirmation", observation_sequence=observation.sequence,
-                     measured_tcp_pose=np.asarray(measured_tcp).tolist(), confirmation=confirmation))
-            if confirmation["status"] != "confirmed_visible_subset":
-                raise ValueError(confirmation["reason"])
         targets, evidence = aperture_targets(observation, geometry.aperture, geometry.rack_pose,
                                              measured_tcp, geometry.proposal.mating_prior,
                                              clearance_model="rss_sensitivity")
+        initial_material = np.asarray(geometry.aperture["material_points_world"])
+        initial_tcp = _pose_matrix(measured_tcp)
+        initial_camera = geometry.proposal.camera
+        initial_targets = dict(targets)
         for name, pose in targets.items():
             anchors.bind(name, "right", Anchor(tuple(pose), observation.sequence, source="perception"))
         log(dict(event_type="aperture_target_preparation", observation_sequence=observation.sequence,

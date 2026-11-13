@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from harness.perception.pose_grounding import (
-    grounded_frame_from_pixels, tcp_targets_for_mug_alignment,
+    frame_from_axes, grounded_frame_from_pixels, tcp_targets_for_mug_alignment,
 )
 from harness.perception.rgbd import RGBDCamera
 
@@ -23,6 +23,18 @@ def matrix(pose):
 
 
 class PoseGroundingTests(unittest.TestCase):
+    def test_a_frame_from_axes_keeps_x_and_puts_y_in_the_given_plane(self):
+        transform = matrix(frame_from_axes((1., 2., 3.), (2., 0., 0.), (1., 0., 1.)))
+
+        np.testing.assert_allclose(transform[:3, 3], (1., 2., 3.))
+        np.testing.assert_allclose(transform[:3, 0], (1., 0., 0.), atol=1e-9)
+        np.testing.assert_allclose(transform[:3, 1], (0., 0., 1.), atol=1e-9)
+        np.testing.assert_allclose(transform[:3, 2], (0., -1., 0.), atol=1e-9)  # x cross y
+
+    def test_a_frame_from_parallel_axes_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "degenerate_frame_axes"):
+            frame_from_axes((0., 0., 0.), (1., 0., 0.), (2., 0., 0.))
+
     def test_ordered_rgbd_keypoints_make_a_right_handed_world_frame(self):
         frame = grounded_frame_from_pixels(camera(),
             [(40., 40.), (42., 40.), (40., 42.)])

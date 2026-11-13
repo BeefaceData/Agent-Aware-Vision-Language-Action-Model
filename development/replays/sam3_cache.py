@@ -24,6 +24,7 @@ from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.perception.replay import load_public_observation
 
 CACHE_FILE = "sam3_cache.json"
+PARTIAL_CACHE_FILE = "sam3_cache.partial.json"
 # The full-task configs use the "mug rack" prompt (configs/*rgbd*.yaml).
 DEFAULT_RACK_PROMPT_PROFILE = "explore_mug_rack"
 
@@ -49,24 +50,40 @@ def _from_json(response):
         for item in response["detections"]]}
 
 
-def build_cache(frames_dir, worker, *, rack_prompt_profile=DEFAULT_RACK_PROMPT_PROFILE, log=print):
-    """Query ``worker`` once per frame and camera; return the cache document."""
+def build_cache(frames_dir, worker, *, rack_prompt_profile=DEFAULT_RACK_PROMPT_PROFILE, log=print,
+                done_frames=None, save_progress=None):
+    """Query ``worker`` once per frame and camera; return the cache document.
+
+    ``done_frames`` (sequence -> camera answers, from an interrupted run) are kept
+    and not queried again; ``save_progress(frames)`` is called after each new frame.
+    """
     archives = sorted(Path(frames_dir, "observations").glob("observation_*.npz"))
     if not archives:
         raise ValueError("no_captured_observations")
-    frames, cameras = {}, set()
+    frames = dict(done_frames or {})
+    cameras = {camera for answers in frames.values() for camera in answers}
     for index, path in enumerate(archives, start=1):
         observation = load_public_observation(path)
-        # Every camera the frame has, including a perception-only camera when captured.
-        frames[str(observation.sequence)] = {
-            camera: _to_json(worker.detect.remote(
-                encode_png(image), observation_sequence=observation.sequence,
-                camera=camera, rack_prompt_profile=rack_prompt_profile, include_rack=True))
-            for camera, image in observation.images.items()}
+        if str(observation.sequence) not in frames:
+            # Every camera the frame has, including a perception-only camera when captured.
+            frames[str(observation.sequence)] = {
+                camera: _to_json(worker.detect.remote(
+                    encode_png(image), observation_sequence=observation.sequence,
+                    camera=camera, rack_prompt_profile=rack_prompt_profile, include_rack=True))
+                for camera, image in observation.images.items()}
+            if save_progress is not None:
+                save_progress(frames)
         cameras.update(observation.images)
         log(f"  {index}/{len(archives)} frames")
     return {"schema_version": 1, "rack_prompt_profile": rack_prompt_profile,
             "cameras": [name for name in (*CAMERAS, *PERCEPTION_CAMERAS) if name in cameras], "frames": frames}
+
+
+def _write_json(path, document):
+    """Write via a temporary file, so an interrupted write never leaves half a file."""
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(document) + "\n")
+    temporary.replace(path)
 
 
 class _CachedDetect:
@@ -108,12 +125,26 @@ def main(argv=None):
     target = args.frames / CACHE_FILE
     if target.exists():
         parser.error(f"{target} already exists; delete it to query SAM 3 again")
+    # A run that stops part-way (a laptop going to sleep, a preempted worker)
+    # leaves its answers here; the next run continues from them.
+    partial = args.frames / PARTIAL_CACHE_FILE
+    done_frames = {}
+    if partial.exists():
+        progress = json.loads(partial.read_text())
+        if progress["rack_prompt_profile"] != args.rack_prompt_profile:
+            parser.error(f"{partial} used another rack prompt profile; delete it to start again")
+        done_frames = progress["frames"]
+        print(f"Continuing from {len(done_frames)} frames in {partial}")
     import modal
 
     worker = modal.Cls.from_name("robotwin-perception-sam3", "Sam3PerceptionWorker")()
     print(f"Querying SAM 3 for {args.frames} ...")
-    cache = build_cache(args.frames, worker, rack_prompt_profile=args.rack_prompt_profile)
-    target.write_text(json.dumps(cache) + "\n")
+    cache = build_cache(args.frames, worker, rack_prompt_profile=args.rack_prompt_profile,
+                        done_frames=done_frames,
+                        save_progress=lambda frames: _write_json(
+                            partial, {"rack_prompt_profile": args.rack_prompt_profile, "frames": frames}))
+    _write_json(target, cache)
+    partial.unlink(missing_ok=True)
     print(f"Saved {len(cache['frames'])} frames x {len(cache['cameras'])} cameras to {target}")
     return 0
 

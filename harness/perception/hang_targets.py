@@ -5,7 +5,7 @@ import numpy as np
 from .anchors import Anchor
 from .geometry import pose7
 from .opus_frame import ground_public_object_frame_rgbd
-from .pose_grounding import tcp_targets_for_mug_alignment
+from .pose_grounding import frame_from_axes, tcp_targets_for_mug_alignment
 from .rgbd import calibration_sha256, intrinsic_sha256
 
 
@@ -77,6 +77,37 @@ class StaticRackFrameCache:
                 "confidence": reference["confidence"],
                 "image_shape_px": list(reference["image_shape"]),
                 "camera_calibration_sha256": reference["calibration_sha256"]}
+
+
+def rack_frame_from_pose(rack_pose):
+    """The rack peg frame from a depth rack pose, in the Opus keypoint frame's convention.
+
+    Origin: the peg seat, where a hung handle comes to rest; +x along the peg
+    towards its free tip; +y up the pole (the rack's vertical plane).
+    """
+    seat = np.asarray(rack_pose.key_points["peg_seat"], dtype=float)
+    tip = np.asarray(rack_pose.key_points["peg_tip"], dtype=float)
+    return pose7(frame_from_axes(seat, tip - seat, rack_pose.axis))
+
+
+class DepthRackFrame:
+    """Stands in for ``StaticRackFrameCache`` with the provider's depth rack pose.
+
+    The provider keeps the rack pose for the episode once two views agree, so
+    later occlusion, or a detector failure on this frame, does not matter, as
+    with the Opus cache.
+    """
+
+    def __init__(self, provider):
+        self.provider = provider
+
+    def resolve(self, observation):
+        # Observing first lets this view confirm a rack pose not yet kept.
+        self.provider.observe(observation)
+        rack_pose = self.provider.episode_rack_pose
+        if rack_pose is None:
+            raise ValueError("depth_rack_pose_unavailable")
+        return rack_frame_from_pose(rack_pose)
 
 
 def bind_hang_targets(cache, observation, mug_report, *, tcp_pose,

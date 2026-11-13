@@ -24,6 +24,7 @@ def pose(values):
 class FakeTask:
     def __init__(self):
         self.mug_pose = list(UPRIGHT)
+        self.mug_id = 3
         self.success = False
         self.mug = SimpleNamespace(get_pose=lambda: pose(self.mug_pose),
                                    get_functional_point=lambda index: self.mug_pose)

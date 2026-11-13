@@ -102,16 +102,17 @@ SUPERVISED_REVERSE_CAMERA = FixedCamera("perception_reverse_camera",
 
 
 # On the line from the hanging workspace back to the default camera (the same
-# side of the handle), moved in to about 0.5 m, at 1200x900. From the default camera a held mug's handle
-# opening is about 12 px across at hanging entry, too small for a complete
-# visible contour or continuous handle depth (seeds 4 and 5 stopped with
-# complete_visible_aperture_unavailable). Placed from the public RGB-D of the
-# recorded seed-4 (observation 528) and seed-5 (observation 416) entries: a 2 cm
-# opening is about 34-43 px and the held mug and upper rack keep >=140 px
-# margins. 1200x900 stays under the vision API's resize limits, so model pixel
-# coordinates match the depth image. Other seeds' framing is unchecked.
-CLOSE_PERCEPTION_CAMERA = FixedCamera("perception_camera", position_m=(-0.21, 0.36, 1.15),
-                                      target_m=(0.10, 0.04, 0.96), fovy_deg=50.0,
+# side of the handle), moved in to about 0.54 m, at 1200x900. From the default
+# camera a held mug's handle opening is about 12 px across at hanging entry, too
+# small for a complete visible contour or continuous handle depth (seeds 4 and 5
+# stopped with complete_visible_aperture_unavailable). Placed from the public
+# RGB-D of the recorded seed-4 (observation 528) and seed-5 (observation 416)
+# entries: a 2 cm opening is about 33-41 px, and the held mug and the whole rack,
+# including the pole foot on the table that the depth rack-pose fit needs, keep
+# >=75 px margins. 1200x900 stays under the vision API's resize limits, so model
+# pixel coordinates match the depth image. Other seeds' framing is unchecked.
+CLOSE_PERCEPTION_CAMERA = FixedCamera("perception_camera", position_m=(-0.22, 0.38, 1.15),
+                                      target_m=(0.12, 0.04, 0.90), fovy_deg=50.0,
                                       width=1200, height=900)
 PERCEPTION_VIEWS = {"default": SUPERVISED_PERCEPTION_CAMERA, "close": CLOSE_PERCEPTION_CAMERA}
 

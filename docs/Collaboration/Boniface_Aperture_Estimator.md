@@ -1,8 +1,16 @@
 # Offline visible-aperture estimator
 
-`development.hanging.aperture_frame` is development-only. Nothing in recovery,
-target preparation, release authorization or the Modal launcher imports it.
-The recovery preflight rejection remains in place.
+`development.hanging.aperture_frame` is development-only code, but it is no longer
+offline-only. The supervised hanging path uses `estimate` on current public RGB-D:
+`development/hanging/public_provider.py` (proposals and lift checks),
+`development/hanging/runtime.py` (`validate_current_geometry`, rigid-tracking
+confirmation), `development/hanging/rack_surface.py`, `development/hanging/recovery.py`
+(Entry 660 demo preflight) and `modal_apps/grounding660.py` (saved-frame checks).
+`estimate` itself still sets `motion_authorized` to false: motion depends on the
+later clearance, target and release-gate checks in those callers. Since 13 November
+2026, contours within one pixel of their convex hull (same vertex order) are treated
+as convex and the dropped vertices are reported; see
+`Boniface_Close_Camera_Evaluation.md`.
 
 ## Inputs and provenance
 

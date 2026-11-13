@@ -1,6 +1,13 @@
 # Entry 660 reviewed demo: feasibility decision
 
-Decision: **do not wire these annotations to recovery motion**. The one-image
+> **Superseded.** This records the decision at the time of the one-image check.
+> The commit of 31 October 2026 ("Implement guarded Entry 660 aperture hanging
+> recovery") later wired a reviewed, explicitly overridden Entry 660 aperture to
+> guarded recovery motion and recorded a native-checker success on that replay
+> (support after release unverified). Current status and live results are in
+> `Boniface_Close_Camera_Evaluation.md`.
+
+Decision at the time: **do not wire these annotations to recovery motion**. The one-image
 annotation and offline check have been completed; the conditional motion step
 is blocked by the existing grounding guard, not by a missing annotation tool.
 

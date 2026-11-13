@@ -1,4 +1,4 @@
-﻿# Windows + Modal setup
+# Windows + Modal setup
 
 All commands use **PowerShell**. Your laptop launches commands; Modal runs Linux,
 RoboTwin, CuRobo and the GPU workers.
@@ -6,11 +6,8 @@ RoboTwin, CuRobo and the GPU workers.
 - **Section A: From scratch** — one-time installation on a new machine.
 - **Section B: Everyday commands** — use after reopening PowerShell or restarting.
 
-**Your current progress (29 October 2026):** installation, login, policy deployment,
-asset download, T4 GPU check and scripted smoke episode are complete. The smoke
-returned the expected `step_budget` and downloaded nine files. Policy model loading
-and SAM 3 startup/inference on a gray test image also passed. A full Claude episode
-has not yet been confirmed. **Start at section B.**
+On a new machine start at section A. Once section A has been completed, use
+section B.
 
 ## A. From scratch — run once
 
@@ -68,18 +65,18 @@ The current simulator module requires this secret even for scripted runs.
 Use `anthropic`, not `anthropic-secret`. Keep the key out of source files and chat.
 Skip this step if the secret already exists.
 
-### A5. Normalize the renderer patch and check local dependencies
+### A5. Check local dependencies
 
-This prevents the Windows line-ending problem encountered during the image build.
+The repository's `.gitattributes` keeps `patches/*.patch` in LF line endings, which
+the Linux image build needs; no manual conversion is required after cloning.
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from pathlib import Path; p = Path('patches/robotwin-renderer.patch'); p.write_bytes(p.read_bytes().replace(b'\r\n', b'\n'))"
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m unittest tests.test_episode_video tests.test_episode_request tests.test_runtime_assembly -q
 ```
 
-The 30 targeted tests passed here. The full suite has Windows-specific symlink,
-path and process-handling limitations, plus tests requiring local PyTorch.
+On Windows the full suite has known symlink, path and process-handling
+limitations, plus tests requiring local PyTorch or matplotlib.
 
 ### A6. Deploy the policy and download simulator assets
 
@@ -198,12 +195,8 @@ provide `--output` with a new cache filename; existing files are not overwritten
 If reopening PowerShell, assign `$runFolder` to the printed run folder again.
 Old three-camera recordings cannot acquire a fourth view retrospectively.
 
-Validated fourth-camera run: `data/runs/baseline_camera_20261029_195201`.
-Its 64-action rollout completed and five sampled frames (0, 16, 32, 48, 64)
-were segmented after updating the deployed SAM 3 worker. Mug detections appeared
-in all five frames; rack detections appeared in two with low scores. These are
-model outputs, not manually verified masks or evidence of contact/hanging.
-The cache already exists, so do not rerun cache creation with the same output.
+SAM 3 detections in the cache are model outputs, not manually verified masks or
+evidence of contact or hanging. Cache creation refuses an existing output file.
 If `invalid_sam3_request` appears after updating local camera support, verify the
 actual worker using its `capabilities` method; local changes alone do not establish
 which server code handled a request. The worker now returns field-specific errors.
@@ -211,13 +204,13 @@ which server code handled a request. The worker now returns field-specific error
 ### B1. Start here every day
 
 ```powershell
-Set-Location 'C:\Users\bonif\Desktop\Academics\4. FALL 2026 SEMESTER\2. Engineering Capstone Project Fall 2026\RoboTwin-Modal'
+Set-Location '<path-to>\RoboTwin-Modal'
 $env:MODAL_IMAGE_BUILDER_VERSION = '2025.06'
 $env:SIM_GPU = 'T4'
 $env:MODAL_ENVIRONMENT = 'main'
 ```
 
-Use your actual repository path on a different machine. **No reinstall, secret
+Replace `<path-to>` with the folder you cloned into. **No reinstall, secret
 creation, asset download or policy deployment is needed just because you restarted.**
 
 After B1, choose **one** of B2 or B3. Run one episode at a time because the policy
@@ -306,7 +299,7 @@ manifest, event logs, observations and a video when recording is enabled.
 | Unsupported Python 3.10 | Run B1 to select builder `2025.06` |
 | Waiting for L4 capacity | Run B1 to select T4; stop the old attempt before relaunching |
 | Secret not found | Check exact name `anthropic`, field `ANTHROPIC_API_KEY`, environment `main` |
-| Renderer patch fails | Repeat the normalization command in A5 |
+| Renderer patch fails | Check `git ls-files --eol patches/` shows `w/lf`; if not, run `git add --renormalize .` |
 | Image build externally shut down | Retry; if repeated, inspect logs below |
 | Output directory exists | Generate a new `$runOutput`; keep previous results |
 | SAM 3 access denied | Check gated-model approval and the account behind `HF_TOKEN` |

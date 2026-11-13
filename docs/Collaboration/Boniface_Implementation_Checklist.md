@@ -2,6 +2,15 @@
 
 Owner: Boniface. Updated: 29 October 2026.
 
+> **Status, 13 November 2026.** The checklist below reflects 29 October. Since
+> then: guarded Entry 660 replay recovery (native-checker success, support
+> unverified), the public supervised hanging runtime, close perception cameras,
+> two-frame geometry agreement, and a supervisor that hands control back to the
+> frozen policy instead of ending a run. A policy-only seed-5 run reached native
+> success at action 521 on its own. Results, numbers and next steps are in
+> `Boniface_Close_Camera_Evaluation.md`; the paired five-seed evaluation (seeds
+> 15-19) is produced by `development/hanging/seed_evaluation.py`.
+
 Goal: improve repeatable rack hanging while keeping the Neotix policy frozen,
 the existing 14-DoF action interface, and the acquisition/table-handoff trajectory.
 This checklist plans the implementation; unchecked items are not claimed complete.

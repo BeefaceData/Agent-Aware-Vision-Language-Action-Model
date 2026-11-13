@@ -114,7 +114,26 @@ SUPERVISED_REVERSE_CAMERA = FixedCamera("perception_reverse_camera",
 CLOSE_PERCEPTION_CAMERA = FixedCamera("perception_camera", position_m=(-0.22, 0.38, 1.15),
                                       target_m=(0.12, 0.04, 0.90), fovy_deg=50.0,
                                       width=1200, height=900)
+# Opposite side of the handle for the close view, low on the far right of the
+# table, so measured_bounds can read the handle's back face. At the recorded
+# seed-5 entry (observation 480) the opening faces mostly up, so its back face
+# points down toward the table. Placed by ray-casting from every handle
+# back-face sample at observations 464, 472 and 480 (handle moved rigidly with
+# the measured TCP) against the RGB-D points all cameras recorded: every sample
+# was unoccluded, at <=45 degrees from the face normal, about 20 px for an
+# 8 mm handle; the seed-4 mug at entry projects near the image centre.
+CLOSE_REVERSE_CAMERA = FixedCamera("perception_reverse_camera", position_m=(0.36, 0.38, 0.85),
+                                   target_m=(0.05, 0.06, 0.98), fovy_deg=50.0,
+                                   width=1200, height=900)
 PERCEPTION_VIEWS = {"default": SUPERVISED_PERCEPTION_CAMERA, "close": CLOSE_PERCEPTION_CAMERA}
+REVERSE_VIEWS = {"default": SUPERVISED_REVERSE_CAMERA, "close": CLOSE_REVERSE_CAMERA}
+
+
+def parse_camera_set(text):
+    """``"close_pair"`` -> both close views; anything else -> ``(parse_camera_spec(text),)``."""
+    if text == "close_pair":
+        return (CLOSE_PERCEPTION_CAMERA, CLOSE_REVERSE_CAMERA)
+    return (parse_camera_spec(text),)
 
 
 def supervised_camera_specs(*, complementary_view=False, view="default"):
@@ -125,7 +144,7 @@ def supervised_camera_specs(*, complementary_view=False, view="default"):
         raise ValueError("invalid_perception_view_option")
     primary = PERCEPTION_VIEWS[view]
     if complementary_view:
-        return (primary, SUPERVISED_REVERSE_CAMERA)
+        return (primary, REVERSE_VIEWS[view])
     return (primary,)
 
 

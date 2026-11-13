@@ -143,8 +143,18 @@ class CloseViewTests(unittest.TestCase):
         self.assertIs(close, CLOSE_PERCEPTION_CAMERA)
         self.assertIs(parse_camera_spec("close"), CLOSE_PERCEPTION_CAMERA)
         self.assertEqual(close.name, "perception_camera")
+        from harness.environment.perception_cameras import CLOSE_REVERSE_CAMERA, parse_camera_set
         primary, reverse = supervised_camera_specs(complementary_view=True, view="close")
-        self.assertEqual((primary, reverse), (CLOSE_PERCEPTION_CAMERA, SUPERVISED_REVERSE_CAMERA))
+        self.assertEqual((primary, reverse), (CLOSE_PERCEPTION_CAMERA, CLOSE_REVERSE_CAMERA))
+        self.assertEqual(supervised_camera_specs(complementary_view=True)[1], SUPERVISED_REVERSE_CAMERA)
+        self.assertEqual(parse_camera_set("close_pair"), (CLOSE_PERCEPTION_CAMERA, CLOSE_REVERSE_CAMERA))
+        self.assertEqual(parse_camera_set("close"), (CLOSE_PERCEPTION_CAMERA,))
+        self.assertEqual(reverse.name, "perception_reverse_camera")
+        self.assertLessEqual(reverse.width*reverse.height, 1_150_000)
+        # The two close views look at the handle from opposite sides.
+        to_front = np.subtract(primary.position_m, primary.target_m)
+        to_back = np.subtract(reverse.position_m, reverse.target_m)
+        self.assertLess(to_front @ to_back, 0)
         # On the line from its target back to the default camera: the same side
         # of the handle as the default view, just nearer the workspace.
         to_default = np.subtract(DEFAULT_PERCEPTION_CAMERA.position_m, close.target_m)

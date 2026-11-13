@@ -517,8 +517,8 @@ def baseline(seed: int = 3, max_actions: int = 900, chunk_size: int = 8,
 
     validate_options(seed, max_actions, chunk_size, time_limit_minutes)
     if perception_camera:
-        from harness.environment.perception_cameras import parse_camera_spec
-        parse_camera_spec(perception_camera)  # Validate before starting a GPU.
+        from harness.environment.perception_cameras import parse_camera_set
+        parse_camera_set(perception_camera)  # Validate before starting a GPU.
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_id = f"baseline_seed{seed}_{stamp}_{time.time_ns() % 1000000:06d}"
     target = Path(output).resolve() if output else REPO / "data/runs" / run_id

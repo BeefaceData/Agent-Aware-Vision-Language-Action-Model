@@ -222,7 +222,7 @@ def recover(environment, client, model, output, store, *, deadline, initial_repo
                 return anchors.resolve(command.parameters.target, "right", observation)
         return {**report, **execute_stages(environment, prepare, anchors, gate, store,
             deadline=deadline, log=log, settle_after_seat=aperture_provider is not None,
-            allow_post_success_retreat=demo, failure_detail=sanitized_failure)}
+            failure_detail=sanitized_failure)}
     except Exception as exc:
         report.update(status="recovery_stopped", error_type=type(exc).__name__)
         report["failure"] = sanitized_failure(exc)

@@ -282,10 +282,13 @@ def settle_seat(environment, target_pose, commanded_joints, *, deadline, max_tic
     return result
 
 
-class PostReleaseRetreatEnvironment:
-    """Permit only a bounded retreat after benchmark success latches.
+class BenchmarkBlindEnvironment:
+    """Hide the simulator's native success checker from staged execution.
 
-    The underlying success flag is never changed and remains in the report.
+    Native success reads privileged simulator state, so it must never choose
+    a branch in the public staged sequence: approach, seat, release and
+    retreat run identically whether or not the checker has latched. The real
+    flag is still read from the wrapped environment for the report only.
     Tracking, workspace, planning, cancellation and tick guards still execute.
     """
     def __init__(self, environment):
@@ -300,9 +303,11 @@ class PostReleaseRetreatEnvironment:
 
 
 def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
-                   log=lambda event: None, settle_after_seat=True,
-                   allow_post_success_retreat=True, failure_detail=None):
-    """Execute one bounded sequence from current state; stop at the first failure."""
+                   log=lambda event: None, settle_after_seat=True, failure_detail=None):
+    """Execute one bounded sequence from current state; stop at the first failure.
+
+    The native success checker is reported but never consulted for control.
+    """
     last_right_target = None
     def record(event):
         nonlocal last_right_target
@@ -313,7 +318,7 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
     executor = None
     stage = None
     try:
-        executor = SkillExecutor(environment, NoPolicy(), log=record, anchors=anchors,
+        executor = SkillExecutor(BenchmarkBlindEnvironment(environment), NoPolicy(), log=record, anchors=anchors,
             predicates=PredicateRegistry(rack_seat_gate=gate), cancelled=lambda: time.monotonic() >= deadline,
             budget=EpisodeBudget(max_skill_calls=5, max_analytic_ticks=12000))
         commands = (
@@ -364,16 +369,14 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
             if not result.completed or result.execution_uncertain:
                 report.update(status="recovery_stopped", stopped_at=stage, reason=result.stop_reason)
                 break
-            if result.episode_terminal:
-                if (allow_post_success_retreat and stage=="release" and result.stop_reason=="completed"
-                        and environment.native_success and environment.arm_state("right")["gripper"]>=.99
-                        and executor.calls<executor.budget.max_skill_calls):
-                    report["native_success_at_release"]=True
-                    report["bounded_post_success_retreat"]=True
-                    executor.environment=PostReleaseRetreatEnvironment(environment)
-                    executor.terminal=False
-                    continue
-                report.update(status="native_terminal", stopped_at=stage,
+            if stage == "release":
+                # Observed for the report only; it never changes the next stage.
+                try:
+                    report["native_success_at_release"] = bool(environment.native_success)
+                except Exception:
+                    report["native_success_at_release"] = None
+            if result.episode_terminal and stage != commands[-1][0]:
+                report.update(status="executor_terminal", stopped_at=stage,
                               reason="remaining_stages_not_executed")
                 break
         else:

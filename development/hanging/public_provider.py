@@ -96,6 +96,12 @@ visible mug-body polygon excluding gripper/handle/background.
 The handle opening is a THROUGH-HOLE: background may be visible through the
 loop. It is not the cup mouth/interior, a gripper recess, or a cylinder-body
 patch. Delineate the visible inner aperture separately from the exterior arch.
+A handle opening is always closed off on one side by the mug body: the visible
+outer wall of the cylinder between the two handle attachments is part of the
+opening's own boundary, not an occluder. When the inner arch and that body wall
+are both visible all the way round, the opening is complete; it is incomplete
+only when a gripper, the rack, the mug's near side or the image edge hides part
+of that boundary.
 Solid arch material samples must exclude black gripper fingers, the primary
 mug cylinder and ambiguous attachment/junction pixels. Do not complete hidden
 boundaries or substitute a gripper/body depth recess for the handle opening.

@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import statistics
 import subprocess
 import sys
@@ -45,7 +46,10 @@ def _complete(target, kind):
 
 
 def _command(kind, seed, target, model):
-    common = ["--seed", str(seed), "--max-actions", "900", "--chunk-size", "16", "--output", str(target)]
+    # Per-step RGB-D stays on the runs Volume during the run and is fetched in the
+    # background while the next run executes, so downloads never delay the queue.
+    common = ["--seed", str(seed), "--max-actions", "900", "--chunk-size", "16", "--output", str(target),
+              "--skip-observations"]
     if kind == "policy_only":
         return [sys.executable, "-m", "modal", "run", "modal_apps/simulator.py::baseline", *common,
                 "--time-limit-minutes", "70", "--perception-camera", "close"]
@@ -54,13 +58,75 @@ def _command(kind, seed, target, model):
             "--perception-view", "close", "--complementary-view"]
 
 
-def run_all(root, seeds, *, model, gpu, attempts=2, launcher=subprocess.run):
+def _run_id(root, seed, kind):
+    """The Modal run id printed by the latest launch log of this run, if any."""
+    logs = sorted((root/"logs").glob(f"seed{seed}_{kind}_attempt*.log"))
+    for log in reversed(logs):
+        text = log.read_text(encoding="utf-8", errors="replace")
+        for pattern in (r"Remote run id: (\S+)", r"robotwin-runs/([A-Za-z0-9_.-]+)", r"Running (baseline_\S+) on"):
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _observations_complete(target, kind):
+    """True when every saved step's RGB-D archive is present locally."""
+    summary = target/("summary.json" if kind == "policy_only" else "report.json")
+    try:
+        document = json.loads(summary.read_text())
+    except (OSError, ValueError):
+        return False
+    actions = (document if kind == "policy_only" else document.get("summary") or {}).get("policy_actions")
+    present = len(list((target/"observations").glob("observation_*.npz")))
+    return actions is not None and present >= actions
+
+
+def _start_fetch(root, seed, kind, env, popen=subprocess.Popen):
+    target = root/f"seed{seed}"/kind
+    run_id = _run_id(root, seed, kind)
+    if run_id is None or _observations_complete(target, kind):
+        return None
+    log = (root/"logs"/f"seed{seed}_{kind}_fetch.log").open("a", encoding="utf-8")
+    command = [sys.executable, "-m", "modal", "run", "modal_apps/simulator.py::fetch_run",
+               "--run-id", run_id, "--output", str(target)]
+    process = popen(command, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT)
+    return (seed, kind, run_id, process, log, time.time())
+
+
+def _finish_fetches(root, fetches):
+    for seed, kind, run_id, process, log, started in fetches:
+        code = process.wait()
+        log.close()
+        with (root/"fetches.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(dict(seed=seed, kind=kind, run_id=run_id, exit_code=code,
+                wall_seconds=time.time()-started,
+                observations_complete=_observations_complete(root/f"seed{seed}"/kind, kind)))+"\n")
+
+
+def fetch_all(root, *, gpu="L4,A10G,T4", popen=subprocess.Popen):
+    """Fetch any run's missing RGB-D from the runs Volume (resumable), then rebuild the report."""
+    root = Path(root)
+    plan = json.loads((root/"plan.json").read_text())
+    env = {**os.environ, "MODAL_ENVIRONMENT": "main", "PYTHONIOENCODING": "utf-8"}
+    fetches = []
+    for seed in plan["seeds"]:
+        for kind in KINDS:
+            if _complete(root/f"seed{seed}"/kind, kind):
+                started = _start_fetch(root, seed, kind, env, popen)
+                if started is not None:
+                    _finish_fetches(root, [started])
+    return build_report(root)
+
+
+def run_all(root, seeds, *, model, gpu, attempts=2, launcher=subprocess.run, popen=subprocess.Popen):
     root = Path(root)
     (root/"logs").mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "MODAL_IMAGE_BUILDER_VERSION": "2025.06", "MODAL_ENVIRONMENT": "main",
            "SIM_GPU": gpu, "PYTHONIOENCODING": "utf-8"}
     (root/"plan.json").write_text(json.dumps(dict(seeds=seeds, kinds=KINDS, model=model, gpu=gpu,
         max_actions=900, chunk_size=16, created=datetime.now(timezone.utc).isoformat()), indent=2)+"\n")
+    fetches = []
     for seed in seeds:
         for kind in KINDS:
             target = root/f"seed{seed}"/kind
@@ -84,7 +150,13 @@ def run_all(root, seeds, *, model, gpu, attempts=2, launcher=subprocess.run):
                         log=log.relative_to(root).as_posix(), started_unix=started, ended_unix=time.time(),
                         wall_seconds=time.time()-started, exit_code=result.returncode,
                         complete=_complete(target, kind)))+"\n")
-    return build_report(root)
+                if _complete(target, kind):
+                    fetch = _start_fetch(root, seed, kind, env, popen)
+                    if fetch is not None:
+                        fetches.append(fetch)
+                    build_report(root)  # Interim report while the queue continues.
+    _finish_fetches(root, fetches)
+    return fetch_all(root, gpu=gpu, popen=popen)
 
 
 # ----------------------------------------------------------------------------- metrics
@@ -119,26 +191,29 @@ def _gripper_open_action(actions):
 
 
 def _thumbnail(folder, name="final_view.png"):
-    """Save the last saved observation's best view as a PNG for the report."""
-    observations = sorted((folder/"observations").glob("observation_*.npz"))
-    if not observations:
+    """Save the episode video's last frame as a PNG for the report.
+
+    The video is always downloaded with the run; per-step RGB-D may still be
+    arriving in the background, so it is not used for the thumbnail.
+    """
+    video = folder/"episode.mp4"
+    if not video.is_file():
         return None
     target = folder/name
-    if target.is_file():
-        return target
     try:
-        import numpy as np
+        import imageio.v3 as iio
         from PIL import Image
-        with np.load(observations[-1]) as data:
-            for camera in ("perception_camera", "head_camera"):
-                if camera in data.files:
-                    image = Image.fromarray(np.asarray(data[camera]))
-                    image.thumbnail((480, 360))
-                    image.save(target)
-                    return target
+        last = None
+        for frame in iio.imiter(video):
+            last = frame
+        if last is None:
+            return None
+        image = Image.fromarray(last)
+        image.thumbnail((640, 520))
+        image.save(target)
+        return target
     except Exception:
-        return None
-    return None
+        return target if target.is_file() else None
 
 
 def policy_metrics(folder, launches):
@@ -454,10 +529,14 @@ def main(argv=None):
     run_parser.add_argument("--gpu", default="L4,A10G,T4")
     report_parser = sub.add_parser("report")
     report_parser.add_argument("--root", type=Path, required=True)
+    fetch_parser = sub.add_parser("fetch", help="download any missing per-step RGB-D, then rebuild the report")
+    fetch_parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "run":
         seeds = [int(s) for s in args.seeds.split(",")]
         result = run_all(args.root, seeds, model=args.model, gpu=args.gpu)
+    elif args.command == "fetch":
+        result = fetch_all(args.root)
     else:
         result = build_report(args.root)
     print(json.dumps(result["totals"], indent=2))

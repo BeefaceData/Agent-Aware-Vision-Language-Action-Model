@@ -48,7 +48,9 @@ class SeedEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)/"eval"
             launcher = FakeLauncher(fail={(16, "supervised")})
-            seed_evaluation.run_all(root, [15, 16], model="claude-test", gpu="L4", launcher=launcher)
+            fetches = []
+            seed_evaluation.run_all(root, [15, 16], model="claude-test", gpu="L4", launcher=launcher,
+                                    popen=lambda command, **kw: fetches.append(command))
             kinds = [("::baseline" in c[4], int(c[c.index("--seed")+1])) for c in launcher.commands]
             self.assertEqual(kinds, [(True, 15), (False, 15), (True, 16), (False, 16), (False, 16)])
             self.assertTrue((root/"seed16"/"supervised.incomplete-1").is_dir())
@@ -56,11 +58,14 @@ class SeedEvaluationTests(unittest.TestCase):
             for flag in ("--perception-view", "--complementary-view", "--max-turns"):
                 self.assertIn(flag, supervised)
             self.assertEqual(supervised[supervised.index("--model")+1], "claude-test")
+            self.assertTrue(all("--skip-observations" in c for c in launcher.commands))
+            self.assertEqual(fetches, [])  # The fake runs print no Modal run id to fetch.
             baseline = launcher.commands[0]
             self.assertEqual(baseline[baseline.index("--perception-camera")+1], "close")
             # A second invocation finds every run complete and launches nothing.
             again = FakeLauncher()
-            seed_evaluation.run_all(root, [15, 16], model="claude-test", gpu="L4", launcher=again)
+            seed_evaluation.run_all(root, [15, 16], model="claude-test", gpu="L4", launcher=again,
+                                    popen=lambda command, **kw: fetches.append(command))
             self.assertEqual(again.commands, [])
             for name in ("report.pdf", "metrics.json", "metrics.csv", "README.md", "launches.jsonl"):
                 self.assertTrue((root/name).is_file(), name)
@@ -72,6 +77,32 @@ class SeedEvaluationTests(unittest.TestCase):
             run = next(r for r in metrics["runs"] if r["kind"] == "supervised")
             self.assertEqual(run["handed_back_reason"], "visibility_budget_exhausted")
             self.assertEqual(run["folder"], "seed15/supervised")
+
+    def test_background_fetch_uses_logged_run_id_and_skips_complete_runs(self):
+        class Process:
+            def wait(self):
+                return 0
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)/"eval"
+            target = root/"seed15"/"policy_only"
+            (target/"observations").mkdir(parents=True)
+            (root/"logs").mkdir()
+            (target/"summary.json").write_text(json.dumps(dict(outcome="action_limit", policy_actions=2)))
+            (root/"logs"/"seed15_policy_only_attempt1.log").write_text(
+                "Running baseline_seed15_x on L4\nRemote run id: baseline_seed15_x\n", encoding="utf-8")
+            commands = []
+            def popen(command, **kwargs):
+                commands.append(command)
+                return Process()
+            fetch = seed_evaluation._start_fetch(root, 15, "policy_only", {}, popen)
+            self.assertEqual(commands[0][4], "modal_apps/simulator.py::fetch_run")
+            self.assertEqual(commands[0][commands[0].index("--run-id")+1], "baseline_seed15_x")
+            seed_evaluation._finish_fetches(root, [fetch])
+            self.assertTrue((root/"fetches.jsonl").is_file())
+            for index in range(2):
+                (target/"observations"/f"observation_{index:08d}.npz").write_bytes(b"")
+            self.assertIsNone(seed_evaluation._start_fetch(root, 15, "policy_only", {}, popen))
+            self.assertEqual(len(commands), 1)
 
 
 if __name__ == "__main__":

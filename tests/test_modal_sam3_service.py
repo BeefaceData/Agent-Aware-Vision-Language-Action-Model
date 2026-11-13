@@ -1,9 +1,31 @@
 import unittest
 
-from modal_apps.sam3 import MUG_SCORE_THRESHOLD, RACK_PROFILES, confidence_meets_threshold
+from modal_apps.sam3 import (MUG_SCORE_THRESHOLD, RACK_PROFILES, confidence_meets_threshold,
+                            validate_detection_request)
 
 
 class ModalSam3ServiceTests(unittest.TestCase):
+    def test_fourth_camera_request_is_accepted(self):
+        validate_detection_request(b"encoded-image", 0, "perception_camera",
+                                   "explore_mug_rack", True)
+
+    def test_server_accepts_every_harness_camera(self):
+        # The SAM 3 image does not ship the harness, so its list is a copy.
+        from harness.environment.layout import CAMERAS as POLICY_CAMERAS, PERCEPTION_CAMERAS
+        from modal_apps.sam3 import CAMERAS as SERVER_CAMERAS
+        self.assertLessEqual(set(POLICY_CAMERAS) | set(PERCEPTION_CAMERAS), set(SERVER_CAMERAS))
+
+    def test_rejections_identify_the_invalid_field(self):
+        valid = [b"encoded-image", 0, "perception_camera", "explore_mug_rack", True]
+        for index, value, code in ((0, b"", "image_bytes"), (1, True, "observation_sequence"),
+                (2, "unknown", "camera"), (3, "unknown", "rack_prompt_profile"),
+                (4, 1, "include_rack")):
+            with self.subTest(code=code):
+                args = valid.copy()
+                args[index] = value
+                with self.assertRaisesRegex(ValueError, f"invalid_sam3_{code}"):
+                    validate_detection_request(*args)
+
     def test_exploration_rack_cutoff_is_applied_after_postprocessing(self):
         _, threshold = RACK_PROFILES["explore_mug_rack"]
         self.assertEqual(threshold, 0.18)

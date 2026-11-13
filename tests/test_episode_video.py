@@ -17,6 +17,23 @@ def observation(sequence):
 
 
 class VideoTests(unittest.TestCase):
+    def test_five_camera_video_keeps_both_perception_views_and_sampling_rate(self):
+        current = observation(0)
+        current.images["perception_camera"] = np.zeros((480,640,3),np.uint8)
+        current.images["perception_reverse_camera"] = np.full((480,640,3),255,np.uint8)
+        cameras = (*CAMERAS,"perception_camera","perception_reverse_camera")
+        writer = Mock()
+        with tempfile.TemporaryDirectory() as directory,patch("imageio.v2.get_writer",return_value=writer) as create:
+            video = EpisodeVideo(directory,cameras=cameras)
+            video.append(current,"reset",0,0)
+            video.close()
+        picture = writer.append_data.call_args.args[0]
+        self.assertEqual(picture.shape,(512,960,3))
+        self.assertGreater(picture[250:400,330:600].mean(),240)
+        self.assertEqual(create.call_args.kwargs["fps"],10)
+        self.assertEqual(video.metadata()["cameras"],list(cameras))
+        self.assertFalse(video.metadata()["real_time"])
+
     def test_four_camera_video_contains_perception_panel(self):
         import imageio.v2 as imageio
         current = observation(0)

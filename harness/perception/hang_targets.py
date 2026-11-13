@@ -5,7 +5,7 @@ import numpy as np
 from .anchors import Anchor
 from .geometry import pose7
 from .opus_frame import ground_public_object_frame_rgbd
-from .pose_grounding import frame_from_axes, tcp_targets_for_mug_alignment
+from .pose_grounding import frame_from_axes, tcp_targets_for_mug_alignment, measured_peg_centerline
 from .rgbd import calibration_sha256, intrinsic_sha256
 
 
@@ -38,6 +38,10 @@ class StaticRackFrameCache:
         camera_name = report["camera"]
         image = np.asarray(observation.images[camera_name])
         camera = (observation.camera_frames or {})[camera_name]
+        if report.get("centerline_from_cross_section") is True:
+            registration = measured_peg_centerline(camera, report["keypoints_px"],
+                report.get("peg_width_px"), max_depth_gap_m=self.max_depth_gap_m)
+            pose = registration["pose_world_wxyz"]
         self._reference = {
             "pose": tuple(pose7(pose)),
             "camera": camera_name,

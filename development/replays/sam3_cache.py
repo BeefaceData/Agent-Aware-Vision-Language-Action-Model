@@ -50,30 +50,39 @@ def _from_json(response):
         for item in response["detections"]]}
 
 
-def build_cache(frames_dir, worker, *, rack_prompt_profile=DEFAULT_RACK_PROMPT_PROFILE, log=print,
+def build_cache(frames_dir, worker, *, rack_prompt_profile=DEFAULT_RACK_PROMPT_PROFILE,
+                every=1, max_frames=None, camera=None, log=print,
                 done_frames=None, save_progress=None):
-    """Query ``worker`` once per frame and camera; return the cache document.
-
-    ``done_frames`` (sequence -> camera answers, from an interrupted run) are kept
-    and not queried again; ``save_progress(frames)`` is called after each new frame.
-    """
-    archives = sorted(Path(frames_dir, "observations").glob("observation_*.npz"))
+    """Cache selected frames, preserving completed camera answers on resume."""
+    if (type(every) is not int or every < 1
+            or (max_frames is not None and (type(max_frames) is not int or max_frames < 1))
+            or camera not in (None, *CAMERAS, *PERCEPTION_CAMERAS)):
+        raise ValueError("invalid_sam3_replay_selection")
+    archives = sorted(Path(frames_dir, "observations").glob("observation_*.npz"))[::every]
+    if max_frames is not None:
+        archives = archives[:max_frames]
     if not archives:
         raise ValueError("no_captured_observations")
     frames = dict(done_frames or {})
     cameras = {camera for answers in frames.values() for camera in answers}
     for index, path in enumerate(archives, start=1):
         observation = load_public_observation(path)
-        if str(observation.sequence) not in frames:
-            # Every camera the frame has, including a perception-only camera when captured.
-            frames[str(observation.sequence)] = {
-                camera: _to_json(worker.detect.remote(
+        if camera is not None and camera not in observation.images:
+            raise ValueError("sam3_replay_camera_missing")
+        images = observation.images if camera is None else {camera: observation.images[camera]}
+        sequence = str(observation.sequence)
+        answers = dict(frames.get(sequence, {}))
+        changed = False
+        for name, image in images.items():
+            if name not in answers:
+                answers[name] = _to_json(worker.detect.remote(
                     encode_png(image), observation_sequence=observation.sequence,
-                    camera=camera, rack_prompt_profile=rack_prompt_profile, include_rack=True))
-                for camera, image in observation.images.items()}
-            if save_progress is not None:
-                save_progress(frames)
-        cameras.update(observation.images)
+                    camera=name, rack_prompt_profile=rack_prompt_profile, include_rack=True))
+                changed = True
+        frames[sequence] = answers
+        if changed and save_progress is not None:
+            save_progress(frames)
+        cameras.update(images)
         log(f"  {index}/{len(archives)} frames")
     return {"schema_version": 1, "rack_prompt_profile": rack_prompt_profile,
             "cameras": [name for name in (*CAMERAS, *PERCEPTION_CAMERAS) if name in cameras], "frames": frames}
@@ -81,6 +90,7 @@ def build_cache(frames_dir, worker, *, rack_prompt_profile=DEFAULT_RACK_PROMPT_P
 
 def _write_json(path, document):
     """Write via a temporary file, so an interrupted write never leaves half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(document) + "\n")
     temporary.replace(path)
@@ -118,21 +128,32 @@ class CachedSam3Worker:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--frames", type=Path, required=True, help="a labeled_frames capture folder")
+    parser.add_argument("--frames", type=Path, required=True, help="capture/baseline folder containing observations/")
+    parser.add_argument("--every", type=int, default=1, help="query every Nth saved archive")
+    parser.add_argument("--max-frames", type=int, help="limit selected frames (each camera costs one SAM call)")
+    parser.add_argument("--camera", choices=(*CAMERAS, *PERCEPTION_CAMERAS),
+                        help="query only this camera; default queries all recorded cameras")
+    parser.add_argument("--output", type=Path, help="new cache file; default <frames>/sam3_cache.json")
     parser.add_argument("--rack-prompt-profile", default=DEFAULT_RACK_PROMPT_PROFILE,
                         choices=("default", "explore_mug_rack"))
     args = parser.parse_args(argv)
-    target = args.frames / CACHE_FILE
+    if args.every < 1 or (args.max_frames is not None and args.max_frames < 1):
+        parser.error("--every and --max-frames must be positive")
+    target = args.output or args.frames / CACHE_FILE
     if target.exists():
         parser.error(f"{target} already exists; delete it to query SAM 3 again")
     # A run that stops part-way (a laptop going to sleep, a preempted worker)
     # leaves its answers here; the next run continues from them.
-    partial = args.frames / PARTIAL_CACHE_FILE
+    partial = target.with_name(target.stem + ".partial" + target.suffix)
+    selection = {"every": args.every, "max_frames": args.max_frames, "camera": args.camera}
     done_frames = {}
     if partial.exists():
         progress = json.loads(partial.read_text())
         if progress["rack_prompt_profile"] != args.rack_prompt_profile:
             parser.error(f"{partial} used another rack prompt profile; delete it to start again")
+        previous_selection = progress.get("selection", {"every": 1, "max_frames": None, "camera": None})
+        if previous_selection != selection:
+            parser.error(f"{partial} used another frame/camera selection; choose a new --output")
         done_frames = progress["frames"]
         print(f"Continuing from {len(done_frames)} frames in {partial}")
     import modal
@@ -140,9 +161,12 @@ def main(argv=None):
     worker = modal.Cls.from_name("robotwin-perception-sam3", "Sam3PerceptionWorker")()
     print(f"Querying SAM 3 for {args.frames} ...")
     cache = build_cache(args.frames, worker, rack_prompt_profile=args.rack_prompt_profile,
+                        every=args.every, max_frames=args.max_frames, camera=args.camera,
                         done_frames=done_frames,
                         save_progress=lambda frames: _write_json(
-                            partial, {"rack_prompt_profile": args.rack_prompt_profile, "frames": frames}))
+                            partial, {"rack_prompt_profile": args.rack_prompt_profile,
+                                      "selection": selection, "frames": frames}))
+    target.parent.mkdir(parents=True, exist_ok=True)
     _write_json(target, cache)
     partial.unlink(missing_ok=True)
     print(f"Saved {len(cache['frames'])} frames x {len(cache['cameras'])} cameras to {target}")

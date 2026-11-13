@@ -34,8 +34,23 @@ RACK_PROFILES = {"default": ("rack", 0.60),
                  "explore_mug_rack": ("mug rack", 0.18)}
 # The camera name only labels the request; the policy cameras plus
 # harness.environment.layout.PERCEPTION_CAMERAS (this image does not ship the harness).
-CAMERAS = frozenset({"head_camera", "left_camera", "right_camera", "perception_camera"})
+CAMERAS = frozenset({"head_camera", "left_camera", "right_camera", "perception_camera",
+                     "perception_reverse_camera"})
 REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements"
+
+
+def validate_detection_request(rgb_png, observation_sequence, camera, rack_prompt_profile, include_rack):
+    """Validate protocol fields without loading model weights or a GPU."""
+    if type(observation_sequence) is not int or observation_sequence < 0:
+        raise ValueError("invalid_sam3_observation_sequence")
+    if camera not in CAMERAS:
+        raise ValueError("invalid_sam3_camera")
+    if rack_prompt_profile not in RACK_PROFILES:
+        raise ValueError("invalid_sam3_rack_prompt_profile")
+    if type(include_rack) is not bool:
+        raise ValueError("invalid_sam3_include_rack")
+    if not isinstance(rgb_png, bytes) or not rgb_png or len(rgb_png) > MAX_IMAGE_BYTES:
+        raise ValueError("invalid_sam3_image_bytes")
 
 
 def confidence_meets_threshold(score, threshold):
@@ -67,6 +82,12 @@ image = (
     secrets=[modal.Secret.from_name("huggingface")],
 )
 class Sam3PerceptionWorker:
+    @modal.method()
+    def capabilities(self):
+        """Small protocol check so clients can detect outdated deployments."""
+        return {"protocol_version": 2, "cameras": sorted(CAMERAS),
+                "rack_prompt_profiles": sorted(RACK_PROFILES)}
+
     @modal.enter()
     def load(self):
         import torch
@@ -94,12 +115,8 @@ class Sam3PerceptionWorker:
         import numpy as np
         from PIL import Image
 
-        if (type(observation_sequence) is not int or observation_sequence < 0
-                or camera not in CAMERAS or rack_prompt_profile not in RACK_PROFILES
-                or type(include_rack) is not bool
-                or not isinstance(rgb_png, bytes)
-                or not rgb_png or len(rgb_png) > MAX_IMAGE_BYTES):
-            raise ValueError("invalid_sam3_request")
+        validate_detection_request(rgb_png, observation_sequence, camera,
+                                   rack_prompt_profile, include_rack)
         with Image.open(BytesIO(rgb_png)) as opened:
             image = np.asarray(opened.convert("RGB"))
         if (image.ndim != 3 or image.shape[2] != 3

@@ -20,6 +20,15 @@ from harness.planner.anthropic import AnthropicPlanner, AnthropicSettings
 from harness.perception.vision_request import image_block, png_bytes
 
 
+# "Not yet" geometry outcomes that a later frame may resolve. Rejected geometry
+# still stops: the supervisor never retries until some frame happens to pass.
+WAITABLE_GEOMETRY_REASONS = frozenset({
+    "complete_visible_aperture_unavailable",
+    "aperture_awaiting_two_frame_agreement",   # low-confidence opening, one frame so far
+    "validated_rack_reference_unavailable",    # no peg kept yet; the rack is static
+})
+
+
 @dataclass(frozen=True)
 class SupervisedOptions:
     model: str
@@ -178,7 +187,7 @@ class HangingRecoveryHook:
             if observation.sequence != self.last_visibility_sequence:
                 self.visibility_checks += 1
                 self.last_visibility_sequence = observation.sequence
-            can_wait = (proposal.reason == "complete_visible_aperture_unavailable"
+            can_wait = (proposal.reason in WAITABLE_GEOMETRY_REASONS
                 and proposal.status == "unknown"
                 and elapsed_actions < self.visibility_action_budget
                 and (self.visibility_checks < self.visibility_check_budget
@@ -206,7 +215,7 @@ class HangingRecoveryHook:
                            policy_actions_since_entry=elapsed_actions)
             return dict(status="recovery_stopped", reason=proposal.reason, stages={},
                         entry_status=proposal.status,
-                        visibility_budget_exhausted=(proposal.reason=="complete_visible_aperture_unavailable"))
+                        visibility_budget_exhausted=(proposal.reason in WAITABLE_GEOMETRY_REASONS))
         # Worst-case four stages plus settling/hold fit below this reservation.
         if remaining.get("analytic_ticks", 0) < 9000 or remaining.get("skill_calls", 0) < 4:
             if self.pause_policy_on_entry:

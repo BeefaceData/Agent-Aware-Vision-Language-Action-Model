@@ -29,6 +29,7 @@ class SupervisedOptions:
     time_limit_minutes: int = 30
     max_turns: int = 80
     complementary_view: bool = False
+    perception_view: str = "default"
 
     def validate(self):
         from development.hanging.baseline import validate_options
@@ -39,6 +40,9 @@ class SupervisedOptions:
             raise ValueError("invalid_supervisor_turn_limit")
         if type(self.complementary_view) is not bool:
             raise ValueError("invalid_complementary_view_option")
+        from harness.environment.perception_cameras import PERCEPTION_VIEWS
+        if self.perception_view not in PERCEPTION_VIEWS:
+            raise ValueError("invalid_perception_view_option")
 
 
 class HangingRecoveryHook:
@@ -306,7 +310,8 @@ def run(robotwin_root, output, options, *, fixture_loader=None):
     deadline = started+options.time_limit_minutes*60
     try:
         from harness.environment.perception_cameras import supervised_camera_specs, describe
-        camera_specs = supervised_camera_specs(complementary_view=options.complementary_view)
+        camera_specs = supervised_camera_specs(complementary_view=options.complementary_view,
+                                               view=options.perception_view)
         report["perception_cameras"] = [describe(spec) for spec in camera_specs]
         fixture_assets = fixture_loader(robotwin_root) if fixture_loader is not None else None
         if fixture_assets is not None:

@@ -135,6 +135,50 @@ class ComplementaryCameraTests(unittest.TestCase):
             SupervisedOptions("claude-test",complementary_view=1).validate()
 
 
+class CloseViewTests(unittest.TestCase):
+    def test_close_view_is_opt_in_same_direction_and_under_vision_resize_limits(self):
+        from harness.environment.perception_cameras import CLOSE_PERCEPTION_CAMERA
+        self.assertEqual(supervised_camera_specs(), (SUPERVISED_PERCEPTION_CAMERA,))
+        (close,) = supervised_camera_specs(view="close")
+        self.assertIs(close, CLOSE_PERCEPTION_CAMERA)
+        self.assertIs(parse_camera_spec("close"), CLOSE_PERCEPTION_CAMERA)
+        self.assertEqual(close.name, "perception_camera")
+        primary, reverse = supervised_camera_specs(complementary_view=True, view="close")
+        self.assertEqual((primary, reverse), (CLOSE_PERCEPTION_CAMERA, SUPERVISED_REVERSE_CAMERA))
+        # On the line from its target back to the default camera: the same side
+        # of the handle as the default view, just nearer the workspace.
+        to_default = np.subtract(DEFAULT_PERCEPTION_CAMERA.position_m, close.target_m)
+        to_close = np.subtract(close.position_m, close.target_m)
+        cosine = to_default @ to_close / np.linalg.norm(to_default) / np.linalg.norm(to_close)
+        self.assertGreater(cosine, .999)
+        self.assertLess(np.linalg.norm(to_close), .6)
+        # Full frames go to the vision model unresized, so stay below its limits.
+        self.assertLessEqual(max(close.width, close.height), 1568)
+        self.assertLessEqual(close.width*close.height, 1_150_000)
+        with self.assertRaisesRegex(ValueError, "perception_view"):
+            supervised_camera_specs(view="near")
+
+    def test_supervisor_and_modal_expose_close_view(self):
+        import ast
+        from unittest.mock import Mock
+        from development.hanging.supervised import SupervisedOptions, run
+        with tempfile.TemporaryDirectory() as directory:
+            loader = Mock(side_effect=ValueError("synthetic_asset_check_stop"))
+            report = run("unused", Path(directory)/"run", SupervisedOptions("claude-test", perception_view="close"),
+                         fixture_loader=loader)
+        self.assertFalse(report["simulator_started"])
+        self.assertEqual(report["perception_cameras"][0]["image_wh"], [1200, 900])
+        with self.assertRaisesRegex(ValueError, "perception_view"):
+            SupervisedOptions("claude-test", perception_view="near").validate()
+        tree = ast.parse(Path("modal_apps/simulator.py").read_text(encoding="utf-8"))
+        entry = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "supervised_hanging")
+        self.assertIn("perception_view", [a.arg for a in entry.args.args])
+        options = next(n for n in ast.walk(entry) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                       and n.func.id == "SupervisedOptions")
+        self.assertTrue(any(k.arg == "perception_view" and isinstance(k.value, ast.Name)
+                            and k.value.id == "perception_view" for k in options.keywords))
+
+
 class CameraPoseTests(unittest.TestCase):
     def test_supervised_high_resolution_rgbd_preserves_lens_and_policy_contract(self):
         from harness.perception.rgbd import RGBDCamera

@@ -1238,6 +1238,9 @@ class PublicRGBDHangingProvider:
         key = (observation.sequence, sha256(image.tobytes()).hexdigest(), calibration_sha256(camera))
         if key == self._key and self._lift_identity == self.episode_id:
             return self._report
+        if key == getattr(self, "_failed_key", None):
+            # One request per frame: a failed reply is not retried for the same frame.
+            raise RuntimeError("public_grounding_failed_for_this_observation")
         if self.requests >= self.maximum_requests:
             raise RuntimeError("public_grounding_request_budget_exhausted")
         self.store.save(observation)
@@ -1263,6 +1266,7 @@ class PublicRGBDHangingProvider:
             report = VisibleHangingReport.model_validate(data)
             self._cache_rack(observation, report)
         except Exception as exc:
+            self._failed_key = key
             self.log(dict(event_type="public_grounding_failure", observation_sequence=observation.sequence,
                           failure=sanitized_failure(exc)))
             raise
@@ -1288,7 +1292,14 @@ class PublicRGBDHangingProvider:
                     and getattr(report, attribute) is True and getattr(previous, attribute) is True)
 
     def evaluate(self, name, observation, *, arm="auto"):
-        report = self.observe(observation)
+        try:
+            report = self.observe(observation)
+        except Exception:
+            # A failed or malformed vision reply is missing evidence for this
+            # frame, never a reason to end the episode; the failure is logged.
+            return PredicateResult(name=name, value=None, source="perception",
+                                   observation_sequence=observation.sequence,
+                                   reason="public_grounding_unavailable")
         value = None
         state_confident = report.task_state_confidence is not None and report.task_state_confidence >= .85
         if name == "mug_lifted":
@@ -1329,7 +1340,13 @@ class PublicRGBDHangingProvider:
         return result.value is True and result.reason != LIFT_PERSISTENCE_REASON
 
     def planner_summary(self, observation):
-        report = self.observe(observation)
+        try:
+            report = self.observe(observation)
+        except Exception:
+            return dict(stage=None, visual_evidence="public visual grounding unavailable for this observation",
+                        evidence_mode="public_rgbd_model_proposal", confidence=None,
+                        task_state_confidence=None,
+                        body_pose_tracking=dict(status="unknown", reason="public_grounding_unavailable"))
         return dict(stage=report.stage, visual_evidence=report.evidence,
                     evidence_mode="public_rgbd_model_proposal", confidence=report.confidence,
                     task_state_confidence=report.task_state_confidence,

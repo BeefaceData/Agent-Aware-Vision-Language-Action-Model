@@ -889,6 +889,25 @@ class SupervisedHangingTests(unittest.TestCase):
             self.assertEqual(result.status, "rejected")
             self.assertEqual(result.reason, "right_arm_not_holding_mug")
 
+    def test_malformed_vision_reply_is_unknown_evidence_not_an_episode_failure(self):
+        environment = PublicEnvironment(x=0.)
+        observation = environment.observe()
+        events = []
+        provider = PublicRGBDHangingProvider(Mock(), model="claude-test", episode_id="episode",
+                                             store=Mock(), log=events.append)
+        with patch("development.hanging.public_provider.request_tool_input",
+                   side_effect=ValueError("exactly_one_allowed_tool_required")) as request:
+            result = provider.evaluate("right_mug_lifted", observation, arm="right")
+            summary = provider.planner_summary(observation)
+            again = provider.evaluate("handoff_confirmed", observation, arm="right")
+        self.assertIsNone(result.value)
+        self.assertEqual(result.reason, "public_grounding_unavailable")
+        self.assertIsNone(again.value)
+        self.assertIsNone(summary["stage"])
+        self.assertEqual(request.call_count, 1)  # No second request for the same frame.
+        self.assertEqual(provider.requests, 1)
+        self.assertTrue(any(e.get("event_type") == "public_grounding_failure" for e in events))
+
     def test_shared_client_records_tokens_latency_and_failed_calls_per_tool(self):
         from types import SimpleNamespace
         from development.hanging.public_provider import BoundedVisionClient

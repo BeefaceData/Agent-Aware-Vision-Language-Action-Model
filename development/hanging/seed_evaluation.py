@@ -108,7 +108,8 @@ def fetch_all(root, *, gpu="L4,A10G,T4", popen=subprocess.Popen):
     """Fetch any run's missing RGB-D from the runs Volume (resumable), then rebuild the report."""
     root = Path(root)
     plan = json.loads((root/"plan.json").read_text())
-    env = {**os.environ, "MODAL_ENVIRONMENT": "main", "PYTHONIOENCODING": "utf-8"}
+    env = {**os.environ, "MODAL_IMAGE_BUILDER_VERSION": "2025.06", "MODAL_ENVIRONMENT": "main",
+           "PYTHONIOENCODING": "utf-8"}
     fetches = []
     for seed in plan["seeds"]:
         for kind in KINDS:

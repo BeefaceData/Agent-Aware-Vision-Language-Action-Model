@@ -342,6 +342,64 @@ def extract_handle_arch(observation, body_polygon_px, *, finger_boxes_tcp=None,
     return found
 
 
+def _hull_indices(points):
+    """Indices of the 2D convex hull, counter-clockwise, collinear points excluded."""
+    order = sorted(range(len(points)), key=lambda i: (points[i][0], points[i][1]))
+    def cross(o, a, b):
+        return ((points[a][0]-points[o][0])*(points[b][1]-points[o][1])
+                - (points[a][1]-points[o][1])*(points[b][0]-points[o][0]))
+    lower, upper = [], []
+    for i in order:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], i) <= 0:
+            lower.pop()
+        lower.append(i)
+    for i in reversed(order):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], i) <= 0:
+            upper.pop()
+        upper.append(i)
+    return lower[:-1]+upper[:-1]
+
+
+def _drop_subpixel_dents(contour, tolerance_px):
+    """Replace a contour by its convex hull when it deviates by <= ``tolerance_px``.
+
+    Proposed contour vertices carry pixel-level placement noise, so vertices a
+    fraction of a pixel inside the hull are not evidence of a concave opening.
+    The hull is used only when every dropped vertex lies within the tolerance
+    of the hull edge that replaces it, and the hull keeps the contour's own
+    cyclic vertex order, so a scrambled or self-crossing ordering is never
+    turned into a convex polygon. Otherwise the contour is returned unchanged
+    and the strict convexity check decides. Returns the contour and the
+    dropped vertices with their distances, for the report.
+    """
+    contour = np.asarray(contour, dtype=float)
+    hull = _hull_indices(contour)
+    if len(hull) < 3 or len(hull) == len(contour):
+        return contour, []
+    # The hull must visit the kept vertices in the contour's cyclic order
+    # (either direction); otherwise the input ordering is not a polygon walk.
+    start = hull.index(min(hull))
+    forward = hull[start:]+hull[:start]
+    backward = [forward[0]]+forward[1:][::-1]
+    if forward != sorted(forward) and backward != sorted(backward):
+        return contour, []
+    kept = sorted(hull)
+    removed = []
+    for position, first in enumerate(kept):
+        second = kept[(position+1) % len(kept)]
+        span = range(first+1, second) if second > first else [*range(first+1, len(contour)), *range(0, second)]
+        a, b = contour[first], contour[second]
+        edge = b-a
+        length = float(np.linalg.norm(edge))
+        for index in span:
+            offset = contour[index]-a
+            distance = abs(edge[0]*offset[1]-edge[1]*offset[0])/length if length else float(np.linalg.norm(offset))
+            if distance > tolerance_px:
+                return contour, []
+            removed.append(dict(vertex_px=contour[index].tolist(), dent_px=distance))
+    return contour[kept], removed
+
+
 def _pixels(values, minimum, shape):
     points = np.asarray(values, dtype=float)
     if (points.ndim != 2 or points.shape[1] != 2 or len(points) < minimum
@@ -563,6 +621,11 @@ def estimate(camera, contour_px, material_px, *, limits=Limits(), allow_demo_ove
                 or type(limits.minimum_samples) is not int or limits.minimum_samples < 6):
             raise ValueError("invalid_estimator_limits")
         contour = _pixels(contour_px, 8, camera.depth_m.shape)
+        # Sub-pixel placement noise is not concavity; deeper dents still reject.
+        contour, dropped = _drop_subpixel_dents(contour, limits.pixel_uncertainty_px)
+        if dropped:
+            result["contour_vertices_dropped"] = dropped
+        contour = _pixels(contour, 8, camera.depth_m.shape)
         pixels = _pixels(material_px, limits.minimum_samples, camera.depth_m.shape)
         # Duplicate subpixel locations rounding to one sample cannot create
         # independent support or inflate the leave-one-out test.

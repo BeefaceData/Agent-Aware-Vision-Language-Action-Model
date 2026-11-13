@@ -323,6 +323,27 @@ class ApertureFrameTests(unittest.TestCase):
         result = estimate(self.camera(), self.contour, material)
         self.assertEqual(result["reason"], "material_does_not_surround_opening")
 
+    def dented(self, depth_px):
+        # Add a vertex between contour vertices 0 and 1, pushed into the opening.
+        a, b = self.contour[0], self.contour[1]
+        middle = (a+b)/2
+        inward = np.array([50., 50.])-middle
+        inward /= np.linalg.norm(inward)
+        return np.vstack((a, middle+inward*depth_px, self.contour[1:]))
+
+    def test_subpixel_dent_is_placement_noise_and_is_reported(self):
+        depth = self.depth.copy()
+        depth[44:57, 44:57] = 5.
+        result = estimate(self.camera(depth), self.dented(.5), self.material)
+        self.assertEqual(result["status"], "candidate_not_motion_validated", result.get("reason"))
+        self.assertEqual(len(result["contour_vertices_dropped"]), 1)
+        self.assertLessEqual(result["contour_vertices_dropped"][0]["dent_px"], 1.)
+        self.assertFalse(result["motion_authorized"])
+
+    def test_dent_deeper_than_a_pixel_still_rejects(self):
+        result = estimate(self.camera(), self.dented(3.), self.material)
+        self.assertEqual(result["reason"], "contour_requires_ordered_strictly_convex_visible_polygon")
+
     def test_self_crossing_contour_is_not_completed(self):
         result = estimate(self.camera(), self.contour[np.arange(16)*3 % 16], self.material)
         self.assertEqual(result["reason"], "contour_requires_ordered_strictly_convex_visible_polygon")

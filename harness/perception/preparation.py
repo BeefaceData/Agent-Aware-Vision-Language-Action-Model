@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from .anchors import Anchor
 from .geometry import pose7
 from .grounding import RGBDPerceptionProvider, SYMBOLIC_ANCHORS
@@ -30,7 +31,7 @@ class PerceptionAnchorPreparer:
         self.approach_offset_m = float(approach_offset_m)
         if (hang_target_cache is None) != (mug_frame_grounder is None):
             raise ValueError("hang_cache_and_mug_grounder_must_be_paired")
-        if mug_frame_camera not in ("head_camera", "left_camera", "right_camera"):
+        if mug_frame_camera not in (*CAMERAS, *PERCEPTION_CAMERAS):
             raise ValueError("invalid_hang_frame_camera")
         self.hang_target_cache = hang_target_cache
         self.mug_frame_grounder = mug_frame_grounder

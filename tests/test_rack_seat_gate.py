@@ -66,6 +66,28 @@ class RackSeatGateTests(unittest.TestCase):
             SkillCommand.model_validate({"action": "release", "arm": "right",
                 "parameters": {"authorization": "simulator_contact"}})
 
+    def test_gate_requires_current_public_anchor_and_matching_motion_result(self):
+        cases = (
+            (Anchor(self.pose, 3, "perception"), self.result),
+            (Anchor(self.pose, 5, "perception"), self.result),
+            (Anchor(self.pose, 4, "development_oracle"), self.result),
+            (self.anchor, self.result.model_copy(update={"controlled_arms": "left"})),
+            (self.anchor, self.result.model_copy(update={"skill": "rotate_wrist"})),
+        )
+        for anchor, result in cases:
+            with self.subTest(anchor=anchor, skill=result.skill, arms=result.controlled_arms):
+                self.gate.record(self.command, self.result, self.anchor)
+                self.gate.record(self.command, result, anchor)
+                self.assertFalse(self.gate.available)
+
+    def test_uncertain_or_terminal_seat_clears_prior_authorization(self):
+        for update in ({"execution_uncertain": True}, {"episode_terminal": True},
+                       {"completed": False, "stop_reason": "target_not_reached"}):
+            with self.subTest(update=update):
+                self.gate.record(self.command, self.result, self.anchor)
+                self.gate.record(self.command, self.result.model_copy(update=update), self.anchor)
+                self.assertFalse(self.gate.available)
+
 
 if __name__ == "__main__":
     unittest.main()

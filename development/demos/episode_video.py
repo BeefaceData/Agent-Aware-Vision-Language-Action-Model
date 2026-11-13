@@ -14,8 +14,13 @@ from harness.environment.base import CAMERAS
 
 
 class EpisodeVideo:
-    def __init__(self, output):
+    def __init__(self, output, *, cameras=CAMERAS):
         import imageio.v2 as imageio
+        if not 1 <= len(cameras) <= 4 or len(set(cameras)) != len(cameras):
+            raise ValueError("invalid_video_cameras")
+        self.cameras = tuple(cameras)
+        self.columns = 2 if len(cameras) == 4 else len(cameras)
+        self.rows = (len(cameras) + self.columns - 1) // self.columns
         self.output = Path(output)
         self.frames = 0
         self.closed = False
@@ -26,12 +31,16 @@ class EpisodeVideo:
         from PIL import Image, ImageDraw
         if self.closed:
             raise RuntimeError("video_closed")
-        picture = Image.new("RGB", (960, 272))
+        picture = Image.new("RGB", (320*self.columns, 240*self.rows + 32))
         draw = ImageDraw.Draw(picture)
-        for i, camera in enumerate(CAMERAS):
-            picture.paste(Image.fromarray(observation.images[camera]).resize((320, 240)), (i*320, 0))
-            draw.text((i*320+4, 242), camera, fill="white")
-        draw.text((4, 257), f"SAMPLED 10 fps | {kind} | policy {policy_actions} | analytic ticks {analytic_ticks} | obs {observation.sequence}", fill="white")
+        for i, camera in enumerate(self.cameras):
+            x, y = (i % self.columns)*320, (i // self.columns)*240
+            picture.paste(Image.fromarray(observation.images[camera]).resize((320, 240)), (x, y))
+            # Four-camera recordings label each panel without adding image rows.
+            label_y = y+222 if self.rows > 1 else 242
+            draw.rectangle((x, label_y, x+180, label_y+16), fill="black")
+            draw.text((x+4, label_y), camera, fill="white")
+        draw.text((4, 240*self.rows+17), f"SAMPLED 10 fps | {kind} | policy {policy_actions} | analytic ticks {analytic_ticks} | obs {observation.sequence}", fill="white")
         self.writer.append_data(np.asarray(picture))
         append_jsonl(self.output / "video_frames.jsonl", dict(frame=self.frames,
             playback_seconds=self.frames/10, observation_sequence=observation.sequence,

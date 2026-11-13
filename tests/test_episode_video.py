@@ -17,6 +17,25 @@ def observation(sequence):
 
 
 class VideoTests(unittest.TestCase):
+    def test_four_camera_video_contains_perception_panel(self):
+        import imageio.v2 as imageio
+        current = observation(0)
+        current.images["perception_camera"] = np.full((240, 320, 3), 255, dtype=np.uint8)
+        cameras = (*CAMERAS, "perception_camera")
+        with tempfile.TemporaryDirectory() as tmp:
+            video = EpisodeVideo(tmp, cameras=cameras)
+            try:
+                video.append(current, "baseline", 0, 0)
+            finally:
+                video.close()
+            reader = imageio.get_reader(Path(tmp) / "episode.mp4")
+            try:
+                frame = reader.get_data(0)
+            finally:
+                reader.close()
+            self.assertEqual(frame.shape, (512, 640, 3))
+            self.assertGreater(frame[250:400, 330:600].mean(), 240)
+
     def test_real_encoding_and_frame_index(self):
         import imageio.v2 as imageio
         with tempfile.TemporaryDirectory() as tmp:

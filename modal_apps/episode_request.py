@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 # Local files the container cannot see; each is uploaded under this base name.
-UPLOADED_OPTIONS = {"--config": "config", "--memory-snapshot": "memory_snapshot"}
+UPLOADED_OPTIONS = {"--config": "config", "--memory-snapshot": "memory_snapshot",
+                    "--replay-prefix": "replay_prefix"}
 # Frozen evaluation hashes the local checkout, so it stays local for now.
 UNSUPPORTED_OPTIONS = ("--evaluation-manifest", "--evaluation-sha256", "--robotwin-root")
 

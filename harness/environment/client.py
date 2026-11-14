@@ -50,7 +50,8 @@ class EnvironmentClient:
 
     @property
     def native_success(self):
-        self.observe()  # Do not report stale status after an ambiguous request.
+        if self._observation is None or self._uncertain:
+            raise RuntimeError("environment has no confirmed current observation")
         return self._native_success
 
     def step(self, action):

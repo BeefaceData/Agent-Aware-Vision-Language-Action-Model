@@ -20,7 +20,8 @@ HANDOFF = {"max_chunks": 1, "chunk_size": 8, "max_policy_actions": 8}
 def cli(**overrides):
     values = dict(planner="scripted", anthropic_model=None, perception_factory=None,
                   evaluation_manifest=None,
-                  planner_pixel_grounding=False, memory_sha256=None, memory_snapshot=None)
+                  planner_pixel_grounding=False, memory_sha256=None, memory_snapshot=None,
+                  development_oracle=False, replay_prefix=None, development_start_phase=None)
     return Namespace(**{**values, **overrides})
 
 
@@ -60,12 +61,14 @@ class OptionErrorTests(unittest.TestCase):
         scripted = SimpleNamespace()
 
         _predicates, with_client = assembly.public_perception_evidence(
-            perception, SimpleNamespace(), anchors, planner=anthropic, depth_pose_anchors=True)
+            perception, SimpleNamespace(), anchors, planner=anthropic, depth_pose_anchors=True,
+            hang_camera="perception_camera")
         _predicates, without_client = assembly.public_perception_evidence(
             perception, SimpleNamespace(), anchors, planner=scripted, depth_pose_anchors=True)
 
         self.assertIsInstance(with_client.hang_target_cache, DepthRackFrame)
         self.assertTrue(with_client.depth_pose_anchors)
+        self.assertEqual(with_client.mug_frame_camera, "perception_camera")
         self.assertIsNone(without_client.hang_target_cache)
         self.assertTrue(without_client.depth_pose_anchors)
 
@@ -81,6 +84,28 @@ class OptionErrorTests(unittest.TestCase):
 
     def test_memory_digest_requires_snapshot(self):
         self.assertIn("--memory-snapshot", option_error(cli(memory_sha256="0" * 64), RunSettings()))
+
+    def test_development_resume_requires_oracle_prefix_and_scripted_planner(self):
+        self.assertIn("requires --development-oracle", option_error(
+            cli(development_start_phase="left_grasp_retry", replay_prefix="prefix.npz"), RunSettings()))
+        self.assertIn("requires --replay-prefix", option_error(
+            cli(development_oracle=True, development_start_phase="left_grasp_retry"), RunSettings()))
+        self.assertIn("limited to --planner scripted", option_error(
+            cli(planner="anthropic", development_oracle=True, replay_prefix="prefix.npz",
+                development_start_phase="left_grasp_retry"), RunSettings()))
+
+    def test_left_resume_requires_acquisition_recipe(self):
+        settings = RunSettings.model_validate({"handoff": HANDOFF})
+        self.assertIn("acquisition-only", option_error(cli(development_oracle=True,
+            replay_prefix="prefix.npz", development_start_phase="left_grasp_retry"), settings))
+
+    def test_right_resume_requires_handoff_recipe(self):
+        self.assertIn("scripted handoff", option_error(cli(development_oracle=True,
+            replay_prefix="prefix.npz", development_start_phase="right_grasp"), RunSettings()))
+
+    def test_hang_recovery_requires_handoff_recipe(self):
+        self.assertIn("scripted handoff", option_error(cli(development_oracle=True,
+            replay_prefix="prefix.npz", development_start_phase="hang_recovery"), RunSettings()))
 
 
 class AnthropicSettingsTests(unittest.TestCase):
@@ -106,6 +131,36 @@ class BuildPlannerTests(unittest.TestCase):
     def test_scripted_handoff_recipe_uses_handoff_planner(self):
         settings = RunSettings.model_validate({"handoff": HANDOFF})
         self.assertIsInstance(assembly.build_planner("scripted", settings), HandoffPlanner)
+
+    def test_hang_recovery_uses_development_only_sequence(self):
+        from development.planner.hanging_recovery import HangingRecoveryPlanner
+        settings = RunSettings.model_validate({"handoff": HANDOFF})
+        self.assertIsInstance(assembly.build_planner("scripted", settings,
+            development_start_phase="hang_recovery"), HangingRecoveryPlanner)
+
+    def test_development_resume_starts_left_recovery_with_retreat(self):
+        planner = assembly.build_planner("scripted", RunSettings.model_validate({
+            "recipe": {"max_retries": 1}}), development_start_phase="left_grasp_retry")
+        self.assertEqual(planner.phase, "RETRY_RETREAT")
+        self.assertEqual(planner.retries, 1)
+        selected = planner.select(SimpleNamespace(previous=None,
+            value=lambda name: False if name == "mug_lifted" else True))
+        self.assertEqual((selected.phase, selected.command.action.value),
+                         ("RETRY_RETREAT", "move_to"))
+        self.assertEqual(selected.command.parameters.target, "mug_recovery_clearance")
+        self.assertEqual(selected.command.parameters.path_mode, "target")
+        self.assertEqual(selected.command.parameters.orientation_mode, "preserve_current")
+
+    def test_development_resume_skips_left_transfer_for_right_grasp(self):
+        settings = RunSettings.model_validate({"handoff": HANDOFF})
+        planner = assembly.build_planner("scripted", settings, development_start_phase="right_grasp")
+        self.assertTrue(planner.left_transfer_confirmed)
+        self.assertTrue(planner.stage_attempted)
+        self.assertFalse(planner.right_lift_attempted)
+        selected = planner.select(SimpleNamespace(previous=None,
+            value=lambda name: {"task_success": False, "right_mug_lifted": False}.get(name)))
+        self.assertEqual((selected.phase, selected.command.action.value, selected.command.stop),
+                         ("RIGHT_GRASP", "vla_act", "right_mug_lifted"))
 
     def test_unknown_planner_kind_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported_planner"):
@@ -146,9 +201,14 @@ class InitializationFailureTests(unittest.TestCase):
         self.assertIsNone(cache)
         self.assertEqual(report["status"], "error")
         self.assertEqual(self.events[0]["event_type"], "rack_grounding_initialized")
+        self.assertEqual(self.events[0]["error_code"], "structured_tool_client_required")
 
 
 class TurnDecisionTests(unittest.TestCase):
+    def test_missing_depth_rack_pose_returns_grounding_feedback(self):
+        self.assertEqual(grounding_rejection_code(move("rack_seat"),
+                         "depth_rack_pose_unavailable"), "hang_target_grounding_unavailable")
+
     def test_hang_target_grounding_errors_become_recoverable_rejections(self):
         code = grounding_rejection_code(move("rack_seat"), "rack_frame_not_cached")
         self.assertEqual(code, "hang_target_grounding_unavailable")

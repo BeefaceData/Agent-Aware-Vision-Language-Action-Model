@@ -323,7 +323,8 @@ def build_supervised_planner(options, client):
         max_calls=options.max_turns, max_tokens=4096, transport_retries=0,
         planner_feedback_chunks=1, vla=VLAParameters(max_chunks=1, chunk_size=options.chunk_size,
                                                     max_policy_actions=options.chunk_size)),
-        client=client, preserve_policy_actions=True)
+        client=client, preserve_policy_actions=True,
+        runtime_grasp_monitor=getattr(options, "public_grasp_monitor", False))
 
 
 def run_controller(environment, vla, provider, store, planner, options, *, episode_id, deadline, log):

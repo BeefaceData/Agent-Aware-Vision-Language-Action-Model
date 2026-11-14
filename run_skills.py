@@ -24,7 +24,20 @@ MAX_RUN_NAME_LENGTH = 80 - len(".observation") - 3
 CONFIG_FILLER_WORDS = ("task", "table")
 
 SUCCESSFUL_OUTCOMES = frozenset({
-    "acquisition_confirmed", "left_transfer_complete", "handoff_confirmed", "task_success"})
+    "acquisition_confirmed", "left_transfer_complete", "right_grasp_confirmed",
+    "handoff_confirmed", "task_success"})
+
+
+def confirmed_release(skill_results):
+    """Return true only when the final executed skill completed a certain release."""
+    if not skill_results:
+        return False
+    result = skill_results[-1]
+    return (result.get("skill") == "release"
+            and result.get("completed") is True
+            and result.get("execution_uncertain") is False
+            and (not result.get("episode_terminal")
+                 or result.get("task_success") is True))
 
 
 def successful_outcome(summary):
@@ -32,12 +45,32 @@ def successful_outcome(summary):
     return summary.get("outcome") in SUCCESSFUL_OUTCOMES
 
 
+def attach_hanging_diagnostic(summary, hanging):
+    """Store private post-release measurements without changing task outcome."""
+    diagnostic = dict(hanging)
+    diagnostic["interpretation"] = "diagnostic_only"
+    diagnostic["episode_outcome_source"] = "robotwin_native_task_success"
+    summary["hanging_verification"] = diagnostic
+    return summary
+
+
 def validate_evidence_mode(*, development_oracle, perception_factory, planner_pixel_grounding):
     """Validate evidence sources before simulator initialization."""
     if not (development_oracle or perception_factory or planner_pixel_grounding):
         raise ValueError("evidence_provider_required")
-    if development_oracle and perception_factory:
-        raise ValueError("oracle_and_public_perception_are_mutually_exclusive")
+
+
+def default_public_perception_factory(args, settings):
+    """Use merged public perception for RGB-D harness runs by default.
+
+    An RGB-D development-oracle run gets public perception first and oracle
+    fallback for unknown predicates. Frozen evaluation contracts choose evidence
+    explicitly; the legacy frozen-policy runner does not use this path.
+    """
+    if (args.perception_factory is None and not args.evaluation_manifest
+            and settings.perception.rgbd_enabled):
+        args.perception_factory = "harness.perception.modal_sam3:create_detector"
+    return args
 
 
 def default_output(root, config, seed, *, where, now=None):
@@ -78,11 +111,28 @@ def option_error(args, settings):
 
     Checked before any output directory, simulator or provider is created.
     """
-    full_task = settings.anthropic is not None and settings.anthropic.task_scope == "full_task"
+    configured = settings.anthropic
+    full_task = configured is not None and configured.task_scope == "full_task"
+    development_start_phase = getattr(args, "development_start_phase", None)
+    if development_start_phase:
+        if not getattr(args, "development_oracle", False):
+            return "--development-start-phase requires --development-oracle"
+        if not getattr(args, "replay_prefix", None):
+            return "--development-start-phase requires --replay-prefix"
+        if args.planner != "scripted":
+            return "--development-start-phase is limited to --planner scripted"
+        if getattr(args, "evaluation_manifest", None):
+            return "--development-start-phase is development-only"
+        if development_start_phase == "left_grasp_retry" and settings.handoff is not None:
+            return "left_grasp_retry requires acquisition-only settings"
+        if development_start_phase == "right_grasp" and settings.handoff is None:
+            return "right_grasp requires a scripted handoff configuration"
+        if development_start_phase == "hang_recovery" and settings.handoff is None:
+            return "hang_recovery requires a scripted handoff configuration"
     for enabled, name in ((settings.perception.opus_rack_grounding, "opus_rack_grounding"),
                           (settings.perception.opus_mug_lift_grounding, "opus_mug_lift_grounding")):
         if enabled and args.planner != "anthropic":
-            return f"perception.{name} requires --planner anthropic"
+            return f"perception.{name} requires a model-backed planner"
         if enabled and not args.perception_factory:
             return f"perception.{name} requires --perception-factory"
     if settings.perception.depth_pose_anchors and not args.perception_factory:
@@ -94,19 +144,20 @@ def option_error(args, settings):
     if args.planner_pixel_grounding and not settings.perception.rgbd_enabled:
         return "--planner-pixel-grounding requires perception.rgbd_enabled: true"
     if args.planner_pixel_grounding and args.planner != "anthropic":
-        return "--planner-pixel-grounding requires --planner anthropic"
+        return "--planner-pixel-grounding requires a model-backed planner"
     if args.planner_pixel_grounding and args.evaluation_manifest:
         return "pixel-grounding evaluation requires a frozen prompt/schema snapshot and is not enabled yet"
     if settings.handoff is not None and args.evaluation_manifest:
         return "Handoff evaluation requires a frozen full-task contract and is not enabled yet"
     if args.evaluation_manifest and full_task:
-        return "Full-task Anthropic evaluation requires a frozen full-task contract and is not enabled yet"
+        return "Full-task model-planner evaluation requires a frozen full-task contract and is not enabled yet"
     if full_task and args.planner != "anthropic":
         return "Full-task scope requires --planner anthropic"
     if args.memory_sha256 and not args.memory_snapshot:
         return "--memory-sha256 requires --memory-snapshot"
-    if args.planner == "anthropic" and settings.anthropic is None and not args.anthropic_model:
-        return "Anthropic requires --anthropic-model or config.anthropic.model; there is no fallback model"
+    model_option = getattr(args, "model", None) or getattr(args, "anthropic_model", None)
+    if args.planner == "anthropic" and settings.anthropic is None and not model_option:
+        return "Anthropic requires --model or config.anthropic.model; there is no fallback model"
     return None
 
 
@@ -119,13 +170,19 @@ def build_parser(root):
     parser.add_argument("--config", type=Path, default=root / "configs/skill_runtime.yaml")
     parser.add_argument("--robotwin-root", type=Path, default=root / "RoboTwin")
     parser.add_argument("--planner", choices=("scripted", "anthropic"), default="scripted")
-    parser.add_argument("--anthropic-model", help="Explicit API model ID; may also be set in config.anthropic.model")
+    parser.add_argument("--model", "--anthropic-model", dest="model",
+                        help="Explicit Anthropic model ID; may also be set in the config block")
     parser.add_argument("--memory-snapshot", type=Path, help="Optional fixed task/global memory snapshot")
     parser.add_argument("--memory-sha256", help="Optional expected snapshot digest; reject mismatches")
+    parser.add_argument("--replay-prefix", type=Path,
+                        help="Development-only, state-checked action prefix for reproducible failure replay")
     parser.add_argument("--evaluation-manifest", type=Path, help="Internal frozen evaluation episode contract")
     parser.add_argument("--evaluation-sha256", help="Required expected evaluation manifest hash")
     parser.add_argument("--development-oracle", action="store_true",
                         help="Use simulator evidence only for internal skill gates; not evaluation")
+    parser.add_argument("--development-start-phase",
+                        choices=("left_grasp_retry", "right_grasp", "hang_recovery"),
+                        help="Resume a scripted development planner at a replayed recovery-test boundary")
     parser.add_argument("--perception-factory",
                         help="RGB-only detector factory as package.module:callable")
     parser.add_argument("--planner-pixel-grounding", action="store_true",
@@ -139,17 +196,31 @@ def parse_arguments(parser, argv=None):
     Has no side effects, so remote launchers can validate before allocating a GPU.
     """
     args = parser.parse_args(argv)
+    with args.config.open() as stream:
+        settings = RunSettings.model_validate(yaml.safe_load(stream))
+    args = default_public_perception_factory(args, settings)
     try:
         validate_evidence_mode(development_oracle=args.development_oracle,
             perception_factory=args.perception_factory,
             planner_pixel_grounding=args.planner_pixel_grounding)
     except ValueError as exc:
         parser.error(str(exc))
-    with args.config.open() as stream:
-        settings = RunSettings.model_validate(yaml.safe_load(stream))
     error = option_error(args, settings)
     if error:
         parser.error(error)
+    if args.replay_prefix:
+        if args.evaluation_manifest:
+            parser.error("--replay-prefix is development-only")
+        try:
+            from development.checkpoints.prefix_bundle import load_bundle
+            prefix = load_bundle(args.replay_prefix)
+        except Exception as exc:
+            parser.error(f"cannot load replay prefix: {type(exc).__name__}")
+        if prefix.metadata["seed"] != args.seed:
+            parser.error("--replay-prefix seed does not match --seed")
+        if (settings.budget.max_policy_actions <= len(prefix.actions)
+                or settings.budget.max_vla_chunks <= prefix.metadata["vla_chunks"]):
+            parser.error("episode budgets must leave policy actions and VLA chunks after replay")
     return args, settings
 
 
@@ -159,7 +230,7 @@ def main(argv=None):
     args, settings = parse_arguments(parser, argv)
     memory =(MemorySnapshot.load(args.memory_snapshot.resolve(), expected_sha256=args.memory_sha256)
               if args.memory_snapshot else None)
-    planner_settings = (assembly.anthropic_settings(settings, args.anthropic_model)
+    planner_settings = (assembly.anthropic_settings(settings, args.model)
                         if args.planner == "anthropic" else None)
     from harness.perception.anchors import AnchorRegistry
     anchors = AnchorRegistry()
@@ -181,7 +252,7 @@ def main(argv=None):
         from harness.evaluation.guard import episode_guard
         frozen = FrozenEvaluation.load(args.evaluation_manifest.resolve(), expected_sha256=args.evaluation_sha256)
         check = episode_guard(frozen, root=root, seed=args.seed, settings=settings,
-            planner=args.planner, model_override=args.anthropic_model, memory_path=args.memory_snapshot.resolve(),
+            planner=args.planner, model_override=args.model, memory_path=args.memory_snapshot.resolve(),
             manifest_path=args.evaluation_manifest.resolve(), robotwin_root=args.robotwin_root)
     elif args.evaluation_sha256:
         parser.error("--evaluation-sha256 requires --evaluation-manifest")
@@ -211,6 +282,7 @@ def write_manifest(output, args, settings, *, planner_settings, memory, frozen):
                     planner=args.planner, development_oracle=args.development_oracle,
                     perception_factory=args.perception_factory,
                     planner_pixel_grounding=args.planner_pixel_grounding,
+                    development_start_phase=getattr(args, "development_start_phase", None),
                     opus_rack_grounding=settings.perception.opus_rack_grounding,
                     completion_predicate=settings.completion_predicate,
                     memory_snapshot_sha256=memory.sha256 if memory else None,
@@ -219,7 +291,7 @@ def write_manifest(output, args, settings, *, planner_settings, memory, frozen):
         manifest.update(mode="eval", evaluation_sha256=frozen.digest,
                         condition=frozen.settings.condition, remote_policy_weights_verified=False)
     if planner_settings is not None:
-        manifest.update(anthropic=planner_settings.model_dump(mode="json"),
+        manifest.update(model_planner=planner_settings.model_dump(mode="json"),
                         prompt_sha256=prompt_bundle(planner_settings.task_scope)[1],
                         planner_oracle_inputs=False)
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -254,11 +326,40 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
     from harness.runtime.orchestrator import SkillOrchestrator
     from harness.skills import SkillExecutor
     from harness.vla.modal_client import ModalVLAClient
+    from development.checkpoints.prefix_bundle import load_bundle, replay_prefix
 
     simulator = planner = video = None
-    summary = dict(outcome="runner_interrupted", task_success=None, milestone_reached=False)
+    summary = dict(outcome="runner_interrupted", task_success=None, milestone_reached=False,
+                   development_start_phase=getattr(args, "development_start_phase", None),
+                   evidence_mode=("development_oracle" if args.development_oracle else "public"))
     rack_grounding = {"status": "disabled"}
+    replay_report = None
+    replayed_tcp_poses = {"left": [], "right": []}
     log_assessment = partial(append_jsonl, output / "assessments.jsonl")
+    skill_results = []
+
+    def log_skill_event(event):
+        append_jsonl(output / "skill_events.jsonl", event)
+        if event.get("event_type") == "skill_result":
+            skill_results.append(event.get("result", {}))
+
+    def remember_replayed_tcp_poses(observation):
+        """Retain only measured robot FK poses from a confirmed replay prefix."""
+        for arm, pose in (observation.measured_tcp_poses or {}).items():
+            if arm in replayed_tcp_poses:
+                replayed_tcp_poses[arm].append(tuple(map(float, pose)))
+
+    def log_replay_progress(event):
+        record = {"schema_version": 1, "episode": output.name, **event}
+        append_jsonl(output / "replay_progress.jsonl", record)
+        if event.get("event_type") == "replay_action_requested":
+            print(f"checkpoint replay requested action {event['step']}/"
+                  f"{event['expected_steps']}", flush=True)
+        elif (event.get("event_type") == "replay_action_confirmed"
+                and (event["step"] % 25 == 0
+                     or event["step"] == event["expected_steps"])):
+            print(f"checkpoint replay confirmed action {event['step']}/"
+                  f"{event['expected_steps']}", flush=True)
 
     def log_initialization(event):
         log_assessment({"schema_version": 2, "episode": output.name, "seed": args.seed, **event})
@@ -266,12 +367,17 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
     try:
         # Missing credentials/SDK fail before allocating the simulator GPU.
         planner = assembly.build_planner(args.planner, settings, planner_settings=planner_settings,
-                                         pixel_grounding=args.planner_pixel_grounding)
+            pixel_grounding=args.planner_pixel_grounding,
+            development_start_phase=args.development_start_phase)
         if settings.record_video:
             from development.demos.episode_video import EpisodeVideo
             video = EpisodeVideo(output)
+        from harness.environment.perception_cameras import parse_camera_spec
+        perception_cameras = (() if settings.perception.perception_camera is None else
+                              (parse_camera_spec(settings.perception.perception_camera),))
         simulator = LocalSimulator(args.robotwin_root.resolve(),
             rgbd_enabled=settings.perception.rgbd_enabled,
+            perception_cameras=perception_cameras,
             diagnostics=partial(append_jsonl, output / "simulator_timing.jsonl"))
         environment = open_environment(simulator, video=video, frozen=frozen,
                                        render_once_per_step=settings.render_once_per_step)
@@ -279,6 +385,8 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
         if settings.perception.rgbd_enabled:
             from harness.perception.rgbd import require_camera_frames
             required_cameras = {"head_camera"}
+            if settings.perception.perception_camera is not None:
+                required_cameras.add("perception_camera")
             if settings.perception.opus_rack_grounding:
                 required_cameras.add(settings.perception.rack_grounding_camera)
             if args.planner_pixel_grounding:
@@ -294,20 +402,54 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
             assembly.initialize_mug_lift_evidence(environment, perception, planner,
                 log=log_initialization,
                 minimum_policy_actions=settings.perception.mug_lift_first_check_after_actions)
+        replay_bundle = load_bundle(args.replay_prefix) if args.replay_prefix else None
+        if replay_bundle is not None:
+            replay_report = replay_prefix(environment, replay_bundle, seed=args.seed,
+                observation_callback=remember_replayed_tcp_poses,
+                progress_callback=log_replay_progress)
+            if replay_report["status"] != "matched":
+                summary = dict(outcome="checkpoint_replay_rejected", task_success=None,
+                    milestone_reached=False, replay=replay_report,
+                    error_type="ReplayPrefixDrift")
+                return summary
         predicates, prepare = build_evidence(
             args, settings, environment=environment, simulator=simulator, anchors=anchors,
             perception=perception, planner=planner, rack_frame_cache=rack_frame_cache,
             oracle_log=partial(append_jsonl, output / "oracle.jsonl"))
         executor = SkillExecutor(environment, ModalVLAClient(),
-            log=partial(append_jsonl, output / "skill_events.jsonl"), budget=settings.budget,
+            log=log_skill_event, budget=settings.budget,
             predicates=predicates, anchors=anchors,
             allow_development_oracle=args.development_oracle)
+        if replay_bundle is not None:
+            executor.executed_policy_actions = replay_report["replayed_steps"]
+            executor.vla_chunks_requested = replay_bundle.metadata["vla_chunks"]
+            # Reverse-approach recovery needs the measured path that ended at
+            # this checkpoint. The executor's bounded deques keep only its
+            # latest samples; VLAAct refresh still clears them before new work.
+            for arm, poses in replayed_tcp_poses.items():
+                executor.measured_tcp_history[arm].extend(poses)
         controller = SkillOrchestrator(executor, planner, log=log_assessment,
             save_observation=ObservationStore(output / "observations").save,
             episode_id=output.name, seed=args.seed, max_turns=settings.max_turns,
             completion_predicate=settings.completion_predicate,
             memory=memory, invariant_check=check, prepare=prepare)
         summary = controller.run()
+        summary["development_start_phase"] = getattr(args, "development_start_phase", None)
+        summary["evidence_mode"] = "development_oracle" if args.development_oracle else "public"
+        if (getattr(args, "development_start_phase", None) == "hang_recovery"
+                and confirmed_release(skill_results)):
+            from development.simulator.hanging_check import observe_hanging
+            hanging = observe_hanging(simulator.task,
+                log=partial(append_jsonl, output / "hanging_check.jsonl"),
+                ticks=750, window=250)
+            # The benchmark's native checker remains the episode outcome.
+            # Passive privileged measurements are diagnostic only.
+            attach_hanging_diagnostic(summary, hanging)
+        elif getattr(args, "development_start_phase", None) == "hang_recovery":
+            summary["hanging_verification"] = {
+                "performed": False,
+                "reason": "release_not_completed",
+            }
         check()
     except KeyboardInterrupt:
         # The live-validation watchdog uses SIGINT to stop cleanly. Preserve
@@ -323,6 +465,8 @@ def run_episode(args, settings, *, output, planner_settings, anchors, perception
         summary.update(mode="eval", evaluation_sha256=frozen.digest, condition=frozen.settings.condition)
     if settings.perception.opus_rack_grounding:
         summary["rack_grounding_initialization"] = rack_grounding
+    if replay_report is not None:
+        summary["checkpoint_replay"] = replay_report
     return summary
 
 
@@ -352,21 +496,81 @@ def build_evidence(args, settings, *, environment, simulator, anchors, perceptio
     from harness.predicates.rack_seat_gate import RackSeatReleaseGate
     from harness.predicates.registry import PredicateRegistry
 
-    # Release at a grounded rack seat is only possible with a cached rack frame.
-    release_gate = RackSeatReleaseGate(environment) if rack_frame_cache is not None else None
+    # Oracle geometry is confined to the replay-based development hang test.
+    development_hang_recovery = (
+        args.development_oracle
+        and getattr(args, "development_start_phase", None) == "hang_recovery")
+    depth_hang_targets = (settings.perception.depth_pose_anchors
+                         and getattr(planner, "client", None) is not None)
+    release_gate = (RackSeatReleaseGate(environment)
+                    if rack_frame_cache is not None or depth_hang_targets
+                    or development_hang_recovery else None)
     if perception is not None:
-        return assembly.public_perception_evidence(
+        predicates, prepare = assembly.public_perception_evidence(
             perception, environment, anchors, planner=planner,
             rack_frame_cache=rack_frame_cache, release_gate=release_gate,
             hang_camera=settings.perception.rack_grounding_camera,
             pixel_grounding=args.planner_pixel_grounding,
             depth_pose_anchors=settings.perception.depth_pose_anchors)
-    predicates = (oracle_predicates(simulator.task, log=oracle_log) if args.development_oracle
-                  else PredicateRegistry())
+        if args.development_oracle:
+            oracle_registry = oracle_predicates(simulator.task, log=oracle_log)
+            predicates.fallback_oracle = oracle_registry.hanging_mug
+            oracle_prepare = oracle_anchor_preparer(simulator.task, anchors, log=oracle_log)
+            prepare = development_anchor_fallback(prepare, oracle_prepare, oracle_log)
+        return predicates, prepare
+    elif args.development_oracle:
+        predicates = oracle_predicates(simulator.task, log=oracle_log)
+    else:
+        predicates = PredicateRegistry(perception=perception, rack_seat_gate=release_gate)
     predicates.rack_seat_gate = release_gate
     if args.planner_pixel_grounding:
         return predicates, PlannerPixelAnchorPreparer(environment, anchors)
     return predicates, oracle_anchor_preparer(simulator.task, anchors, log=oracle_log)
+
+
+def development_anchor_fallback(public_prepare, oracle_prepare, log):
+    """Use simulator geometry only when public perception cannot ground a mug target.
+
+    This adapter is installed only for explicit development-oracle runs. It
+    keeps perception as the first source and records each privileged fallback.
+    """
+    def prepare(command, observation):
+        action = command.action.value if hasattr(command.action, "value") else command.action
+        if action != "move_to":
+            return public_prepare(command, observation)
+        target = command.parameters.target
+        recovery_clearance = target == "mug_recovery_clearance"
+        try:
+            prepared = public_prepare(command, observation)
+        except (TypeError, ValueError) as exc:
+            needs_mug_anchor = target in {"mug_pregrasp", "mug_recovery_clearance"}
+            perception_unavailable = (isinstance(exc, TypeError) or
+                                      str(exc) == "grounded_target_unavailable")
+            if not needs_mug_anchor or not perception_unavailable:
+                raise
+            reason = ("grounded_target_unavailable"
+                      if isinstance(exc, ValueError) else "perception_type_error")
+            error_type = type(exc).__name__
+        else:
+            if prepared is not None or not recovery_clearance:
+                return prepared
+            reason, error_type = "public_recovery_clearance_unavailable", None
+
+        log({"event_type": "perception_anchor_oracle_fallback",
+             "target": target, "arm": command.arm,
+             "observation_sequence": observation.sequence,
+             "reason": reason, "error_type": error_type,
+             "information_source": "development_oracle"})
+        try:
+            return oracle_prepare(command, observation)
+        except TypeError as oracle_exc:
+            log({"event_type": "development_oracle_anchor_unavailable",
+                 "target": target, "arm": command.arm,
+                 "observation_sequence": observation.sequence,
+                 "error_type": type(oracle_exc).__name__,
+                 "information_source": "development_oracle"})
+            raise ValueError("grounded_target_unavailable") from None
+    return prepare
 
 
 def close_resources(summary, *, video, simulator, planner):

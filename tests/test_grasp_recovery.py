@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from development.hanging.grasp_recovery import GraspRecovery
+from development.hanging.grasp_recovery import GraspRecovery, LIFT_M, START_POSE_ANCHOR
 from development.hanging.supervised import HangingRecoveryHook
 from harness.environment.base import Observation
 from harness.perception.anchors import AnchorRegistry
@@ -33,6 +33,11 @@ def report(*, held=None, off_table=None, confidence=None, upright=True):
 class FakeEnvironment:
     def __init__(self, opening=0.):
         self.opening = opening
+        self.sequence = 1000
+
+    def observe(self):
+        self.sequence += 1
+        return observation(self.sequence, 0.)
 
     def measured_gripper_opening(self, arm):
         if self.opening is None:
@@ -71,7 +76,8 @@ class FakeExecutor:
     def execute(self, command, confirmed_observation=None, allow_recoverable_tracking_error=False):
         self.commands.append(command)
         if command.action == SkillType.MOVE_TO:
-            self.anchor = self.anchors.resolve("mug_recovery_clearance", command.arm, confirmed_observation)
+            if command.parameters.target == START_POSE_ANCHOR:
+                self.anchor = self.anchors.resolve(START_POSE_ANCHOR, command.arm, confirmed_observation)
             ok = self.move_ok
         else:
             self.provider.authorized_during_open = set(self.provider.authorized)
@@ -146,16 +152,20 @@ class DetectionTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
-    def test_moves_above_the_mug_then_opens_the_measured_empty_hand(self):
-        grasp, _, provider, executor, events = monitor(opening=0.)
+    def test_lifts_opens_then_returns_to_the_reset_pose(self):
+        grasp, environment, provider, executor, events = monitor(opening=0.)
+        environment.arm_state = lambda arm: {"pose": np.array([.3, -.1, .95, 1., 0., 0., 0.]),
+                                             "tcp_pose": POSE.copy()}
         result = grasp.recover(observation(400, 0.), "measured_fingers_closed_on_nothing", remaining=BUDGET)
         self.assertEqual(result["status"], "grasp_recovery_completed")
-        move, release = executor.commands
-        self.assertEqual((move.action, move.arm, move.parameters.target, move.parameters.orientation_mode),
-                         (SkillType.MOVE_TO, "right", "mug_recovery_clearance", "preserve_current"))
-        np.testing.assert_allclose(executor.anchor.pose[:3], [.05, 0., .88])
-        np.testing.assert_allclose(executor.anchor.pose[3:], POSE[3:])
+        lift, release, back = executor.commands
+        self.assertEqual((lift.action, lift.arm, lift.parameters.target, lift.parameters.offset_xyz,
+                          lift.parameters.orientation_mode),
+                         (SkillType.MOVE_TO, "right", "current_ee", (0., 0., LIFT_M), "preserve_current"))
         self.assertEqual((release.action, release.parameters.value), (SkillType.SET_GRIPPER, 1.))
+        self.assertEqual((back.action, back.parameters.target), (SkillType.MOVE_TO, START_POSE_ANCHOR))
+        # The reset pose recorded when the monitor was built, not the current one.
+        np.testing.assert_allclose(executor.anchor.pose, POSE)
         self.assertEqual(provider.authorized_during_open, {"right"})
         self.assertEqual(provider.authorized, set())
         self.assertEqual(grasp.retries, 1)
@@ -170,11 +180,11 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(executor.commands, [])
         self.assertIsNone(grasp.check(observation(416, 0.)))
 
-    def test_unclear_upright_or_missing_depth_waits_without_motion(self):
-        for upright, position in ((None, np.zeros(3)), (True, None)):
-            with self.subTest(upright=upright):
+    def test_unclear_upright_waits_without_motion(self):
+        for camera in (report(upright=None), None):
+            with self.subTest(camera=camera):
                 grasp, _, provider, executor, _ = monitor()
-                provider.report, provider.position = report(upright=upright), position
+                provider.report = camera
                 self.assertIsNone(grasp.recover(observation(400, 0.), "basis", remaining=BUDGET))
                 self.assertEqual((executor.commands, grasp.retries, grasp.stopped), ([], 0, None))
 
@@ -184,12 +194,25 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result["reason"], "hand_not_measured_empty_before_opening")
         self.assertEqual([c.action for c in executor.commands], [SkillType.MOVE_TO])
 
-    def test_failed_clearance_move_stops_recovery(self):
+    def test_failed_lift_stops_recovery_before_opening(self):
         grasp, _, provider, executor, _ = monitor()
         executor.move_ok = False
         self.assertEqual(grasp.recover(observation(400, 0.), "basis", remaining=BUDGET)["reason"],
-                         "clearance_move_failed")
+                         "lift_failed")
         self.assertEqual(len(executor.commands), 1)
+
+    def test_lift_never_leaves_the_workspace(self):
+        grasp, environment, _, executor, _ = monitor()
+        environment.arm_state = lambda arm: {"pose": np.array([.1, -.2, 1.30, 1., 0., 0., 0.])}
+        grasp.recover(observation(400, 0.), "basis", remaining=BUDGET)
+        self.assertAlmostEqual(executor.commands[0].parameters.offset_xyz[2], .05)
+
+    def test_hand_empty_reads_the_fingers(self):
+        for opening, expected in ((.1818, True), (.25, False), (1., False), (None, None)):
+            with self.subTest(opening=opening):
+                grasp, environment, *_ = monitor(opening=opening)
+                self.assertIs(grasp.hand_empty("right"), expected)
+                self.assertIsNone(grasp.hand_empty("left"))
 
     def test_retry_and_budget_limits(self):
         grasp, *_ , executor, _ = monitor(max_retries=1)
@@ -244,6 +267,10 @@ class ProviderReleaseTests(unittest.TestCase):
         result = provider.evaluate("release_ready", current, arm="right")
         self.assertEqual((result.value, result.reason), (True, "measured_empty_hand"))
         provider.revoke_empty_hand_release("right")
+        provider.measured_hand_empty = lambda arm: True
+        lifted = provider.evaluate("right_mug_lifted", current, arm="right")
+        self.assertEqual((lifted.value, lifted.reason), (False, "measured_fingers_empty"))
+        provider.measured_hand_empty = None
         self.assertIsNone(provider.evaluate("release_ready", current, arm="right").value)
         self.assertIsNone(provider.cached_report(current))
         client.assert_not_called()

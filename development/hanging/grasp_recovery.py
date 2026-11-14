@@ -14,12 +14,18 @@ At every policy-chunk boundary the monitor checks, for one arm:
   alarm on the successful seed 15 (0.8 missed seed 19).
 
 The fingers on two consecutive boundaries, or two confident camera frames,
-confirm a loss. Recovery is
-the sequence from ``grasp/retry-sequence``: one MOVE_TO to
-``mug_recovery_clearance`` (10 cm above the mug, current wrist orientation;
-the skill rises first, then travels, then descends), open the measured-empty
-gripper, and give control back to the frozen policy with a fresh history.
-It needs the mug visibly upright; a toppled mug is never re-grasped.
+confirm a loss. Recovery, for a visibly upright mug only:
+
+1. lift the empty hand straight up (current wrist orientation), clear of the mug;
+2. open it, only if the fingers still measure empty;
+3. move the arm back to the pose it had at reset;
+4. give control back to the frozen policy with a fresh history.
+
+The first live test (seed 18, 14 Nov 2026) used Thabo's clearance pose, 10 cm
+above the mug, as the hand-back point. The move and the opening worked, but
+the policy restarted from that unfamiliar pose and swept the mug over. The
+right arm waits at its reset pose until every handoff, so returning there
+recreates the start of a normal handoff.
 
 The monitor never makes its own vision request: it reads the report the
 planner turn already requested for the same frame. Uses no simulator state.
@@ -28,7 +34,7 @@ planner turn already requested for the same frame. Uses no simulator state.
 import numpy as np
 
 from harness.perception.anchors import Anchor
-from harness.perception.geometry import planning_pose_for_tcp_target, pose7
+from harness.perception.geometry import pose7
 from harness.skills.schemas import SkillCommand, SkillType
 
 
@@ -39,10 +45,12 @@ COMMAND_OPEN, COMMAND_CLOSED = .5, .05
 # left hand holding the mug read 0.25-0.26. 0.19 sits just above the empty
 # limit. A right-hand grasp has not been measured yet.
 DEFAULT_EMPTY_OPENING = .19
-CLEARANCE_M = .10
+LIFT_M = .12
+WORKSPACE_TOP_Z = 1.35
 CONFIRMING_BOUNDARIES = 2
-RECOVERY_SKILL_CALLS = 2
-RECOVERY_ANALYTIC_TICKS = 3600
+RECOVERY_SKILL_CALLS = 3
+START_POSE_ANCHOR = "grasp_recovery_start_pose"
+RECOVERY_ANALYTIC_TICKS = 6000
 
 
 class GraspRecovery:
@@ -60,7 +68,16 @@ class GraspRecovery:
         self.retries = 0
         self.stopped = None
         self.attempts = []
+        # Constructed right after reset: this is the arm's waiting pose.
+        self.start_pose = pose7(environment.arm_state(arm)["pose"])
         self._reset_monitor(open_seen=False)
+
+    def hand_empty(self, arm):
+        """True when this arm's fingers measure closed on nothing; None if unknown."""
+        if arm != self.arm:
+            return None
+        opening = self._measured_opening()
+        return None if opening is None else opening <= self.empty_opening
 
     def _reset_monitor(self, *, open_seen):
         self.open_seen = open_seen
@@ -125,6 +142,19 @@ class GraspRecovery:
                       arm=self.arm, reason=reason, retries=self.retries, **details))
         return dict(status="grasp_recovery_stopped", reason=reason)
 
+    def _move(self, record, key, parameters, reason):
+        current = self.environment.observe()
+        if parameters.get("target") == START_POSE_ANCHOR:
+            self.executor.anchors.bind(START_POSE_ANCHOR, self.arm, Anchor(
+                tuple(float(x) for x in self.start_pose), current.sequence, "perception"))
+        result = self.executor.execute(SkillCommand(action=SkillType.MOVE_TO, arm=self.arm,
+            parameters=dict(max_physics_ticks=3000, **parameters), reason=reason),
+            confirmed_observation=current, allow_recoverable_tracking_error=True)
+        record[key] = dict(completed=result.completed, stop_reason=result.stop_reason,
+                           physics_ticks=result.executed_physics_ticks,
+                           execution_uncertain=result.execution_uncertain)
+        return result.completed and not result.execution_uncertain
+
     def recover(self, observation, basis, *, remaining):
         """Run one re-grasp sequence; returns a record, or None to wait a boundary."""
         if self.retries >= self.max_retries:
@@ -137,35 +167,22 @@ class GraspRecovery:
         upright = None if report is None else report.mug_upright
         if upright is False:
             return self._stop(observation, "mug_toppled_not_regrasped", basis=basis)
-        position = self.provider.mug_surface_position(observation) if upright else None
-        if position is None:
-            # Wait for a frame that shows an upright mug with usable depth.
+        if upright is not True:
+            # Wait for a frame that shows the mug upright.
             self.log(dict(event_type="grasp_recovery_waiting", observation_sequence=observation.sequence,
-                          arm=self.arm, basis=basis, mug_upright=upright,
-                          reason="upright_mug_position_unavailable"))
+                          arm=self.arm, basis=basis, mug_upright=upright, reason="mug_upright_unconfirmed"))
             return None
         state = self.environment.arm_state(self.arm)
-        measured, measured_tcp = pose7(state["pose"]), pose7(state.get("tcp_pose", state["pose"]))
-        tcp_target = np.concatenate((np.asarray(position, dtype=float)+(0., 0., CLEARANCE_M), measured_tcp[3:]))
-        planning = planning_pose_for_tcp_target(measured, measured_tcp, tcp_target)
-        self.executor.anchors.bind("mug_recovery_clearance", self.arm,
-                                   Anchor(tuple(float(x) for x in planning), observation.sequence, "perception"))
+        lift = min(LIFT_M, max(0., WORKSPACE_TOP_Z-float(pose7(state["pose"])[2])))
         self.retries += 1
         record = dict(attempt=self.retries, basis=basis, observation_sequence=observation.sequence,
-                      mug_surface_position=[float(x) for x in position],
-                      clearance_tcp_target=[float(x) for x in tcp_target])
+                      lift_m=lift, start_pose=[float(x) for x in self.start_pose])
         self.log(dict(event_type="grasp_recovery_started", arm=self.arm, **record))
-        move = self.executor.execute(SkillCommand(action=SkillType.MOVE_TO, arm=self.arm,
-            parameters=dict(target="mug_recovery_clearance", orientation_mode="preserve_current",
-                            max_physics_ticks=3000),
-            reason=f"grasp recovery: {basis}"), confirmed_observation=observation,
-            allow_recoverable_tracking_error=True)
-        record["move"] = dict(completed=move.completed, stop_reason=move.stop_reason,
-                              physics_ticks=move.executed_physics_ticks,
-                              execution_uncertain=move.execution_uncertain)
-        if not move.completed or move.execution_uncertain:
+        if not self._move(record, "lift", dict(target="current_ee", offset_xyz=(0., 0., lift),
+                                               orientation_mode="preserve_current"),
+                          f"grasp recovery: lift the empty hand clear ({basis})"):
             self.attempts.append(record)
-            return self._stop(observation, "clearance_move_failed", stop_reason=move.stop_reason)
+            return self._stop(observation, "lift_failed", stop_reason=record["lift"]["stop_reason"])
         opening = self._measured_opening()
         if opening is None or opening > self.empty_opening:
             # The fingers met something on the way up; never open a hand that may hold the mug.
@@ -181,9 +198,14 @@ class GraspRecovery:
             self.provider.revoke_empty_hand_release(self.arm)
         record["open"] = dict(completed=release.completed, stop_reason=release.stop_reason,
                               physics_ticks=release.executed_physics_ticks)
-        self.attempts.append(record)
         if not release.completed or release.execution_uncertain:
+            self.attempts.append(record)
             return self._stop(observation, "gripper_open_failed", stop_reason=release.stop_reason)
+        if not self._move(record, "return", dict(target=START_POSE_ANCHOR),
+                          "grasp recovery: return the arm to its reset pose for a fresh policy grasp"):
+            self.attempts.append(record)
+            return self._stop(observation, "return_to_start_failed", stop_reason=record["return"]["stop_reason"])
+        self.attempts.append(record)
         self._reset_monitor(open_seen=True)
         self.log(dict(event_type="grasp_recovery_completed", arm=self.arm, **record))
         return dict(status="grasp_recovery_completed", **record)

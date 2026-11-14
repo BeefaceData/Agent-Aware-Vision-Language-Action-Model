@@ -29,6 +29,9 @@ WAITABLE_GEOMETRY_REASONS = frozenset({
 })
 
 
+SUPERVISED_TIME_LIMIT_MAX = 110
+
+
 @dataclass(frozen=True)
 class SupervisedOptions:
     model: str
@@ -52,7 +55,11 @@ class SupervisedOptions:
 
     def validate(self):
         from development.hanging.baseline import validate_options
-        validate_options(self.seed, self.max_actions, self.chunk_size, self.time_limit_minutes)
+        validate_options(self.seed, self.max_actions, self.chunk_size, min(self.time_limit_minutes, 75))
+        # Claude latency and supervisor motion make supervised runs slower than
+        # policy-only ones; 75 minutes ended a 900-action run at 880 actions.
+        if type(self.time_limit_minutes) is not int or not 1 <= self.time_limit_minutes <= SUPERVISED_TIME_LIMIT_MAX:
+            raise ValueError("invalid_time_limit_minutes")
         if not isinstance(self.model, str) or not self.model.startswith("claude-") or "MODEL" in self.model:
             raise ValueError("explicit_claude_model_required")
         if type(self.max_turns) is not int or not 1 <= self.max_turns <= 80:
@@ -385,6 +392,7 @@ def run_controller(environment, vla, provider, store, planner, options, *, episo
         from development.hanging.grasp_recovery import GraspRecovery
         grasp = GraspRecovery(environment, executor, provider, log=log, arm="right",
                               empty_opening=options.empty_hand_opening, max_retries=options.grasp_retries)
+        provider.measured_hand_empty = grasp.hand_empty
     hook = HangingRecoveryHook(environment, provider, store, episode_id=episode_id,
                                deadline=deadline, log=log, policy_chunk_size=options.chunk_size,
                                visibility_action_budget=options.max_actions,

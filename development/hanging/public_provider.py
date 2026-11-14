@@ -735,6 +735,18 @@ class PublicRGBDHangingProvider:
         # Arms whose empty hand the grasp-recovery hook measured before it opens
         # the gripper; release_ready answers from this without a vision request.
         self._empty_hand_release = set()
+        # Optional measured proprioception, set by the runner: arm -> True when
+        # the fingers are closed on nothing (None when unknown).
+        self.measured_hand_empty = None
+
+    def _right_hand_measured_empty(self):
+        check = self.measured_hand_empty
+        if not callable(check):
+            return False
+        try:
+            return check("right") is True
+        except Exception:
+            return False
 
     def authorize_empty_hand_release(self, arm):
         if arm not in ("left", "right"):
@@ -1354,6 +1366,11 @@ class PublicRGBDHangingProvider:
             return PredicateResult(name=name, value=True, source="perception",
                                    observation_sequence=observation.sequence,
                                    reason="measured_empty_hand")
+        if name in ("right_mug_lifted", "handoff_confirmed") and self._right_hand_measured_empty():
+            # Fingers closed on nothing outrank a visual "held" report.
+            return PredicateResult(name=name, value=False, source="perception",
+                                   observation_sequence=observation.sequence,
+                                   reason="measured_fingers_empty")
         try:
             report = self.observe(observation)
         except Exception:

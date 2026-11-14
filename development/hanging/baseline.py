@@ -8,6 +8,7 @@ import numpy as np
 
 from harness.environment.base import vector14
 from harness.jsonl import append_jsonl
+from harness.skills.vla_act import _measured_openings
 
 
 def validate_options(seed, max_actions, chunk_size, time_limit_minutes):
@@ -61,7 +62,8 @@ def rollout(environment, vla, store, video, output, *, seed, max_actions,
                 summary["policy_actions"] = index
                 append_jsonl(output / "actions.jsonl", dict(event="action_confirmed",
                     index=index, sequence=observation.sequence,
-                    command_state=list(observation.command_state)))
+                    command_state=list(observation.command_state),
+                    **_measured_openings(environment)))
                 store.save(observation)
                 video.append(observation, "frozen_policy", index, 0)
                 if environment.native_success:

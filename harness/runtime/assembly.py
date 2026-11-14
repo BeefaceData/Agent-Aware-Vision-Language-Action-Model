@@ -83,7 +83,7 @@ def _configure_optional(detector, method_name, value, *, default, error):
 
 
 def anthropic_settings(run_settings, model_override=None):
-    """Resolve planner settings from config plus an optional CLI model override.
+    """Resolve Anthropic settings plus an optional CLI model override.
 
     There is no fallback model: a missing model is a configuration error.
     """
@@ -101,15 +101,31 @@ def anthropic_settings(run_settings, model_override=None):
     return AnthropicSettings.model_validate(options)
 
 
-def build_planner(kind, run_settings, *, planner_settings=None, pixel_grounding=False):
-    """Return the planner for ``kind`` ("anthropic" or "scripted")."""
+def build_planner(kind, run_settings, *, planner_settings=None, pixel_grounding=False,
+                  development_start_phase=None):
+    """Return the planner for Anthropic or scripted mode."""
     if kind == "anthropic":
+        if development_start_phase is not None:
+            raise ValueError("development_start_phase_requires_scripted_planner")
         return AnthropicPlanner(planner_settings, require_pixel_grounding=pixel_grounding)
     if kind != "scripted":
         raise ValueError("unsupported_planner")
     if run_settings.handoff is not None:
-        return HandoffPlanner(run_settings.recipe, run_settings.handoff)
-    return GraspRetryPlanner(run_settings.recipe)
+        if development_start_phase == "hang_recovery":
+            from development.planner.hanging_recovery import HangingRecoveryPlanner
+            return HangingRecoveryPlanner()
+        planner = HandoffPlanner(run_settings.recipe, run_settings.handoff)
+        if development_start_phase == "right_grasp":
+            planner.resume_development_right_grasp()
+        elif development_start_phase is not None:
+            raise ValueError("development_start_phase_incompatible_with_handoff")
+        return planner
+    planner = GraspRetryPlanner(run_settings.recipe)
+    if development_start_phase == "left_grasp_retry":
+        planner.resume_development_retry(retries=1)
+    elif development_start_phase is not None:
+        raise ValueError("development_start_phase_incompatible_with_acquisition")
+    return planner
 
 
 def initialize_rack_frame(environment, perception, planner, *, camera, log):
@@ -148,6 +164,11 @@ def initialize_rack_frame(environment, perception, planner, *, camera, log):
     except Exception as exc:
         report = {"status": "error", "error_type": type(exc).__name__,
                   "latency_seconds": time.perf_counter() - started}
+        error_code = str(exc)
+        if (error_code.isascii() and error_code.islower()
+                and all(character.isalnum() or character == "_" for character in error_code)
+                and len(error_code) <= 100):
+            report["error_code"] = error_code
         log({"event_type": "rack_grounding_initialized", **report,
              "model": planner.settings.model})
         return None, report
@@ -194,8 +215,10 @@ def public_perception_evidence(perception, environment, anchors, *, planner,
     the depth poses.
     """
     predicates = PredicateRegistry(perception=perception, rack_seat_gate=release_gate)
+    if depth_pose_anchors:
+        perception.enable_depth_pose_anchors()
     if depth_pose_anchors and getattr(planner, "client", None) is not None:
-        rack_frame_cache = DepthRackFrame(perception)
+        rack_frame_cache = DepthRackFrame(perception, fallback=rack_frame_cache)
     mug_frame_grounder = None
     if rack_frame_cache is not None:
         mug_frame_grounder = OpusObjectFrameGrounder(

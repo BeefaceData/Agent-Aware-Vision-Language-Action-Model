@@ -54,6 +54,8 @@ class VisibleHangingReport(Model):
     handle_back: SurfacePixel | None = None
     opposite_handle_faces_visible: StrictBool
     right_gripper_closed_visible: StrictBool | None = None
+    # Whether the mug visibly stands on its base (False: on its side/toppled).
+    mug_upright: StrictBool | None = None
     table_material_px: list[tuple[StrictFloat, StrictFloat]] | None = Field(default=None, max_length=32)
     rack_region_px: list[tuple[StrictFloat, StrictFloat]] | None = Field(default=None, max_length=16)
     peg_confidence: StrictFloat | None = Field(default=None, ge=0, le=1)
@@ -95,6 +97,8 @@ independent of geometry visibility. Do not lower it because the handle is hidden
 transfer_complete describes historical transfer evidence and may remain null
 even when the right arm visibly holds a lifted mug. Such current state supports
 stage=hanging without inventing a transfer history.
+mug_upright: true when the mug visibly stands on its base (held or on the
+table), false when it lies on its side or is tipped over, null if unclear.
 For independent lift corroboration, report right_gripper_closed_visible only
 when the named fingers visibly form a closed grasp (not from the command or
 wrist-camera proximity). Otherwise null. Supply 6-32 widely spread visible
@@ -728,6 +732,71 @@ class PublicRGBDHangingProvider:
         self._last_lift_sequence = None
         self._lift_identity = episode_id
         self._lift_motion_supported = False
+        # Arms whose empty hand the grasp-recovery hook measured before it opens
+        # the gripper; release_ready answers from this without a vision request.
+        self._empty_hand_release = set()
+        # Optional measured proprioception, set by the runner: arm -> True when
+        # the fingers are closed on nothing (None when unknown).
+        self.measured_hand_empty = None
+
+    def _right_hand_measured_empty(self):
+        check = self.measured_hand_empty
+        if not callable(check):
+            return False
+        try:
+            return check("right") is True
+        except Exception:
+            return False
+
+    def authorize_empty_hand_release(self, arm):
+        if arm not in ("left", "right"):
+            raise ValueError("invalid_arm")
+        self._empty_hand_release.add(arm)
+
+    def revoke_empty_hand_release(self, arm):
+        self._empty_hand_release.discard(arm)
+
+    def cached_report(self, observation):
+        """This frame's report if already requested; never makes a request."""
+        try:
+            return self.observe(observation) if self._key is not None and self._key[0] == observation.sequence else None
+        except Exception:
+            return None
+
+    def mug_surface_position(self, observation):
+        """Median visible mug-body surface point (world frame) from public RGB-D.
+
+        Uses this frame's reported body polygon and perception-camera depth,
+        keeping the dominant depth band so table or background pixels admitted
+        by the approximate polygon are dropped. Returns None when unavailable.
+        """
+        report = self.cached_report(observation)
+        camera = (observation.camera_frames or {}).get("perception_camera")
+        if report is None or camera is None or not report.body_polygon_px:
+            return None
+        from PIL import Image, ImageDraw
+        h, w = camera.depth_m.shape
+        polygon = np.asarray(report.body_polygon_px, dtype=float)
+        if (polygon.ndim != 2 or polygon.shape[1] != 2 or len(polygon) < 3 or not np.isfinite(polygon).all()
+                or (polygon < 0).any() or (polygon[:, 0] >= w).any() or (polygon[:, 1] >= h).any()):
+            return None
+        mask_image = Image.new("1", (w, h))
+        ImageDraw.Draw(mask_image).polygon([tuple(p) for p in polygon], fill=1)
+        mask = np.asarray(mask_image, dtype=bool) & (camera.depth_m > 0)
+        pixels = np.argwhere(mask)
+        if len(pixels) < 6:
+            return None
+        depths = camera.depth_m[mask]
+        keep = np.abs(depths-np.median(depths)) <= .03
+        points = []
+        for v, u in pixels[keep][::max(1, int(keep.sum())//200)]:
+            try:
+                points.append(np.asarray(camera.unproject(float(u), float(v), radius=1), dtype=float))
+            except ValueError:
+                continue
+        if len(points) < 6:
+            return None
+        return np.median(np.asarray(points), axis=0)
 
     def _lift_table_plane(self, observation, report):
         camera = observation.camera_frames["perception_camera"]
@@ -1292,6 +1361,16 @@ class PublicRGBDHangingProvider:
                     and getattr(report, attribute) is True and getattr(previous, attribute) is True)
 
     def evaluate(self, name, observation, *, arm="auto"):
+        if name == "release_ready" and arm in self._empty_hand_release:
+            # Opening a measured-empty hand cannot drop anything.
+            return PredicateResult(name=name, value=True, source="perception",
+                                   observation_sequence=observation.sequence,
+                                   reason="measured_empty_hand")
+        if name in ("right_mug_lifted", "handoff_confirmed") and self._right_hand_measured_empty():
+            # Fingers closed on nothing outrank a visual "held" report.
+            return PredicateResult(name=name, value=False, source="perception",
+                                   observation_sequence=observation.sequence,
+                                   reason="measured_fingers_empty")
         try:
             report = self.observe(observation)
         except Exception:
@@ -1302,6 +1381,8 @@ class PublicRGBDHangingProvider:
                                    reason="public_grounding_unavailable")
         value = None
         state_confident = report.task_state_confidence is not None and report.task_state_confidence >= .85
+        if name == "mug_toppled" and report.mug_upright is not None and state_confident:
+            value = not report.mug_upright
         if name == "mug_lifted":
             value = True if self._confirmed(report, "mug_off_table") and (
                 self._confirmed(report, "left_held") or self._confirmed(report, "right_held")) else None

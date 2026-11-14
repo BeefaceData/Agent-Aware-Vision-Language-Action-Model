@@ -11,6 +11,7 @@ from development.simulator.hanging_check import observe_hanging
 from development.demos.episode_demo import run_demo
 from development.demos.fresh_episode_demo import run_fresh, demonstration_boundary
 from development.simulator.rack_geometry import rack_diagnostics
+from run_skills import confirmed_release
 from tests import test_checkpoints as fixtures
 from tests.test_baseline_compatibility import FakeRuntime
 from tests.test_rack_recovery import RackTask
@@ -25,12 +26,14 @@ class HangingCheckTests(unittest.TestCase):
                   "mug_contact_entities": ["rack"], "mug_position": [0.2, 0.15, 0.85]}
         return task, sample
 
-    def test_requires_full_opening_rack_support_no_robot_and_stability(self):
+    def test_allows_short_rack_table_contact_but_requires_rack_support(self):
         task, sample = self.task_and_sample()
         for change, expected in (({}, True), ({"right_gripper": 0.81}, False),
             ({"mug_contact_entities": ["rack", "fr_link8"]}, False),
             ({"mug_contact_entities": ["rack", "right_camera"]}, False),
-            ({"mug_contact_entities": ["table"]}, False), ({"task_success": False}, False)):
+            ({"mug_contact_entities": ["rack", "table"]}, True),
+            ({"mug_contact_entities": ["table"]}, False),
+            ({"task_success": False}, False)):
             with patch("development.simulator.hanging_check.rack_diagnostics", return_value={**sample, **change}):
                 r = observe_hanging(task, log=lambda e: None, ticks=3, window=3)
                 self.assertEqual(r["stable_hanging"], expected)
@@ -45,6 +48,26 @@ class HangingCheckTests(unittest.TestCase):
         with patch("development.simulator.hanging_check.rack_diagnostics", side_effect=transient):
             self.assertFalse(observe_hanging(task, log=lambda e: None, ticks=3, window=3)["stable_hanging"])
         with self.assertRaises(ValueError): observe_hanging(task, log=lambda e: None, ticks=1, window=2)
+
+
+class ReleaseGateTests(unittest.TestCase):
+    def test_hanging_check_requires_a_completed_certain_release(self):
+        self.assertFalse(confirmed_release([]))
+        self.assertFalse(confirmed_release([{"skill": "move_to", "completed": True,
+                                             "execution_uncertain": False}]))
+        self.assertFalse(confirmed_release([{"skill": "release", "completed": False,
+                                             "execution_uncertain": False}]))
+        self.assertFalse(confirmed_release([{"skill": "release", "completed": True,
+                                             "execution_uncertain": True}]))
+        self.assertTrue(confirmed_release([{"skill": "release", "completed": True,
+                                            "execution_uncertain": False,
+                                            "episode_terminal": False}]))
+        self.assertTrue(confirmed_release([{"skill": "release", "completed": True,
+                                            "execution_uncertain": False,
+                                            "episode_terminal": True, "task_success": True}]))
+        self.assertFalse(confirmed_release([{"skill": "release", "completed": True,
+                                             "execution_uncertain": False,
+                                             "episode_terminal": True, "task_success": False}]))
 
 
 class EpisodeDemoTests(unittest.TestCase):

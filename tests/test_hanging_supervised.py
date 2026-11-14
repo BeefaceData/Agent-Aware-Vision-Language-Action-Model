@@ -833,7 +833,7 @@ class SupervisedHangingTests(unittest.TestCase):
         self.assertIn("never image-left/right", PUBLIC_PROMPT)
         self.assertIn("right_camera on the right wrist", PUBLIC_PROMPT)
 
-    def test_generalized_planner_forwards_all_policy_actions_while_legacy_retains_lock(self):
+    def test_both_planners_forward_all_policy_actions_without_arm_lock(self):
         class ActionEnvironment(PublicEnvironment):
             def __init__(self):
                 super().__init__(x=0.)
@@ -848,14 +848,15 @@ class SupervisedHangingTests(unittest.TestCase):
                     parameters={"max_chunks": 1, "chunk_size": 16, "max_policy_actions": 16})])
                 planner = build_supervised_planner(SupervisedOptions("claude-test"), client)
                 if not generalized:
-                    planner = AnthropicPlanner(planner.settings, client=client)
+                    planner = AnthropicPlanner(planner.settings, client=client, runtime_grasp_monitor=False)
                 environment = ActionEnvironment()
                 observation = environment.observe()
                 context = PlannerContext(1, observation, (), None,
                     remaining_budget={"policy_actions": 900, "vla_chunks": 57})
                 selection = planner.select(context)
                 self.assertEqual(selection.phase, "GRASP")
-                self.assertEqual(selection.command.parameters.lock_arm, None if generalized else "right")
+                # The arm lock was removed with the grasp-retry merge: the VLA coordinates both arms.
+                self.assertFalse(hasattr(selection.command.parameters, "lock_arm"))
                 policy = Mock()
                 policy.infer.return_value = actions.copy()
                 executor = SkillExecutor(environment, policy, log=lambda event: None,
@@ -863,11 +864,7 @@ class SupervisedHangingTests(unittest.TestCase):
                 result = executor.execute(selection.command)
                 self.assertEqual(result.executed_policy_actions, 2)
                 forwarded = np.asarray(environment.actions)
-                if generalized:
-                    np.testing.assert_array_equal(forwarded, actions)
-                else:
-                    np.testing.assert_array_equal(forwarded[:, :7], actions[:, :7])
-                    np.testing.assert_array_equal(forwarded[:, 7:], np.tile(observation.command_state[7:], (2, 1)))
+                np.testing.assert_array_equal(forwarded, actions)
                 np.testing.assert_array_equal(actions, np.arange(28).reshape(2, 14)/40)
 
     def test_planner_summary_is_json_dictionary_for_all_confidence_and_grasp_states(self):
@@ -1069,7 +1066,7 @@ class SupervisedHangingTests(unittest.TestCase):
             fallback=SkillCommand.model_validate(result["policy_command"])
             self.assertEqual(fallback.action,SkillType.VLA_ACT)
             self.assertEqual(fallback.parameters.max_policy_actions,8)
-            self.assertIsNone(fallback.parameters.lock_arm)
+            self.assertFalse(hasattr(fallback.parameters,"lock_arm"))
             self.assertEqual(hook.attempts,0)
             recover.assert_not_called()
             for sequence,budget in [(480,remaining),(481,remaining),(400,{**remaining,"policy_actions":0}),

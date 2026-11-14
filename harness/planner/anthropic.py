@@ -49,11 +49,15 @@ class AnthropicSettings(Model):
 
 
 class AnthropicPlanner:
-    def __init__(self, settings, *, client=None, require_pixel_grounding=False):
+    def __init__(self, settings, *, client=None, require_pixel_grounding=False,
+                 preserve_policy_actions=False):
         self.settings = AnthropicSettings.model_validate(settings.model_dump())
         if type(require_pixel_grounding) is not bool:
             raise ValueError("pixel_grounding_mode_must_be_boolean")
         self.require_pixel_grounding = require_pixel_grounding
+        if type(preserve_policy_actions) is not bool:
+            raise ValueError("policy_passthrough_mode_must_be_boolean")
+        self.preserve_policy_actions = preserve_policy_actions
         self.prompt, self.prompt_hash = prompt_bundle(self.settings.task_scope)
         self.calls = self.attempts = 0
         self._initial_policy_action_budget = None
@@ -312,7 +316,8 @@ class AnthropicPlanner:
                                   "chunk_size": vla_limits.chunk_size,
                                   "max_policy_actions": vla_limits.max_policy_actions,
                                   "failure_arm": "left"}
-                if self.settings.task_scope == "full_task" and vla_phase == "grasp":
+                if (self.settings.task_scope == "full_task" and vla_phase == "grasp"
+                        and not self.preserve_policy_actions):
                     # Preserve the task sequence during initial left-arm pickup.
                     # Handoff and hanging remain fully coordinated by the VLA.
                     runtime_fields["lock_arm"] = "right"

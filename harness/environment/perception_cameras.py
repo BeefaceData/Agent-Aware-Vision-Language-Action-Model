@@ -7,7 +7,7 @@ produces). Pose maths is plain NumPy; SAPIEN is imported only when a camera is
 added to a live scene.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -47,6 +47,8 @@ def parse_camera_spec(text):
     """
     if text == "default":
         return DEFAULT_PERCEPTION_CAMERA
+    if text == "close":
+        return CLOSE_PERCEPTION_CAMERA
     try:
         position, target, fovy = text.split("/")
         position, target = (tuple(float(value) for value in part.split(",")) for part in (position, target))
@@ -90,6 +92,60 @@ def camera_to_world(position_m, target_m):
 # camera behind the rack, (0.35, 0.40, 1.15), let the rack fill the foreground.
 DEFAULT_PERCEPTION_CAMERA = FixedCamera("perception_camera", position_m=(-0.30, 0.45, 1.20),
                                         target_m=(0.0, -0.10, 0.80), fovy_deg=60.0)
+SUPERVISED_PERCEPTION_CAMERA = replace(DEFAULT_PERCEPTION_CAMERA, width=640, height=480)
+
+# Complementary azimuth around the same workspace target, not around an oracle
+# object pose. It may expose the other handle face; visibility is unvalidated.
+SUPERVISED_REVERSE_CAMERA = FixedCamera("perception_reverse_camera",
+    position_m=(0.30, -0.65, 1.20), target_m=DEFAULT_PERCEPTION_CAMERA.target_m,
+    fovy_deg=60., width=640, height=480)
+
+
+# On the line from the hanging workspace back to the default camera (the same
+# side of the handle), moved in to about 0.54 m, at 1200x900. From the default
+# camera a held mug's handle opening is about 12 px across at hanging entry, too
+# small for a complete visible contour or continuous handle depth (seeds 4 and 5
+# stopped with complete_visible_aperture_unavailable). Placed from the public
+# RGB-D of the recorded seed-4 (observation 528) and seed-5 (observation 416)
+# entries: a 2 cm opening is about 33-41 px, and the held mug and the whole rack,
+# including the pole foot on the table that the depth rack-pose fit needs, keep
+# >=75 px margins. 1200x900 stays under the vision API's resize limits, so model
+# pixel coordinates match the depth image. Other seeds' framing is unchecked.
+CLOSE_PERCEPTION_CAMERA = FixedCamera("perception_camera", position_m=(-0.22, 0.38, 1.15),
+                                      target_m=(0.12, 0.04, 0.90), fovy_deg=50.0,
+                                      width=1200, height=900)
+# Opposite side of the handle for the close view, low on the far right of the
+# table, so measured_bounds can read the handle's back face. At the recorded
+# seed-5 entry (observation 480) the opening faces mostly up, so its back face
+# points down toward the table. Placed by ray-casting from every handle
+# back-face sample at observations 464, 472 and 480 (handle moved rigidly with
+# the measured TCP) against the RGB-D points all cameras recorded: every sample
+# was unoccluded, at <=45 degrees from the face normal, about 20 px for an
+# 8 mm handle; the seed-4 mug at entry projects near the image centre.
+CLOSE_REVERSE_CAMERA = FixedCamera("perception_reverse_camera", position_m=(0.36, 0.38, 0.85),
+                                   target_m=(0.05, 0.06, 0.98), fovy_deg=50.0,
+                                   width=1200, height=900)
+PERCEPTION_VIEWS = {"default": SUPERVISED_PERCEPTION_CAMERA, "close": CLOSE_PERCEPTION_CAMERA}
+REVERSE_VIEWS = {"default": SUPERVISED_REVERSE_CAMERA, "close": CLOSE_REVERSE_CAMERA}
+
+
+def parse_camera_set(text):
+    """``"close_pair"`` -> both close views; anything else -> ``(parse_camera_spec(text),)``."""
+    if text == "close_pair":
+        return (CLOSE_PERCEPTION_CAMERA, CLOSE_REVERSE_CAMERA)
+    return (parse_camera_spec(text),)
+
+
+def supervised_camera_specs(*, complementary_view=False, view="default"):
+    """Keep the existing view by default; optional extra rendering changes no actions."""
+    if type(complementary_view) is not bool:
+        raise ValueError("invalid_complementary_view_option")
+    if view not in PERCEPTION_VIEWS:
+        raise ValueError("invalid_perception_view_option")
+    primary = PERCEPTION_VIEWS[view]
+    if complementary_view:
+        return (primary, REVERSE_VIEWS[view])
+    return (primary,)
 
 
 def add_fixed_camera(scene, spec):

@@ -161,7 +161,7 @@ def predicate_true(predicates, name):
 class SkillOrchestrator:
     def __init__(self, executor, planner, *, log, save_observation, episode_id,
                  seed, max_turns=20, prepare=None, completion_predicate="mug_lifted", memory=None,
-                 invariant_check=lambda: None):
+                 invariant_check=lambda: None, hanging_recovery=None):
         if type(max_turns) is not int or not 1 <= max_turns <= 1000:
             raise ValueError("invalid_planner_turn_budget")
         self.executor, self.planner = executor, planner
@@ -172,6 +172,7 @@ class SkillOrchestrator:
         self.completion_predicate = completion_predicate
         self.memory = memory
         self.invariant_check = invariant_check
+        self.hanging_recovery = hanging_recovery
         self._started = False
 
     def _predicates(self, observation):
@@ -239,6 +240,7 @@ class SkillOrchestrator:
         success = None
         milestone = False
         acquired = False
+        recovery_report = None
         terminal_phase, terminal_outcome = MILESTONE_OUTCOMES[self.completion_predicate]
         try:
             for turn in range(1, self.max_turns + 1):
@@ -290,6 +292,30 @@ class SkillOrchestrator:
                     "memory_snapshot_sha256": self.memory.sha256 if self.memory else None,
                     "command": command.model_dump(mode="json"),
                     "planner_latency_seconds": latency, "planner_metadata": selection.metadata})
+
+                if self.hanging_recovery is not None:
+                    self.invariant_check()
+                    recovery_report = self.hanging_recovery.consider(selection, observation,
+                        remaining=self._remaining_budget(turn, grounding_reselections))
+                    if recovery_report is not None and recovery_report.get("status") == "recovery_deferred":
+                        command = SkillCommand.model_validate(recovery_report["policy_command"])
+                        if command.action != SkillType.VLA_ACT:
+                            raise ValueError("hanging_deferral_requires_policy_command")
+                        self.log({**base, "event_type": "hanging_recovery_deferred",
+                            "report": recovery_report, "command": command.model_dump(mode="json")})
+                        grounding_feedback = recovery_report["reason"]
+                        recovery_report = None
+                    if recovery_report is not None:
+                        turns = turn
+                        executor.calls += len(recovery_report.get("stages", {}))
+                        # Recovery's total already includes settling and post-retreat hold ticks.
+                        executor.executed_physics_ticks += recovery_report.get("analytic_ticks", 0)
+                        success = recovery_report.get("native_success")
+                        outcome = recovery_report["status"]
+                        phase = ("RECOVERY_COMPLETED" if outcome == "recovery_sequence_completed_support_unverified"
+                                 else "RECOVERY_BLOCKED" if outcome == "recovery_blocked" else "FAILED")
+                        self.log({**base, "event_type": "hanging_recovery_result", "report": recovery_report})
+                        break
 
                 prepared, rejection_code = self._prepare_anchor(
                     command, observation, camera_to_avoid_this_turn)
@@ -381,5 +407,7 @@ class SkillOrchestrator:
         # Preserve achieved milestones even when a later phase fails, so a
         # placement/handoff failure does not erase a successful grasp.
         summary["acquisition_confirmed"] = acquired
+        if recovery_report is not None:
+            summary["hanging_recovery"] = recovery_report
         self.log({"event_type": "episode_summary", **summary})
         return summary

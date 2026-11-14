@@ -154,9 +154,34 @@ class HangingRecoveryRunnerTests(unittest.TestCase):
         self.assertGreaterEqual(result["seat_settling"]["ticks"],25)
         self.assertAlmostEqual(result["stages"]["seat"]["position_error_m"],.004)
         self.assertIs(result["stages"]["release"]["predicate"]["value"],True)
-        self.assertTrue(result["bounded_post_success_retreat"])
+        self.assertTrue(result["native_success_at_release"])
         self.assertTrue(result["native_success"])
         self.assertEqual(environment.arms["right"]["gripper"],1.)
+
+    def test_native_success_never_changes_the_staged_sequence(self):
+        def run(success):
+            class Seat(PublicEnvironment):
+                @property
+                def native_success(self):
+                    return success(self)
+
+                def tick(self,*args,**kwargs):
+                    super().tick(*args,**kwargs)
+                    if self.goal is not None:
+                        self.arms["right"]["pose"][0]=self.goal[0]+.004
+            result,_=self.run_synthetic(aperture=True,demo=True,environment=Seat(x=0.))
+            return result
+        # Latched from the very start, latched at release, and never latched.
+        runs=[run(lambda env: True), run(lambda env: env.arms["right"]["gripper"]>.8), run(lambda env: False)]
+        for result in runs:
+            self.assertEqual(result["status"],"recovery_sequence_completed_support_unverified")
+            self.assertEqual(list(result["stages"]),["approach","seat","release","retreat"])
+        stops=[[stage["stop_reason"] for stage in result["stages"].values()] for result in runs]
+        ticks=[[stage["executed_physics_ticks"] for stage in result["stages"].values()] for result in runs]
+        self.assertEqual(stops[0],stops[1]); self.assertEqual(stops[1],stops[2])
+        self.assertEqual(ticks[0],ticks[1]); self.assertEqual(ticks[1],ticks[2])
+        self.assertEqual([r["native_success"] for r in runs],[True,True,False])
+        self.assertEqual([r["native_success_at_release"] for r in runs],[True,True,False])
 
     def test_settling_is_bounded_and_failed_authorization_is_false_not_null(self):
         environment=PublicEnvironment(x=0.)

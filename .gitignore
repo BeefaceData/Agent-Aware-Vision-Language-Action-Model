@@ -35,6 +35,7 @@ videos/
 *.md
 !/README.md
 !/CONTRIBUTE_README.md
+!/SETUP_LOCAL.md
 !/harness/prompts/*.md
 !/.agents/skills/**/*.md
 !/docs/Collaboration/*.md

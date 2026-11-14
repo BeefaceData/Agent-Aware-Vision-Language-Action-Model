@@ -89,17 +89,18 @@ def rollout(environment, vla, store, video, output, *, seed, max_actions,
 def run(robotwin_root, output, *, seed, max_actions, chunk_size, time_limit_minutes,
         perception_camera=""):
     validate_options(seed, max_actions, chunk_size, time_limit_minutes)
-    from harness.environment.perception_cameras import parse_camera_spec, describe
+    from harness.environment.perception_cameras import parse_camera_set, describe
     from harness.environment.layout import CAMERAS
 
-    camera = parse_camera_spec(perception_camera) if perception_camera else None
+    extra = parse_camera_set(perception_camera) if perception_camera else ()
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     manifest = dict(mode="frozen_policy_baseline", seed=seed, max_actions=max_actions,
         chunk_size=chunk_size, time_limit_minutes=time_limit_minutes,
         policy="robotwin-policy/PolicyWorker", planner_started=False,
         rgbd_saved=True, native_success_is_not_verified_hanging=True,
-        perception_camera=None if camera is None else describe(camera),
+        perception_camera=describe(extra[0]) if extra else None,
+        perception_cameras=[describe(spec) for spec in extra],
         policy_cameras=list(CAMERAS))
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     from development.simulator.local_simulator import LocalSimulator
@@ -112,9 +113,8 @@ def run(robotwin_root, output, *, seed, max_actions, chunk_size, time_limit_minu
     video = None
     started = time.monotonic()
     try:
-        simulator = LocalSimulator(robotwin_root, rgbd_enabled=True,
-                                   perception_cameras=() if camera is None else (camera,))
-        video = EpisodeVideo(output, cameras=(*CAMERAS, camera.name) if camera else CAMERAS)
+        simulator = LocalSimulator(robotwin_root, rgbd_enabled=True, perception_cameras=extra)
+        video = EpisodeVideo(output, cameras=(*CAMERAS, *(spec.name for spec in extra)))
         return rollout(LocalEnvironmentClient(simulator, render_once_per_step=True),
             ModalVLAClient(), ObservationStore(output / "observations"), video, output,
             seed=seed, max_actions=max_actions, chunk_size=chunk_size,

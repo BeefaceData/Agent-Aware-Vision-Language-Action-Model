@@ -1,0 +1,2 @@
+# Patches are applied to Linux sources inside the Modal simulator image.
+*.patch text eol=lf

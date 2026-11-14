@@ -16,10 +16,10 @@ from harness.environment.base import CAMERAS
 class EpisodeVideo:
     def __init__(self, output, *, cameras=CAMERAS):
         import imageio.v2 as imageio
-        if not 1 <= len(cameras) <= 4 or len(set(cameras)) != len(cameras):
+        if not 1 <= len(cameras) <= 5 or len(set(cameras)) != len(cameras):
             raise ValueError("invalid_video_cameras")
         self.cameras = tuple(cameras)
-        self.columns = 2 if len(cameras) == 4 else len(cameras)
+        self.columns = 3 if len(cameras) > 4 else (2 if len(cameras) == 4 else len(cameras))
         self.rows = (len(cameras) + self.columns - 1) // self.columns
         self.output = Path(output)
         self.frames = 0
@@ -36,7 +36,7 @@ class EpisodeVideo:
         for i, camera in enumerate(self.cameras):
             x, y = (i % self.columns)*320, (i // self.columns)*240
             picture.paste(Image.fromarray(observation.images[camera]).resize((320, 240)), (x, y))
-            # Four-camera recordings label each panel without adding image rows.
+            # Multi-row recordings label each panel without adding image rows.
             label_y = y+222 if self.rows > 1 else 242
             draw.rectangle((x, label_y, x+180, label_y+16), fill="black")
             draw.text((x+4, label_y), camera, fill="white")
@@ -54,6 +54,7 @@ class EpisodeVideo:
 
     def metadata(self):
         return dict(path="episode.mp4", frame_index="video_frames.jsonl", frames=self.frames,
+                    cameras=list(self.cameras),
                     fps=10, timing="sampled: one frame/policy target; one/25 analytic ticks; boundary frames",
                     real_time=False, closed=self.closed)
 

@@ -60,6 +60,42 @@ The output file must be new. Reports and raw observations stay under ignored
 `data/`. Tests provide a synthetic input example in `trial_data()`; it is not a
 recorded successful robot episode. No GPU or API calls are needed.
 
+## Record a Claude-free baseline on Modal
+
+From this worktree:
+
+```powershell
+$env:MODAL_IMAGE_BUILDER_VERSION = '2025.06'
+$env:SIM_GPU = 'T4'
+$env:MODAL_ENVIRONMENT = 'main'
+python -m modal run modal_apps/simulator.py::baseline --seed 3 --max-actions 64 --chunk-size 8 --time-limit-minutes 15
+```
+
+Use an environment containing the client dependencies (the main checkout's
+`.venv` is reusable). After the short integration run works, use `--max-actions
+900 --time-limit-minutes 30`. Run serially. Outputs are under this worktree's
+`data/runs/` and on `robotwin-runs`; the CLI prints both paths. There are no Claude,
+SAM 3, oracle control, arm locks or recovery commands in this rollout. It stops
+at native success or its action/time budget and does not verify hanging stability.
+RGB-D and video are captured each acknowledged action; replay is diagnostic and
+not real-time. Action requests and confirmations remain distinct on lost replies.
+
+Seven CPU baseline tests pass and Modal CLI help loads. Cloud execution remains
+to be validated; soft time limits cannot interrupt a blocking RPC or reset.
+
+Update: the three-camera baseline ran on T4: 64 actions, eight chunks, no Claude
+calls, outcome `action_limit`, no reported error. Optional `--perception-camera
+default` now records the existing fixed RGB-D camera and four-panel video while
+policy packing excludes the extra image. This optional integration has CPU tests
+but has not yet run on a live scene.
+
+For post-run segmentation, use `python -m development.replays.sam3_cache --frames
+RUN_FOLDER --camera perception_camera --every 16 --max-frames 5`. This invokes the
+deployed SAM 3 service on saved images; only subsequent cached replay is fully
+offline. Cache creation does not alter the baseline trajectory and does not
+establish contact/support. Frame selection avoids querying every view of every
+saved action. No Claude calls are involved.
+
 ## Validation and remaining work
 
 - 85 focused tests passed: 10 new offline evaluation tests, two new target/cache

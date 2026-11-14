@@ -68,13 +68,27 @@ The saved runs have neither finger measurements nor `mug_upright`, so the
 finger signal and the recovery motion are covered by unit tests only
 (`tests/test_grasp_recovery.py`).
 
+## Finger calibration (policy-only seed 18, 14 Nov 2026)
+
+`data/calibration/finger_opening_seed18`: one policy-only episode, 900 actions,
+no Claude calls, with the measured opening logged on every action.
+
+| State (checked in the video) | Measured opening |
+|---|---|
+| Left hand holding the mug (actions 100-183) | 0.25-0.26 |
+| Right hand closed beside the mug on the table (actions 457-900) | 0.1818 on every action |
+| Open | ~1.0 |
+
+An empty closed hand stops at its joint limit, not at 0. The threshold is
+**0.19**: just above the empty limit and well below a held mug. The first guess
+(0.02) would never have fired. On this log the finger signal fires about two
+chunks after the right hand closed on nothing.
+
+Still open: a right-hand grasp of the mug has not been measured. If a
+handle grasp reads close to 0.19, lower the threshold toward 0.185.
+
 ## Before relying on it
 
-- **Calibrate `empty_hand_opening` (provisional 0.02).** The first run logs the
-  measured opening on every action. Compare a held mug with an empty closed
-  hand and set the threshold between them. Until then the camera signal
-  carries detection, and an uncalibrated threshold can stop a recovery at
-  "hand not measured empty" before opening, which is the safe direction.
 - The frozen policy has not yet been seen re-grasping mid-episode. The first
   live runs show whether a fresh history after the clearance move leads to a
   new grasp.
@@ -82,4 +96,4 @@ finger signal and the recovery motion are covered by unit tests only
 ## Options
 
 `modal run modal_apps/simulator.py::supervised_hanging ... --grasp-recovery/--no-grasp-recovery
---grasp-retries 2 --empty-hand-opening 0.02`
+--grasp-retries 2 --empty-hand-opening 0.19`

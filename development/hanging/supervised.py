@@ -48,7 +48,7 @@ class SupervisedOptions:
     # Public grasp-loss detection plus Thabo's re-grasp sequence (right arm).
     grasp_recovery: bool = True
     grasp_retries: int = 2
-    empty_hand_opening: float = .02
+    empty_hand_opening: float = .19  # calibrated: empty 0.18, held 0.25
 
     def validate(self):
         from development.hanging.baseline import validate_options

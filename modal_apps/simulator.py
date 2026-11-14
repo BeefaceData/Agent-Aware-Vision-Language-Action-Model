@@ -494,7 +494,7 @@ def supervised_hanging(model: str, seed: int = 4, max_actions: int = 900,
                        perception_view: str = "default", hand_back_to_policy: bool = True,
                        policy_grace_actions: int = 160, skip_observations: bool = False,
                        grasp_recovery: bool = True, grasp_retries: int = 2,
-                       empty_hand_opening: float = .02):
+                       empty_hand_opening: float = .19):
     """One serial full-task supervisor run; no recorded entry or demo override.
 
     ``--skip-observations`` leaves per-step RGB-D on the runs Volume; fetch it later

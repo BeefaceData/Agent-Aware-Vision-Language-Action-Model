@@ -94,14 +94,14 @@ def run_boundaries(grasp, grippers, start=0):
 
 class DetectionTests(unittest.TestCase):
     def test_closed_on_nothing_confirms_after_two_measured_boundaries(self):
-        grasp, *_ , events = monitor(opening=.005)
+        grasp, *_ , events = monitor(opening=.1818)
         results = run_boundaries(grasp, [1., 0., 0., 0.])
         # open, closing chunk (fingers may still move), first empty reading, confirmation
         self.assertEqual(results, [None, None, None, "measured_fingers_closed_on_nothing"])
-        self.assertEqual(events[-1]["measured_gripper_opening"], .005)
+        self.assertEqual(events[-1]["measured_gripper_opening"], .1818)
 
     def test_fingers_stopped_by_the_mug_never_trigger(self):
-        grasp, *_ = monitor(opening=.18)
+        grasp, *_ = monitor(opening=.25)
         self.assertEqual(run_boundaries(grasp, [1.]+[0.]*10), [None]*11)
 
     def test_no_monitoring_before_the_arm_was_seen_open(self):
@@ -179,7 +179,7 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual((executor.commands, grasp.retries, grasp.stopped), ([], 0, None))
 
     def test_never_opens_a_hand_that_is_not_measured_empty(self):
-        grasp, environment, provider, executor, _ = monitor(opening=.15)
+        grasp, environment, provider, executor, _ = monitor(opening=.25)
         result = grasp.recover(observation(400, 0.), "camera_mug_on_table_hand_empty", remaining=BUDGET)
         self.assertEqual(result["reason"], "hand_not_measured_empty_before_opening")
         self.assertEqual([c.action for c in executor.commands], [SkillType.MOVE_TO])

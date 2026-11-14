@@ -34,10 +34,11 @@ from harness.skills.schemas import SkillCommand, SkillType
 
 GRIPPER_INDEX = {"left": 6, "right": 13}
 COMMAND_OPEN, COMMAND_CLOSED = .5, .05
-# Provisional: an empty RoboTwin gripper should settle at its commanded 0,
-# while fingers stopped by the mug stay measurably open. Calibrate from the
-# measured_gripper_opening values logged on every action before relying on it.
-DEFAULT_EMPTY_OPENING = .02
+# Calibrated on policy-only seed 18 (data/calibration/finger_opening_seed18):
+# a closed empty hand stops at its joint limit, 0.1818 on every action; the
+# left hand holding the mug read 0.25-0.26. 0.19 sits just above the empty
+# limit. A right-hand grasp has not been measured yet.
+DEFAULT_EMPTY_OPENING = .19
 CLEARANCE_M = .10
 CONFIRMING_BOUNDARIES = 2
 RECOVERY_SKILL_CALLS = 2
@@ -68,7 +69,7 @@ class GraspRecovery:
 
     def summary(self):
         return dict(arm=self.arm, retries=self.retries, max_retries=self.max_retries,
-                    empty_opening=self.empty_opening, empty_opening_calibrated=False,
+                    empty_opening=self.empty_opening, empty_opening_basis="seed18_policy_only: empty 0.1818, left held 0.25",
                     stopped=self.stopped, attempts=self.attempts)
 
     def _measured_opening(self):

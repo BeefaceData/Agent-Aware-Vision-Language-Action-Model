@@ -59,9 +59,23 @@ def _command(kind, seed, target, model):
 
 
 def _run_id(root, seed, kind):
-    """The Modal run id printed by the latest launch log of this run, if any."""
-    logs = sorted((root/"logs").glob(f"seed{seed}_{kind}_attempt*.log"))
-    for log in reversed(logs):
+    """The Modal run id printed by the latest launch log of this run, if any.
+
+    Only logs named exactly ``seed<N>_<kind>_attempt<K>.log`` count, highest K
+    first, so renamed logs of set-aside attempts are never mistaken for the run
+    whose folder is current. The id in ``report.json`` (supervised runs) wins.
+    """
+    report = root/f"seed{seed}"/kind/"report.json"
+    try:
+        episode = json.loads(report.read_text()).get("summary", {}).get("episode")
+    except (OSError, ValueError, AttributeError):
+        episode = None
+    if episode:
+        return episode
+    pattern = re.compile(rf"seed{seed}_{kind}_attempt(\d+)\.log")
+    logs = sorted((int(m.group(1)), path) for path in (root/"logs").glob(f"seed{seed}_{kind}_attempt*.log")
+                  if (m := pattern.fullmatch(path.name)))
+    for _, log in reversed(logs):
         text = log.read_text(encoding="utf-8", errors="replace")
         for pattern in (r"Remote run id: (\S+)", r"robotwin-runs/([A-Za-z0-9_.-]+)", r"Running (baseline_\S+) on"):
             match = re.search(pattern, text)

@@ -137,6 +137,34 @@ class LocalEnvironmentClient(EnvironmentClient):
             "gripper": gripper,
         }  # Gripper remains a command, not aperture sensing.
 
+    def measured_gripper_opening(self, arm):
+        """Measured finger opening on the command scale (0 closed, 1 open).
+
+        ``get_*_gripper_val`` returns the last command. This reads the base
+        finger joint's actual position and normalizes it with the same
+        embodiment scale RoboTwin uses for commands, so a hand that closed on
+        an object stays above its commanded 0 while an empty hand reaches it.
+        This is ordinary robot proprioception, not simulator object state.
+        """
+        if arm not in ("left", "right"):
+            raise ValueError("invalid_arm")
+        robot = self.simulator.task.robot
+        joints = getattr(robot, f"{arm}_gripper")
+        if not joints or joints[0][0] is None:
+            raise ValueError("gripper_joint_unavailable")
+        joint = joints[0][0]
+        entity = getattr(robot, f"{arm}_entity")
+        qpos = entity.get_qpos()
+        active = entity.get_active_joints()
+        scale = getattr(robot, f"{arm}_gripper_scale")
+        span = float(scale[1]) - float(scale[0])
+        if not np.isfinite(span) or span == 0:
+            raise ValueError("invalid_gripper_scale")
+        value = (float(qpos[active.index(joint)]) - float(scale[0])) / span
+        if not np.isfinite(value):
+            raise ValueError("invalid_gripper_measurement")
+        return value
+
     def _measured_tcp_pose(self, arm):
         state = self.arm_state(arm)
         # Small test adapters predating explicit TCP support retain their

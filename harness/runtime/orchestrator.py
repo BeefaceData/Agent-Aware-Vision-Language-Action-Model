@@ -346,6 +346,9 @@ class SkillOrchestrator:
                         command = SkillCommand.model_validate(recovery_report["policy_command"])
                         if command.action != SkillType.VLA_ACT:
                             raise ValueError("hanging_deferral_requires_policy_command")
+                        if recovery_report.get("refresh_observation"):
+                            # A supervisor skill moved the robot after the planner's frame.
+                            observation = executor.environment.observe()
                         self.log({**base, "event_type": "hanging_recovery_deferred",
                             "report": recovery_report, "command": command.model_dump(mode="json")})
                         grounding_feedback = recovery_report["reason"]

@@ -9,6 +9,17 @@ from .base import ExecutionContext
 from .schemas import SkillCommand
 
 
+def _measured_openings(env):
+    """Measured finger openings for the action log; absent when unsupported."""
+    read = getattr(env, "measured_gripper_opening", None)
+    if not callable(read):
+        return {}
+    try:
+        return {"measured_gripper_opening": {arm: float(read(arm)) for arm in ("left", "right")}}
+    except Exception:
+        return {}  # Logging never changes control.
+
+
 class VLAAct:
     def execute(self, context: ExecutionContext, command: SkillCommand) -> str:
         env, parameters = context.environment, command.parameters
@@ -132,7 +143,8 @@ class VLAAct:
                                  "observation": context.observation.sequence,
                                  "command_state": context.observation.command_state,
                                  "action_index": context.executed,
-                                 "environment_step_ms": step_ms})
+                                 "environment_step_ms": step_ms,
+                                 **_measured_openings(env)})
                     if env.native_success:
                         context.native_success_seen = True
                         context.log({"event_type": "native_success_candidate",

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import math
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -14,6 +15,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from harness.environment.layout import ACTION_DIM, CAMERAS
+
+POLICY_TIMING_FIELDS = (
+    "pack_ms", "modal_rpc_ms", "modal_compute_ms", "modal_overhead_ms",
+    "cloud_preprocess_ms", "cloud_inference_ms", "cloud_postprocess_ms",
+)
 
 if TYPE_CHECKING:  # The baseline runner shares this module without pydantic.
     from harness.environment.base import Observation
@@ -113,14 +119,24 @@ class ModalVLAClient:
         if worker is None:
             worker = ModalPolicyClient(app_name, class_name)
         self.worker = worker
+        self.last_timing = {}
+        self.last_reset_ms = None
 
     def reset_history(self):
-        info, _ = self.worker.reset()
+        self.last_reset_ms = None
+        info, reset_ms = self.worker.reset()
         if not isinstance(info, dict) or info.get("ok") is not True:
             raise RuntimeError("incompatible Modal reset response")
+        if type(reset_ms) in (int, float) and math.isfinite(reset_ms) and reset_ms >= 0:
+            self.last_reset_ms = float(reset_ms)
 
     def infer(self, observation: Observation, requested_actions: int):
+        self.last_timing = {}
         observation = observation.copy()
-        actions, _ = self.worker.act_chunk(observation.images, observation.command_state,
-                                          requested_actions)
+        actions, timing = self.worker.act_chunk(observation.images, observation.command_state,
+                                               requested_actions)
+        # Retain only numeric measurements, never provider payloads or error text.
+        self.last_timing = {key: float(timing[key]) for key in POLICY_TIMING_FIELDS
+                            if type(timing.get(key)) in (int, float)
+                            and math.isfinite(timing[key]) and timing[key] >= 0}
         return actions

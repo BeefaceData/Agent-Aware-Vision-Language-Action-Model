@@ -82,7 +82,8 @@ class VLAAct:
             if context.measured_tcp_history is not None:
                 for poses in context.measured_tcp_history.values():
                     poses.clear()
-            context.log({"event_type": "policy_history_reset"})
+            context.log({"event_type": "policy_history_reset",
+                         "reset_ms": getattr(context.vla, "last_reset_ms", None)})
         self._remember_tcp_poses(context, context.observation)
         # When the runtime has started a local grasp monitor, continue across
         # planner-feedback-sized chunks until lift/failure evidence arrives.
@@ -106,6 +107,7 @@ class VLAAct:
             inference_ms = (time.perf_counter() - inference_started) * 1000.0
             context.log({"event_type": "chunk_received", "chunk": context.chunks,
                          "observation": observation.sequence, "inference_ms": inference_ms,
+                         "policy_timing": getattr(context.vla, "last_timing", {}),
                          "returned_actions": len(actions) if actions.ndim else 0})
             if (actions.ndim != 2 or actions.shape[1:] != (14,)
                     or not 1 <= len(actions) <= parameters.chunk_size

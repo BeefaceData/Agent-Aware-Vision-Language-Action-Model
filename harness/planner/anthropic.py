@@ -7,9 +7,8 @@ from typing import Annotated, Literal
 from pydantic import Field, StrictFloat, StrictInt, StrictStr
 
 from harness.schemas import Model
-from harness.skills.schemas import (SkillCommand, VLAParameters,
+from harness.skills.schemas import (SkillCommand, SkillType, VLAParameters,
                                     is_recoverable_move_feedback,
-                                    is_recoverable_arm_overlap,
                                     is_recoverable_predicate_unavailable,
                                     is_recoverable_release_support_gap)
 from .base import PlannerSelection
@@ -56,12 +55,9 @@ class AnthropicPlanner:
         self.require_pixel_grounding = require_pixel_grounding
         self.prompt, self.prompt_hash = prompt_bundle(self.settings.task_scope)
         self.calls = self.attempts = 0
-        self._initial_policy_action_budget = None
         self._feedback_phase = None
         self._feedback_phase_start_action = 0
-        self.inter_arm_recovery_active = False
-        self.inter_arm_recovery_moves = 0
-        self.inter_arm_contact_events = 0
+        self._last_vla_phase = None
         self.active_phase = "grasp"
         self.unknown_vla_feedback = 0
         self.recovery_basis = None
@@ -85,23 +81,9 @@ class AnthropicPlanner:
                     "memory_snapshot_sha256": context.memory.snapshot_sha256 if context.memory else None}
         if self.failed or self.calls >= self.settings.max_calls:
             return self._abort("planner_call_budget_or_terminal", metadata)
-        if context.previous and context.previous.stop_reason == "arm_overlap_detected":
-            if not self.inter_arm_recovery_active:
-                self.inter_arm_contact_events += 1
-                self.inter_arm_recovery_active = True
-                self.inter_arm_recovery_moves = 0
-        if self.inter_arm_recovery_active and context.previous:
-            if context.previous.arm_overlap_detected is False:
-                self.inter_arm_recovery_active = False
-                self.inter_arm_recovery_moves = 0
-            elif context.previous.skill.value == "move_to":
-                self.inter_arm_recovery_moves += 1
-            if self.inter_arm_contact_events > 3 or self.inter_arm_recovery_moves >= 2:
-                return self._abort("inter_arm_contact_recovery_exhausted", metadata)
         if context.previous and (context.previous.episode_terminal or context.previous.execution_uncertain
                                  or (not context.previous.completed
                                      and not is_recoverable_move_feedback(context.previous)
-                                     and not is_recoverable_arm_overlap(context.previous)
                                      and not is_recoverable_predicate_unavailable(context.previous)
                                      and not is_recoverable_release_support_gap(context.previous))):
             return self._abort("previous_skill_failed", metadata)
@@ -128,11 +110,7 @@ class AnthropicPlanner:
         if (self.settings.unknown_milestone_policy == "abort_after_limit"
                 and self.unknown_vla_feedback >= self.settings.max_consecutive_unknown_vla_feedback):
             return self._abort("public_milestone_unknown_limit", metadata)
-        policy_budget_now = context.remaining_budget.get("policy_actions")
-        if self._initial_policy_action_budget is None and type(policy_budget_now) is int:
-            self._initial_policy_action_budget = policy_budget_now
-        executed_policy_actions = (max(0, self._initial_policy_action_budget-policy_budget_now)
-            if self._initial_policy_action_budget is not None and type(policy_budget_now) is int else 0)
+        executed_policy_actions = context.policy_actions_executed
         if self._feedback_phase != vla_phase:
             self._feedback_phase = vla_phase
             self._feedback_phase_start_action = executed_policy_actions
@@ -174,8 +152,6 @@ class AnthropicPlanner:
         limits["max_consecutive_unknown_vla_feedback"] = self.settings.max_consecutive_unknown_vla_feedback
         limits["analytic_skills_available"] = analytic_skills_available
         limits["recovery_basis"] = recovery_basis
-        limits["inter_arm_recovery_active"] = self.inter_arm_recovery_active
-        limits["inter_arm_recovery_moves_remaining"] = max(0, 2-self.inter_arm_recovery_moves)
         perception_gap_vla_continuation = self._perception_gap_vla_continuation(
             context, vla_phase, vla_available)
         limits["perception_gap_vla_continuation"] = perception_gap_vla_continuation
@@ -192,8 +168,7 @@ class AnthropicPlanner:
                                self._public_predicate_true(context, "rack_seat_aligned")))
                        if (vla_available or tool["name"] != "vla_act")
                        and (analytic_skills_available or tool["name"] in {"vla_act", "abort"})
-                       and (not self.inter_arm_recovery_active
-                            or tool["name"] in {"move_to", "abort"})],
+                       ],
                 tool_choice={"type": "auto", "disable_parallel_tool_use": True},
                 messages=[{"role": "user", "content": user_content(
                     context, limits=limits,
@@ -247,15 +222,6 @@ class AnthropicPlanner:
                     (command.action.value == "release"
                      or (command.action.value == "set_gripper" and command.parameters.value > 0.0))):
                 raise InvalidPlannerResponse("release_not_publicly_authorized")
-            if (self.inter_arm_recovery_active and context.previous
-                    and context.previous.arm_overlap_detected is not False
-                    and command.action.value != "abort"):
-                if (command.action.value != "move_to" or command.arm != "right"
-                        or command.parameters.target != "current_ee"):
-                    raise InvalidPlannerResponse("inter_arm_recovery_requires_right_retreat")
-                offset_norm = sum(value * value for value in command.parameters.offset_xyz) ** 0.5
-                if not 0.03 <= offset_norm <= 0.10:
-                    raise InvalidPlannerResponse("inter_arm_retreat_outside_bounds")
             if parsed.reason_truncated:
                 metadata["reason_truncated_to_schema_limit"] = True
             claimed_phase = parsed.task_phase
@@ -301,24 +267,23 @@ class AnthropicPlanner:
                 if command.stop not in phase_stops or any(getattr(command.parameters, key) > getattr(vla_limits, key)
                         for key in ("max_chunks", "chunk_size", "max_policy_actions")):
                     raise InvalidPlannerResponse("vla_call_outside_task_phase_limits")
-                if command.parameters.lock_arm is not None or command.parameters.failure_stop is not None:
+                if command.parameters.failure_stop is not None:
                     raise InvalidPlannerResponse("vla_internal_control_not_selectable")
-                # End each planner-selected VLA segment at the feedback
-                # boundary. The next planner turn sees the resulting RGB
-                # observations and decides whether this looks like progress,
-                # a retryable miss, or a reason to use bounded analytic skills.
-                # No simulator-only grasp-failure predicate is injected here.
+                # The monitor is runtime-owned and never selectable by Opus.
+                # When an approved local evidence provider is available it can
+                # stop a failed grasp inside the current action chunk. Without
+                # one, VLA execution keeps the normal feedback-boundary behavior.
+                failure_arm = self._runtime_grasp_failure_arm(context, vla_phase)
                 runtime_fields = {"max_chunks": vla_limits.max_chunks,
                                   "chunk_size": vla_limits.chunk_size,
                                   "max_policy_actions": vla_limits.max_policy_actions,
-                                  "failure_arm": "left"}
-                if self.settings.task_scope == "full_task" and vla_phase == "grasp":
-                    # Preserve the task sequence during initial left-arm pickup.
-                    # Handoff and hanging remain fully coordinated by the VLA.
-                    runtime_fields["lock_arm"] = "right"
+                                  "failure_stop": ("grasp_attempt_failed"
+                                                   if failure_arm is not None else None),
+                                  "failure_arm": failure_arm or "left"}
                 parameters = command.parameters.model_copy(update=runtime_fields)
                 command = command.model_copy(update={"parameters": parameters})
                 self.attempts += 1
+                self._last_vla_phase = vla_phase
         except Exception as exc:
             if isinstance(exc, InvalidPlannerResponse):
                 metadata["validation_error"] = exc.code
@@ -357,7 +322,6 @@ class AnthropicPlanner:
                 or phase not in ("grasp", "handoff", "hang")
                 or (self.settings.task_scope == "acquisition" and phase != "grasp")
                 or not vla_available
-                or self.inter_arm_recovery_active
                 or self._public_predicate_true(context, "task_success")):
             return False
         previous = context.previous
@@ -454,24 +418,50 @@ class AnthropicPlanner:
         return (cls._public_predicate_true(context, "handoff_confirmed")
                 or cls._public_predicate_true(context, "right_mug_lifted"))
 
+    def _runtime_grasp_failure_arm(self, context, phase):
+        """Choose a local grasp monitor from public phase evidence, not model output."""
+        if phase == "grasp":
+            return "left"
+        if (phase == "handoff"
+                and self._right_transfer_stage_confirmed(context)
+                and not self._public_predicate_true(context, "right_mug_lifted")):
+            return "right"
+        return None
+
     def _recovery_basis(self, context, phase):
-        """Offer analytic skills after a failure, or as an optional hang fallback."""
+        """Offer recovery tools after public failure or a grasp feedback boundary."""
+        if (phase == "grasp"
+                and self._public_predicate_true(context, "mug_lifted")):
+            self.recovery_basis = None
+            return None
         basis = None
-        if self.inter_arm_recovery_active:
-            basis = "inter_arm_contact"
-        elif self._public_predicate_true(context, "rack_seat_aligned"):
+        if self._public_predicate_true(context, "rack_seat_aligned"):
             basis = "rack_seat_alignment"
         elif (self.settings.task_scope == "full_task" and phase == "hang"
                 and self._handoff_complete_confirmed(context)):
             basis = "hang_phase_recovery_available"
         elif self._public_predicate_true(context, "grasp_attempt_failed"):
             basis = "public_grasp_failure"
+        elif (phase == "grasp"
+                and self._public_predicate_value(context, "mug_lifted") is False
+                and self._completed_grasp_feedback(context.previous)):
+            # A negative lift assessment is not itself a failed grasp. At the
+            # completed VLA feedback boundary it lets Opus inspect fresh views
+            # and choose between continuing VLA or a recovery skill.
+            basis = "post_vla_grasp_feedback"
+        elif (self.settings.task_scope == "full_task" and phase == "handoff"
+                and self._last_vla_phase == "handoff"
+                and self._right_transfer_stage_confirmed(context)
+                and self._public_predicate_value(context, "right_mug_lifted") is False
+                and self._completed_grasp_feedback(context.previous)):
+            # The right-arm retry assessment is only available after public
+            # evidence says the left side has staged/transferred the mug and a
+            # completed handoff VLA chunk has returned fresh feedback.
+            basis = "post_vla_right_grasp_feedback"
         else:
             previous = context.previous
             if previous is not None:
-                if is_recoverable_arm_overlap(previous):
-                    basis = "inter_arm_contact"
-                elif is_recoverable_move_feedback(previous):
+                if is_recoverable_move_feedback(previous):
                     basis = "recoverable_motion_failure"
                 elif is_recoverable_release_support_gap(previous):
                     basis = "release_support_lost"
@@ -481,13 +471,30 @@ class AnthropicPlanner:
             self.recovery_basis = basis
         return basis or self.recovery_basis
 
+    @staticmethod
+    def _completed_grasp_feedback(previous):
+        return bool(previous is not None
+                    and previous.skill == SkillType.VLA_ACT
+                    and previous.completed
+                    and not previous.execution_uncertain
+                    and previous.stop_reason in {"chunk_budget_exhausted",
+                                                 "policy_action_budget_exhausted"}
+                    and previous.executed_policy_actions > 0)
+
+    @classmethod
+    def _right_transfer_stage_confirmed(cls, context):
+        return (cls._public_predicate_true(context, "left_transfer_complete")
+                or cls._public_predicate_true(context, "mug_staged_on_table"))
+
     def _target_available(self, target, context, *, arm="left", phase=None):
         if target == "current_ee":
             return True
-        if self.settings.task_scope == "acquisition":
-            return target == "mug_pregrasp"
         visual = context.visual_context or {}
         status = visual.get("status", {})
+        if self.settings.task_scope == "acquisition":
+            return (target == "mug_pregrasp"
+                    or (target == "mug_recovery_clearance"
+                        and status.get("mug") == "grounded"))
         rack_reference = visual.get("rack_static_reference", {})
         cached_rack_target = (phase == "hang"
                               and rack_reference.get("world_anchor_available") is True)
@@ -496,6 +503,7 @@ class AnthropicPlanner:
                                        or cached_rack_target),
                      "rack_seat": cached_rack_target,
                      "table_approach": status.get("table") == "grounded",
+                     "mug_recovery_clearance": status.get("mug") == "grounded",
                      "mug_pregrasp": (status.get("mug") == "grounded"
                                        or self.require_pixel_grounding)}
         return bool(available.get(target, False))

@@ -124,7 +124,11 @@ class HangTargetTests(unittest.TestCase):
             self.cache, self.obs, report("mug_handle", 0, MUG_POINTS),
             tcp_pose=tcp, anchors=anchors, arm="right")
         self.assertEqual(set(result), {"rack_approach", "rack_seat"})
-        self.assertGreater(result["rack_approach"].pose[0], result["rack_seat"].pose[0])
+        from harness.perception.pose_grounding import _pose_matrix
+        rack_z = _pose_matrix(self.cache.resolve(self.obs))[:3, 2]
+        tcp_delta = (np.asarray(result["rack_approach"].pose[:3])
+                     - np.asarray(result["rack_seat"].pose[:3]))
+        self.assertAlmostEqual(float(tcp_delta @ rack_z), -0.10)
         for anchor in result.values():
             self.assertEqual(anchor.observation_sequence, 0)
             self.assertEqual(anchor.source, "perception")
@@ -197,6 +201,16 @@ def depth_rack_pose():
 
 
 class DepthRackFrameTests(unittest.TestCase):
+    def test_missing_depth_fit_retains_an_existing_public_rack_cache(self):
+        expected = (0.25, 0.15, 0.9, 1.0, 0.0, 0.0, 0.0)
+        fallback = SimpleNamespace(resolve=lambda observation: expected)
+        provider = SimpleNamespace(observe=lambda observation: None, episode_rack_pose=None)
+        cache = DepthRackFrame(provider, fallback=fallback)
+        self.assertEqual(cache.resolve(object()), expected)
+        provider.episode_rack_pose = depth_rack_pose()
+        np.testing.assert_allclose(cache.resolve(object()),
+                                   rack_frame_from_pose(depth_rack_pose()))
+
     def test_the_depth_rack_frame_follows_the_opus_keypoint_convention(self):
         transform = _pose_matrix(rack_frame_from_pose(depth_rack_pose()))
 

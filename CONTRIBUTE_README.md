@@ -42,6 +42,7 @@ The perception code is under `harness/perception/`:
 - `grounding.py`, `geometry.py`, `pose_grounding.py`, and `anchors.py` turn public masks or reported image points into depth-grounded 3D references, validate geometry, and cache episode anchors. Camera identity checks use `intrinsic_sha256`/`calibration_sha256` from `rgbd.py`.
 - `opus_frame.py`, `opus_rack.py`, `opus_mug_state.py`, and the support grounder in `table_plane.py` contain bounded Opus visual-grounding/assessment calls. They share request plumbing (`vision_request.py`: image encoding, the forced single tool call, confidence/text checks). Their prompt text lives in `harness/prompts/` (loaded with `read_prompt`) so perception requests can be reviewed separately from controller logic.
 - `table_plane.py` estimates the reset-frame table plane; `hang_targets.py` derives rack-relative approach targets. `evaluation.py` and `replay.py` support offline scoring and saved-observation analysis.
+- `object_pose.py` fits mug cylinders and rack pole/peg geometry from public depth. `GroundingResult` carries pose trust and failure reasons. The focused grasp-retry presets enable `perception.depth_pose_anchors`; untrusted or missing poses retain the previous public target path. Read [the pose handover](docs/Collaboration/Olusola/handover/pose_estimation_for_retries.md) and [the current grasp integration notes](docs/Collaboration/Thabo.md) before using these estimates in recovery.
 - `predicates/` converts evidence into task milestones. Keep unavailable or ambiguous evidence as `unknown`; never use simulator-only state as deployed planner input.
 
 The public data path is: RoboTwin observation → RGB-only detector/grounder → local same-frame depth and calibration → typed evidence → predicate evaluation → planner context. `harness/runtime/orchestrator.py` keeps development-oracle inputs separate from the public evidence passed to Opus; oracle wiring itself stays in `run_skills.py` and `development/`, outside the `harness` package. When changing camera selection, masks, grounding, or predicates, update both the provider contract and its replay/scenario tests.
@@ -81,7 +82,7 @@ configs/  requirements/  tests/  patches/
 Each extension point is a small protocol plus one builder, so a replacement does not touch the turn loop:
 
 - **Planner**: implement `select(context) -> PlannerSelection` (`harness/planner/base.py`) and register it in `assembly.build_planner`. The orchestrator only sees the protocol.
-- **Semantic detector**: provide a factory returning an object with `detect(images, *, observation_sequence)` that yields `DetectionBatch`es (`harness/perception/grounding.py`), then pass it as `--perception-factory package.module:factory`. `assembly.load_perception_provider` validates it before the simulator starts.
+- **Semantic detector**: RGB-D harness configs use the Modal SAM 3 factory by default. Pass `--perception-factory package.module:factory` only to override it. Factories implement `detect(images, *, observation_sequence)` and yield `DetectionBatch`es (`harness/perception/grounding.py`); `assembly.load_perception_provider` validates them before the simulator starts.
 - **Evidence mode**: return `(predicates, prepare)` from a builder like `assembly.public_perception_evidence`; `run_skills.build_evidence` selects one per run.
 - **Policy backend**: implement `VLAClient` (`reset_history`, `infer`) from `harness/vla/base.py`.
 - **Opus perception request**: build it from `harness/perception/vision_request.py` and a prompt in `harness/prompts/`.
@@ -139,13 +140,14 @@ derived mug state such as `held_left`, `staged` or `toppled`). It is for offline
 evaluators under `development/` only and must never reach runtime perception or
 the planner. A 900-action rollout saves about 57 frames (about 45 MB).
 
-Locally a rollout takes about 35-40 minutes per seed on a small GPU. On Modal the
-same capture runs in about 7 minutes per seed (L4) and downloads each seed into
+Locally a rollout takes about 35-40 minutes per seed on a small GPU. The earlier
+Modal L4 capture took about 7 minutes per seed; current T4 captures may take
+longer and download each seed into
 `data/perception/frames/seed_<N>`; seeds run one after another because the policy
 worker keeps a single observation history:
 
 ```bash
-SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
 ```
 
 Then score public perception against those labels offline. Query SAM 3 once per
@@ -183,14 +185,15 @@ does not make them wrong.
 **Perception-only camera.** `harness/environment/perception_cameras.py` defines an
 optional fixed RGB-D camera, `perception_camera`, on the far side of the table. The
 local simulator adds it right after each reset, so it draws no seeded random numbers
-and every seed keeps its exact scene. The policy never receives it, and Opus prompts
-still use only the three policy cameras. When an observation has it, the SAM 3 client
-tries it after the head camera and before the wrist views. Preview it, then capture
+and every seed keeps its exact scene. The frozen policy never receives it. In RGB-D
+harness runs, Opus receives the head and fixed supervisor views instead of the wrist
+views. SAM 3 tries the fixed view after the head camera and before wrist fallbacks.
+Preview it, then capture
 and score with and without it:
 
 ```bash
 python -m development.capture.scene_views --seed 3 --output data/scenes/seed_3_cam --perception-camera default
-SIM_GPU=L4,A10G,T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4 \
+SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4 \
   --perception-camera default --output-root data/perception/frames_cam
 python -m development.replays.perception_evaluation --frames data/perception/frames_cam/seed_3 \
   --output data/perception/reports/cam_off --ignore-camera perception_camera
@@ -200,8 +203,12 @@ Other poses use `--perception-camera=x,y,z/tx,ty,tz/fovy` (metres and degrees; k
 the `=` when the value starts with `-`). The deployed SAM 3 worker must accept the
 camera name, so redeploy it once after pulling this change:
 `modal deploy modal_apps/sam3.py`.
+For supervised episodes, set `perception.rgbd_enabled: true` in the run config.
+RGB-D configs include `perception_camera: default` automatically and use the Modal SAM 3
+provider by default; pass `--perception-factory` only to select another detector. The
+frozen policy still receives its original cameras.
 
-Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run concurrent live jobs on this workstation; local RoboTwin/CuRobo runs share limited GPU VRAM. A live validation should state its seed, config, evidence mode (public perception or development oracle), Modal workers, timeout, output directory, and completion predicate. Keep evaluation changes separate from exploratory presets, and do not treat simulator-native success alone as verified visual rack contact.
+Recorded RGB-D inputs and run outputs belong under ignored `data/`. Do not run concurrent live jobs on this workstation; local RoboTwin/CuRobo runs share limited GPU VRAM. A live validation should state its seed, config, evidence mode (public perception, perception with development-oracle fallback, or oracle-only), Modal workers, timeout, output directory, and completion predicate. Keep evaluation changes separate from exploratory presets, and do not treat simulator-native success alone as verified visual rack contact.
 
 ## Collaboration notes
 

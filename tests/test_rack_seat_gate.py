@@ -9,6 +9,7 @@ from harness.predicates.registry import PredicateRegistry
 from harness.predicates.rack_seat_gate import RackSeatReleaseGate
 from harness.skills.schemas import SkillCommand, SkillResult
 from harness.schemas import StateSummary
+from harness.runtime.orchestrator import SkillOrchestrator
 
 
 class RackSeatGateTests(unittest.TestCase):
@@ -65,6 +66,23 @@ class RackSeatGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SkillCommand.model_validate({"action": "release", "arm": "right",
                 "parameters": {"authorization": "simulator_contact"}})
+
+    def test_development_oracle_anchor_is_resolved_with_explicit_permission(self):
+        oracle_anchor = Anchor(self.pose, 4, "development_oracle")
+
+        def resolve(name, arm, observation, *, allow_oracle=False):
+            if not allow_oracle:
+                raise ValueError("oracle_anchor_not_allowed")
+            return oracle_anchor
+
+        orchestrator = SkillOrchestrator.__new__(SkillOrchestrator)
+        orchestrator.executor = SimpleNamespace(
+            anchors=SimpleNamespace(resolve=resolve), allow_oracle=True)
+
+        resolved = orchestrator._rack_seat_target(
+            self.command, Observation(4, {}, (0.0,) * 14), None)
+
+        self.assertIs(resolved, oracle_anchor)
 
 
 if __name__ == "__main__":

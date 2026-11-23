@@ -68,3 +68,17 @@ def validate_trajectory(plan, bounds, start, *, max_joint_delta=0.15, max_veloci
             or np.max(np.abs(velocities)) > max_velocity):
         raise SkillStopped("trajectory_limits")
     return positions.copy(), velocities.copy()
+
+
+def subsample_trajectory(positions, velocities, *, max_waypoints=25):
+    """Bound native qpos actions while preserving both trajectory endpoints."""
+    positions = np.asarray(positions, dtype=float)
+    velocities = np.asarray(velocities, dtype=float)
+    if (type(max_waypoints) is not int or max_waypoints < 2
+            or positions.ndim != 2 or positions.shape[1:] != (6,)
+            or velocities.shape != positions.shape or len(positions) == 0):
+        raise SkillStopped("invalid_trajectory")
+    if len(positions) <= max_waypoints:
+        return positions.copy(), velocities.copy()
+    indices = np.linspace(0, len(positions) - 1, max_waypoints).astype(int)
+    return positions[indices].copy(), velocities[indices].copy()

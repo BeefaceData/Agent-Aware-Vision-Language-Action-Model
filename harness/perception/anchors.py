@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from .geometry import pose7
 
 
+MUG_RECOVERY_CLEARANCE_M = 0.10
+MUG_RECOVERY_MIN_RISE_M = 0.05
+
+
 @dataclass(frozen=True)
 class Anchor:
     pose: tuple[float, ...]

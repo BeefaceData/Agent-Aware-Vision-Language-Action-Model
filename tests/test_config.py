@@ -8,6 +8,16 @@ from harness.runtime.settings import RunSettings
 
 
 class ConfigTests(unittest.TestCase):
+    def test_recorded_episode_defaults_to_head_and_supervisor_camera(self):
+        settings = RunSettings.model_validate({"record_video": True})
+        self.assertTrue(settings.perception.rgbd_enabled)
+        self.assertEqual(settings.perception.perception_camera, "default")
+
+    def test_explicit_recording_camera_setting_is_preserved(self):
+        settings = RunSettings.model_validate({"record_video": True,
+            "perception": {"rgbd_enabled": True, "perception_camera": "default"}})
+        self.assertEqual(settings.perception.perception_camera, "default")
+
     def test_paths_are_relative_to_yaml_and_survive_cwd_change(self):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td) / "configs"
@@ -55,6 +65,10 @@ class ConfigTests(unittest.TestCase):
                         .perception.rgbd_enabled)
         self.assertEqual(RunSettings().perception.rack_prompt_profile, "default")
         self.assertEqual(RunSettings().perception.rack_grounding_camera, "head_camera")
+        self.assertEqual(RunSettings.model_validate({"perception": {"rgbd_enabled": True}})
+                         .perception.perception_camera, "default")
+        self.assertIsNone(RunSettings.model_validate({"perception": {
+            "rgbd_enabled": True, "perception_camera": None}}).perception.perception_camera)
         self.assertEqual(RunSettings.model_validate({"perception": {
             "rgbd_enabled": True, "rack_prompt_profile": "explore_mug_rack"}})
             .perception.rack_prompt_profile, "explore_mug_rack")
@@ -75,6 +89,14 @@ class ConfigTests(unittest.TestCase):
             "rgbd_enabled": True, "opus_mug_lift_grounding": True},
             "anthropic": {"model": "claude-test-model"}})
         self.assertTrue(enabled.perception.opus_mug_lift_grounding)
+        camera = RunSettings.model_validate({"perception": {
+            "rgbd_enabled": True, "perception_camera": "default"}})
+        self.assertEqual(camera.perception.perception_camera, "default")
+        with self.assertRaisesRegex(ValueError, "perception_camera_requires_rgbd"):
+            RunSettings.model_validate({"perception": {"perception_camera": "default"}})
+        with self.assertRaisesRegex(ValueError, "invalid_perception_camera_spec"):
+            RunSettings.model_validate({"perception": {
+                "rgbd_enabled": True, "perception_camera": "bad-pose"}})
 
     def test_depth_pose_anchors_are_opt_in_and_need_rgbd(self):
         self.assertFalse(RunSettings().perception.depth_pose_anchors)
@@ -95,6 +117,14 @@ class ConfigTests(unittest.TestCase):
         stop = RunSettings.model_validate({"stop_after_left_transfer": True, "anthropic": {
             "model": "claude-test-model", "task_scope": "full_task"}})
         self.assertEqual(stop.completion_predicate, "left_transfer_complete")
+        right_pickup = RunSettings.model_validate({"stop_after_right_pickup": True, "anthropic": {
+            "model": "claude-test-model", "task_scope": "full_task"}})
+        self.assertEqual(right_pickup.completion_predicate, "right_mug_lifted")
+        with self.assertRaisesRegex(ValueError, "right_pickup_stop_requires_full_task_anthropic"):
+            RunSettings.model_validate({"stop_after_right_pickup": True})
+        scripted_right = RunSettings.model_validate({"stop_after_right_pickup": True,
+            "handoff": {"max_chunks": 1, "chunk_size": 8, "max_policy_actions": 8}})
+        self.assertEqual(scripted_right.completion_predicate, "right_mug_lifted")
 
         root = Path(__file__).resolve().parents[1]
         import yaml
@@ -107,7 +137,7 @@ class ConfigTests(unittest.TestCase):
             rgbd = RunSettings.model_validate(yaml.safe_load(stream))
         self.assertTrue(rgbd.perception.rgbd_enabled)
         self.assertTrue(rgbd.perception.opus_rack_grounding)
-        self.assertEqual(rgbd.perception.rack_grounding_camera, "right_camera")
+        self.assertEqual(rgbd.perception.rack_grounding_camera, "perception_camera")
         self.assertFalse(hasattr(rgbd.anthropic, "hang_vla_attempts"))
         self.assertEqual(rgbd.completion_predicate, "task_success")
         self.assertEqual(rgbd.anthropic.task_scope, "full_task")

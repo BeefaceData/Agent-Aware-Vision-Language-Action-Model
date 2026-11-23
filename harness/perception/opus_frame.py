@@ -21,25 +21,33 @@ class OpusObjectFrameGrounder:
     def __init__(self, client, model, *, target, camera):
         require_messages_client(client, model)
         if target not in self.PROMPTS or camera not in (
-                "head_camera", "left_camera", "right_camera"):
+                "head_camera", "left_camera", "right_camera", "perception_camera"):
             raise ValueError("unsupported_frame_grounding_target")
         self.client, self.model = client, model
         self.target, self.camera = target, camera
         self.system_prompt = read_prompt(self.PROMPTS[target])
 
     @staticmethod
-    def _tool_schema():
+    def _tool_schema(width, height):
+        if width < 1 or height < 1:
+            raise ValueError("frame_grounding_image_dimensions_invalid")
         return {
             "name": "report_object_frame_keypoints",
-            "description": "Report three ordered visible pixels defining an object frame.",
+            "description": "Report three ordered full-resolution image pixels.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "visible": {"type": "boolean"},
                     "keypoints_px": {"anyOf": [
-                        {"type": "array", "items": {"type": "array",
-                            "items": {"type": "number"}, "minItems": 2,
-                            "maxItems": 2}, "minItems": 3, "maxItems": 3},
+                        {"type": "array", "items": {"type": "object",
+                            "properties": {
+                                "x_px": {"type": "number", "minimum": 0,
+                                         "maximum": width - 1},
+                                "y_px": {"type": "number", "minimum": 0,
+                                         "maximum": height - 1},
+                            }, "required": ["x_px", "y_px"],
+                            "additionalProperties": False},
+                         "minItems": 3, "maxItems": 3},
                         {"type": "null"}]},
                     "description": {"type": "string"},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -57,7 +65,7 @@ class OpusObjectFrameGrounder:
         png = png_bytes(image)
         result = request_tool_input(
             self.client, model=self.model, max_tokens=350, system=self.system_prompt,
-            tool=self._tool_schema(), content=[
+            tool=self._tool_schema(width, height), content=[
                 {"type": "text", "text": (
                     f"Target={self.target}; camera={self.camera}; "
                     f"observation={observation.sequence}; image={width}x{height} pixels.")},
@@ -182,9 +190,15 @@ def _keypoints(value):
     points = []
     try:
         for point in value:
-            if not isinstance(point, (list, tuple)) or len(point) != 2:
+            if isinstance(point, dict):
+                if set(point) != {"x_px", "y_px"}:
+                    raise ValueError
+                uv = (float(point["x_px"]), float(point["y_px"]))
+            elif isinstance(point, (list, tuple)) and len(point) == 2:
+                # Accept the historical array representation for stored reports.
+                uv = tuple(float(item) for item in point)
+            else:
                 raise ValueError
-            uv = tuple(float(item) for item in point)
             if not np.isfinite(uv).all():
                 raise ValueError
             points.append(uv)

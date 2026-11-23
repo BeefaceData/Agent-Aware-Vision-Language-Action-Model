@@ -5,16 +5,15 @@ fills the asset Volume once, measures a GPU (spike), and runs whole
 ``run_skills.py`` episodes remotely with the same arguments as locally.
 
     modal run modal_apps/simulator.py::download_assets   # once; CPU only
-    modal run modal_apps/simulator.py::spike             # default GPU: T4
     SIM_GPU=T4 modal run modal_apps/simulator.py::spike
     modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
-    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
-    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
+    SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
+    SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
       --output-root data/perception/frames_cam                              # ... with the perception camera
 
 Episode-only options: ``--time-limit-minutes N`` (default 90) and
 ``--skip-observations`` (leave observations on the Volume, not downloaded).
-Every ``modal run`` of this file needs the ``anthropic`` Modal secret to exist.
+Anthropic runs use the ``anthropic`` Modal secret.
 Spike reports and one head-camera frame per GPU are saved to data/modal_spike/.
 """
 
@@ -53,7 +52,7 @@ CAPTURE_FUNCTION_TIMEOUT_SECONDS = 60 * 60
 VOLUME_SETTLE_ATTEMPTS = 12
 VOLUME_SETTLE_SECONDS = 5
 
-# T4, A100, A10G, L4. Compiling CuRobo for all of them lets one image serve any GPU.
+# Compile CuRobo for the simulator GPUs supported by the main branch.
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
 # SIM_GPU may list fallbacks, e.g. "L4,A10G,T4": Modal uses the first type with free
 # capacity instead of queueing for one. GPU is the label used in names and messages.
@@ -94,7 +93,9 @@ assets_volume = modal.Volume.from_name("robotwin-assets", create_if_missing=True
 runs_volume = modal.Volume.from_name("robotwin-runs", create_if_missing=True)
 
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.10")
+    # Modal's current image builder accepts Python 3.11+; pinned simulator
+    # dependencies (including SAPIEN 3.0.3 and mplib 0.2.1) publish cp311 wheels.
+    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "unzip", "build-essential", "libvulkan1", "vulkan-tools",
                  "libgl1", "libegl1", "libglib2.0-0", "libx11-6", "libxext6", "libxrender1")
     .env({"NVIDIA_DRIVER_CAPABILITIES": "all", "CUDA_HOME": "/usr/local/cuda",
@@ -105,7 +106,10 @@ image = (
     .run_commands(f"git clone https://github.com/RoboTwin-Platform/RoboTwin.git {ROBOTWIN}",
                   f"git -C {ROBOTWIN} checkout {ROBOTWIN_COMMIT}")
     .add_local_file(REPO / "patches/robotwin-renderer.patch", "/opt/robotwin-renderer.patch", copy=True)
-    .run_commands(f"git -C {ROBOTWIN} apply /opt/robotwin-renderer.patch")
+    .add_local_file(REPO / "patches/robotwin-grasp-pose-selection.patch",
+                    "/opt/robotwin-grasp-pose-selection.patch", copy=True)
+    .run_commands(f"git -C {ROBOTWIN} apply /opt/robotwin-renderer.patch",
+                  f"git -C {ROBOTWIN} apply /opt/robotwin-grasp-pose-selection.patch")
     # CUDA kernels compile for CUDA_ARCHES without a GPU attached (slow, cached once).
     # --no-build-isolation uses installed build tools, so add CuRobo's build-system
     # requirements first; ninja replaces the much slower serial compile fallback.
@@ -223,7 +227,6 @@ def measure(seed: int = 3, observations: int = 20, physics_steps: int = 200):
 @app.local_entrypoint()
 def spike(seed: int = 3):
     report, head_png = measure.remote(seed=seed)
-    # SIM_GPU is only set on this machine; inside the container GPU reads the default.
     report = {"gpu_requested": GPU, **report}
     output = REPO / "data/modal_spike"
     output.mkdir(parents=True, exist_ok=True)
@@ -301,6 +304,306 @@ def capture_frames(run_id: str, seed: int, every: int, max_actions: int, chunk_s
         runs_volume.commit()
 
 
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              timeout=CAPTURE_FUNCTION_TIMEOUT_SECONDS + 30 * 60, single_use_containers=True)
+def run_baseline(run_id: str, seed: int, max_actions: int, chunk_size: int,
+                 time_limit_minutes: int, perception_camera: str = ""):
+    """One frozen Neotix rollout; no Anthropic secret or API calls in this function."""
+    sys.path.insert(0, "/root")
+    from episode_request import set_aside_previous_attempt
+    from development.hanging.baseline import run
+
+    output = Path(RUNS) / run_id
+    set_aside_previous_attempt(output)
+    try:
+        return run(ROBOTWIN, output, seed=seed, max_actions=max_actions,
+                   chunk_size=chunk_size, time_limit_minutes=time_limit_minutes,
+                   perception_camera=perception_camera)
+    finally:
+        runs_volume.commit()
+
+
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              timeout=30 * 60, retries=0, max_containers=1, single_use_containers=True)
+def run_entry660_validation(run_id: str, uploads: dict[str, bytes], allow_unverified: bool):
+    import tempfile
+    sys.path.insert(0, "/root")
+    from development.checkpoints.schemas import relative_path
+    from development.hanging.run_entry660 import run
+
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            for name, data in uploads.items():
+                relative_path(name)
+                target = package / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            return run(package, Path(RUNS) / run_id, ROBOTWIN,
+                       allow_unverified=allow_unverified)
+    finally:
+        runs_volume.commit()
+
+
+@app.local_entrypoint()
+def hanging_entry660(package: str = "data/runs/hang_replay_candidate_660",
+                     allow_unverified: bool = False):
+    """One serial, policy-free entry comparison; does not establish grasp/support."""
+    from development.checkpoints.bank import CheckpointBank
+    from development.hanging.run_entry660 import validate_package
+
+    checkpoint = validate_package(package, allow_unverified=allow_unverified)
+    bank = CheckpointBank(package)
+    paths = {*checkpoint.artifact_hashes, "records/unverified_hang_660.json"}
+    uploads = {name: bank.resolve_artifact(name).read_bytes() for name in paths}
+    run_id = f"entry660_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{time.time_ns()}"
+    target = REPO / "data/runs" / run_id
+    print(f"Unverified entry 660 on {GPU}; exclusive serial run; hard timeout 30 min")
+    try:
+        report = run_entry660_validation.remote(run_id, uploads, allow_unverified)
+        print(json.dumps(report, indent=2))
+    finally:
+        if _wait_for_volume(run_id):
+            _download_run(run_id, target, skip_observations=False)
+        print(f"Results: {target}; remote robotwin-runs/{run_id}")
+
+
+grounding_preflight_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install("numpy>=1.26,<3", "pillow", "pydantic>=2.13,<3", "anthropic")
+    .add_local_dir(REPO / "harness", "/root/harness", ignore=["**/__pycache__"])
+    .add_local_dir(REPO / "development", "/root/development", ignore=["**/__pycache__"])
+)
+
+
+@app.function(image=grounding_preflight_image, cpu=1, timeout=300, retries=0,
+              max_containers=1, secrets=[modal.Secret.from_name("anthropic")])
+def preflight_hanging_recovery(uploads: dict[str, bytes], model: str):
+    import tempfile
+    from development.checkpoints.schemas import relative_path
+    from development.hanging.grounding_preflight import preflight
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        package, output = root / "package", root / "preflight"
+        for name, data in uploads.items():
+            relative_path(name)
+            target = package / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        report = preflight(package, output, model)
+        files = {path.relative_to(output).as_posix(): path.read_bytes()
+                 for path in output.rglob("*") if path.is_file()}
+        return report, files
+
+
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              timeout=45 * 60, retries=0, max_containers=1, single_use_containers=True,
+              secrets=[modal.Secret.from_name("anthropic")])
+def run_hanging_recovery(run_id: str, uploads: dict[str, bytes], model: str,
+                         allow_unverified: bool, preflight_result: dict):
+    import tempfile
+    sys.path.insert(0, "/root")
+    from development.checkpoints.schemas import relative_path
+    from development.hanging.recovery import run
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            for name, data in uploads.items():
+                relative_path(name)
+                target = package / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            return run(package, Path(RUNS) / run_id, ROBOTWIN,
+                       model=model, allow_unverified=allow_unverified,
+                       preflight_result=preflight_result)
+    finally:
+        runs_volume.commit()
+
+
+@app.local_entrypoint()
+def hanging_recovery(model: str, package: str = "data/runs/hang_replay_candidate_660",
+                     allow_unverified: bool = False, allow_entry660_demo_override: bool = False,
+                     aperture_annotation: str = "", peg_annotation: str = "",
+                     reviewed_archive: str = ""):
+    from development.checkpoints.bank import CheckpointBank
+    from development.hanging.run_entry660 import validate_package
+    if not model.startswith("claude-") or "MODEL" in model:
+        raise ValueError("real_claude_model_id_required")
+    checkpoint = validate_package(package, allow_unverified=allow_unverified)
+    bank = CheckpointBank(package)
+    paths = {*checkpoint.artifact_hashes, "records/unverified_hang_660.json"}
+    uploads = {name: bank.resolve_artifact(name).read_bytes() for name in paths}
+    run_id = f"hanging_recovery_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{time.time_ns()}"
+    target = REPO / "data/runs" / run_id
+    if allow_entry660_demo_override:
+        from development.hanging.recovery import entry660_demo_preflight
+        if not all((aperture_annotation, peg_annotation, reviewed_archive)):
+            raise ValueError("reviewed_archive_and_both_annotations_required")
+        print("LOCAL reviewed Entry660 demo preflight; no model/API calls", flush=True)
+        preflight_result = entry660_demo_preflight(reviewed_archive,
+            json.loads(Path(aperture_annotation).read_text()),
+            json.loads(Path(peg_annotation).read_text()), allow_override=True)
+        preflight_result["model"] = model
+        files = {"report.json": json.dumps(preflight_result, indent=2).encode()}
+        print(json.dumps({key: preflight_result[key] for key in
+                          ("prepared_targets", "clearance_terms", "mating_prior")}, indent=2))
+    else:
+        print(f"CPU grounding preflight with {model}; simulator has not started", flush=True)
+        preflight_result, files = preflight_hanging_recovery.remote(uploads, model)
+    from development.checkpoints.schemas import relative_path
+    for name, data in files.items():
+        relative_path(name)
+        artifact = target / "preflight" / name
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        with artifact.open("xb") as stream:
+            stream.write(data)
+    if preflight_result["status"] != "passed":
+        print(json.dumps(preflight_result, indent=2))
+        print(f"Preflight stopped before GPU/simulator startup. Details: {target / 'preflight/report.json'}")
+        return
+    print(f"Recorded prefix to 660, then grounded recovery on {GPU}; model={model}")
+    try:
+        report = run_hanging_recovery.remote(run_id, uploads, model, allow_unverified, preflight_result)
+        print(json.dumps(report, indent=2))
+    finally:
+        if _wait_for_volume(run_id):
+            _download_run(run_id, target, skip_observations=False)
+        print(f"Recovery video and report: {target}; remote robotwin-runs/{run_id}")
+
+
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              # 110-minute run cap plus 30 minutes for start-up, video and the
+              # volume commit, so a hard kill never skips saving the run.
+              timeout=(110 + 30) * 60, retries=0, max_containers=1, single_use_containers=True,
+              secrets=[modal.Secret.from_name("anthropic")])
+def run_supervised_hanging(run_id: str, options: dict):
+    sys.path.insert(0, "/root")
+    from development.hanging.supervised import SupervisedOptions, run
+    from development.hanging.public_provider import load_verified_fixture_assets
+    try:
+        return run(ROBOTWIN, Path(RUNS)/run_id, SupervisedOptions(**options),
+                   fixture_loader=load_verified_fixture_assets)
+    finally:
+        runs_volume.commit()
+
+
+@app.local_entrypoint()
+def supervised_hanging(model: str, seed: int = 4, max_actions: int = 900,
+                       chunk_size: int = 16, time_limit_minutes: int = 30,
+                       max_turns: int = 80, output: str = "", complementary_view: bool = False,
+                       perception_view: str = "default", hand_back_to_policy: bool = True,
+                       policy_grace_actions: int = 160, skip_observations: bool = False,
+                       grasp_recovery: bool = True, grasp_retries: int = 2,
+                       empty_hand_opening: float = .19):
+    """One serial full-task supervisor run; no recorded entry or demo override.
+
+    ``--skip-observations`` leaves per-step RGB-D on the runs Volume; fetch it later
+    with ``::fetch_run``.
+    """
+    from development.hanging.supervised import SupervisedOptions
+    options = SupervisedOptions(model, seed, max_actions, chunk_size, time_limit_minutes, max_turns,
+                                complementary_view=complementary_view, perception_view=perception_view,
+                                hand_back_to_policy=hand_back_to_policy,
+                                policy_grace_actions=policy_grace_actions,
+                                grasp_recovery=grasp_recovery, grasp_retries=grasp_retries,
+                                empty_hand_opening=empty_hand_opening)
+    options.validate()
+    run_id = f"supervised_hanging_seed{seed}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{time.time_ns()}"
+    target = Path(output).resolve() if output else REPO/"data/runs"/run_id
+    if target.exists():
+        raise ValueError("supervised_output_already_exists")
+    print(f"One serial supervisor episode on {GPU}; seed={seed}; actions<={max_actions}; "
+          f"limit={time_limit_minutes} min; model calls<=161; recovery attempts<=1", flush=True)
+    print(f"Remote run id: {run_id}", flush=True)
+    try:
+        report = run_supervised_hanging.remote(run_id, options.__dict__)
+        print(json.dumps(report, indent=2))
+    finally:
+        if _wait_for_volume(run_id):
+            _download_run(run_id, target, skip_observations=skip_observations)
+        print(f"Video, RGB-D and report: {target}; remote robotwin-runs/{run_id}")
+
+
+@app.local_entrypoint()
+def baseline(seed: int = 3, max_actions: int = 900, chunk_size: int = 8,
+             time_limit_minutes: int = 30, output: str = "", perception_camera: str = "",
+             skip_observations: bool = False):
+    """Record a single Claude-free baseline with RGB-D, actions, video and summary.
+
+    ``--skip-observations`` leaves per-step RGB-D on the runs Volume; fetch it later
+    with ``::fetch_run``.
+    """
+    from development.hanging.baseline import validate_options
+
+    validate_options(seed, max_actions, chunk_size, time_limit_minutes)
+    if perception_camera:
+        from harness.environment.perception_cameras import parse_camera_set
+        parse_camera_set(perception_camera)  # Validate before starting a GPU.
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run_id = f"baseline_seed{seed}_{stamp}_{time.time_ns() % 1000000:06d}"
+    target = Path(output).resolve() if output else REPO / "data/runs" / run_id
+    if target.exists():
+        raise SystemExit(f"baseline: {target} already exists; choose a new --output")
+    print(f"Running {run_id} on {GPU}; no Claude calls", flush=True)
+    print(f"Remote run id: {run_id}", flush=True)
+    result = None
+    try:
+        result = run_baseline.remote(run_id, seed, max_actions, chunk_size, time_limit_minutes,
+                                     perception_camera)
+    finally:
+        if _wait_for_volume(run_id):
+            count = _download_run(run_id, target, skip_observations=skip_observations)
+            print(f"Downloaded {count} files to {target}")
+        print(f"Remote results: robotwin-runs/{run_id}")
+    print(json.dumps(result, indent=2))
+    if result is None or result.get("outcome") in ("initialization_error", "execution_error"):
+        raise SystemExit("baseline failed; inspect summary.json and action logs")
+
+
+@app.function(image=image, gpu=GPU_REQUEST, volumes={ASSETS: assets_volume, RUNS: runs_volume},
+              timeout=30 * 60, single_use_containers=True)
+def capture_reset_observation(run_id: str, seed: int, perception_camera: str) -> dict:
+    """Save one public RGB-D reset observation without policy calls or robot actions."""
+    import hashlib
+
+    sys.path.insert(0, "/root")
+    from development.simulator.local_simulator import LocalSimulator
+    from harness.environment.local import LocalEnvironmentClient
+    from harness.environment.perception_cameras import parse_camera_spec
+    from harness.perception.observations import ObservationStore
+
+    output = Path(RUNS) / run_id
+    output.mkdir(parents=True, exist_ok=False)
+    simulator = LocalSimulator(ROBOTWIN, rgbd_enabled=True,
+                               perception_cameras=(parse_camera_spec(perception_camera),))
+    environment = LocalEnvironmentClient(simulator)
+    try:
+        observation = environment.reset(seed)
+        ObservationStore(output / "observations").save(observation)
+        image = observation.images["perception_camera"]
+        camera = observation.camera_frames["perception_camera"]
+        report = {
+            "schema_version": 1,
+            "mode": "reset_rgbd_grounding_capture",
+            "seed": seed,
+            "sequence": observation.sequence,
+            "policy_started": False,
+            "robot_actions_after_reset": 0,
+            "camera": "perception_camera",
+            "image_shape_px": list(image.shape[:2]),
+            "image_sha256": hashlib.sha256(image.tobytes()).hexdigest(),
+            "valid_depth_pixels": int((camera.depth_m > 0).sum()),
+            "intrinsic_sha256": hashlib.sha256(camera.intrinsic.tobytes()).hexdigest(),
+            "world_to_camera_sha256": hashlib.sha256(
+                camera.world_to_camera.tobytes()).hexdigest(),
+        }
+        (output / "capture.json").write_text(json.dumps(report, indent=2) + "\n")
+        runs_volume.commit()
+        return report
+    finally:
+        environment.close()
+
+
 @app.local_entrypoint()
 def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, chunk_size: int = 16,
            output_root: str = "data/perception/frames", perception_camera: str = ""):
@@ -352,6 +655,32 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
         raise SystemExit(f"frames: seeds failed: {failed}")
 
 
+@app.local_entrypoint()
+def reset_observation(seed: int = 3, perception_camera: str = "default"):
+    """Capture one reset-only RGB-D frame and download it from the Modal T4 worker."""
+    sys.path.insert(0, str(REPO))
+    from harness.environment.perception_cameras import parse_camera_spec
+
+    if seed < 0:
+        raise SystemExit("reset_observation: seed must be nonnegative")
+    try:
+        parse_camera_spec(perception_camera)
+    except ValueError as exc:
+        raise SystemExit(f"reset_observation: {exc}") from None
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run_id = f"reset_rgbd_seed{seed}_{stamp}"
+    output = REPO / "data/validation" / run_id
+    if output.exists() or _run_exists_on_volume(run_id):
+        raise SystemExit(f"reset_observation: output already exists: {run_id}")
+
+    report = capture_reset_observation.remote(run_id, seed, perception_camera)
+    if _wait_for_volume(run_id, expected_observations=1) == 0:
+        raise SystemExit(f"reset_observation: no artifacts saved for {run_id}")
+    _download_run(run_id, output, skip_observations=False)
+    print(json.dumps({**report, "output": str(output / "observations/observation_00000000.npz")},
+                     indent=2))
+
+
 def _wait_for_volume(run_id, *, expected_observations=None):
     """Wait until this machine's view of the runs Volume shows a finished run.
 
@@ -382,8 +711,12 @@ def _run_exists_on_volume(run_id):
         return False
 
 
-def _download_run(run_id, destination, *, skip_observations):
-    """Copy one run directory from the runs Volume into ``destination``; return the file count."""
+def _download_run(run_id, destination, *, skip_observations, only_observations=False, resume=False):
+    """Copy one run directory from the runs Volume into ``destination``; return the file count.
+
+    ``resume`` skips files already present with the Volume's size, so an
+    interrupted fetch continues; partial files are written to ``.part`` first.
+    """
     from modal.volume import FileEntryType
 
     count = 0
@@ -391,14 +724,30 @@ def _download_run(run_id, destination, *, skip_observations):
         if entry.type != FileEntryType.FILE:
             continue
         relative = PurePosixPath(entry.path.lstrip("/")).relative_to(run_id)
-        if skip_observations and relative.parts[0] == "observations":
+        is_observation = relative.parts[0] == "observations"
+        if (skip_observations and is_observation) or (only_observations and not is_observation):
             continue
         target = destination / relative
+        if resume and target.is_file() and target.stat().st_size == getattr(entry, "size", -1):
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("wb") as stream:
+        partial = target.with_name(target.name + ".part")
+        with partial.open("wb") as stream:
             runs_volume.read_file_into_fileobj(entry.path, stream)
+        partial.replace(target)
         count += 1
     return count
+
+
+@app.local_entrypoint()
+def fetch_run(run_id: str, output: str, observations_only: bool = True):
+    """Download a finished run's files from the runs Volume into ``output``; resumable."""
+    target = Path(output).resolve()
+    if not _run_exists_on_volume(run_id):
+        raise SystemExit(f"fetch_run: robotwin-runs/{run_id} not found")
+    count = _download_run(run_id, target, skip_observations=False,
+                          only_observations=observations_only, resume=True)
+    print(f"Fetched {count} files into {target}", flush=True)
 
 
 @app.local_entrypoint()
@@ -418,7 +767,8 @@ def episode(*argv):
     except ValueError as exc:
         raise SystemExit(f"episode: {exc}") from None
     # The same checks run_skills.main makes, before any GPU is allocated.
-    run_skills.parse_arguments(run_skills.build_parser(REPO), list(request.local_argv))
+    parsed_args, _settings = run_skills.parse_arguments(
+        run_skills.build_parser(REPO), list(request.local_argv))
     output = request.local_output.resolve()
     if output.exists():
         raise SystemExit(f"episode: {output} already exists; choose a new --output")
@@ -430,7 +780,8 @@ def episode(*argv):
     print(f"Running {request.run_id} on {GPU} (limit {request.time_limit_minutes} min)")
     result = None
     try:
-        result = run_episode.remote(list(request.remote_argv), uploads, request.time_limit_minutes)
+        result = run_episode.remote(list(request.remote_argv), uploads,
+                                    request.time_limit_minutes)
     finally:
         # Partial artifacts are still worth having after a failed or interrupted run.
         try:

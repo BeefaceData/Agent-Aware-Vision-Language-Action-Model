@@ -2,8 +2,9 @@
 
 import numpy as np
 
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from .anchors import Anchor
-from .geometry import pose7
+from .geometry import planning_pose_for_tcp_target, pose7
 from .grounding import RGBDPerceptionProvider, SYMBOLIC_ANCHORS
 
 
@@ -18,7 +19,7 @@ class PerceptionAnchorPreparer:
 
     def __init__(self, provider, environment, anchors, *, approach_offset_m=0.12,
                  hang_target_cache=None, mug_frame_grounder=None,
-                 mug_frame_camera="head_camera"):
+                 mug_frame_camera="head_camera", depth_pose_anchors=False):
         if not isinstance(provider, RGBDPerceptionProvider):
             raise ValueError("invalid_perception_provider")
         if provider.anchors is not anchors:
@@ -30,11 +31,13 @@ class PerceptionAnchorPreparer:
         self.approach_offset_m = float(approach_offset_m)
         if (hang_target_cache is None) != (mug_frame_grounder is None):
             raise ValueError("hang_cache_and_mug_grounder_must_be_paired")
-        if mug_frame_camera not in ("head_camera", "left_camera", "right_camera"):
+        if mug_frame_camera not in (*CAMERAS, *PERCEPTION_CAMERAS):
             raise ValueError("invalid_hang_frame_camera")
         self.hang_target_cache = hang_target_cache
         self.mug_frame_grounder = mug_frame_grounder
         self.mug_frame_camera = mug_frame_camera
+        # Aim approach targets with the depth-fitted poses when they exist.
+        self.depth_pose_anchors = bool(depth_pose_anchors)
 
     def __call__(self, command, observation):
         action = command.action.value if hasattr(command.action, "value") else command.action
@@ -42,6 +45,19 @@ class PerceptionAnchorPreparer:
             return None
         target = command.parameters.target
         if target == "current_ee":
+            if command.parameters.path_mode == "reverse_approach":
+                result = self.provider.observe(observation)
+                if result.observation_sequence != observation.sequence:
+                    raise ValueError("grounding_missing_or_stale")
+                measured = self.environment.arm_state(command.arm)["pose"]
+                try:
+                    return self._bind_approach("mug_pregrasp", command.arm, observation, measured)
+                except ValueError as exc:
+                    # Legacy reverse-path commands may still fall back to their
+                    # measured history when public mug grounding is unavailable.
+                    if str(exc) in ("grounded_target_unavailable", "pose_target_unavailable"):
+                        return None
+                    raise
             return None
         if target not in SYMBOLIC_ANCHORS:
             raise ValueError("unsupported_perception_anchor")
@@ -66,13 +82,34 @@ class PerceptionAnchorPreparer:
         result = self.provider.observe(observation)
         if result.observation_sequence != observation.sequence:
             raise ValueError("grounding_missing_or_stale")
-        measured = self.environment.arm_state(command.arm)["pose"]
+        arm_state = self.environment.arm_state(command.arm)
+        measured = arm_state["pose"]
+        if target == "mug_recovery_clearance":
+            measured_tcp = arm_state.get("tcp_pose", measured)
+            tcp_anchor = self.provider.bind_recovery_clearance_anchor(
+                target, command.arm, observation, measured_tcp_pose=measured_tcp)
+            planning_pose = planning_pose_for_tcp_target(
+                measured, measured_tcp, tcp_anchor.pose)
+            self.anchors.bind(target, command.arm, Anchor(
+                tuple(planning_pose), observation.sequence, tcp_anchor.source))
+            return self.anchors.resolve(target, command.arm, observation)
+        return self._bind_approach(target, command.arm, observation, measured)
+
+    def _bind_approach(self, target, arm, observation, measured):
+        if self.depth_pose_anchors:
+            try:
+                return self.provider.bind_pose_approach_anchor(
+                    target, arm, observation, measured_tcp_pose=measured,
+                    offset_m=self.approach_offset_m)
+            except ValueError as exc:
+                if str(exc) != "pose_target_unavailable":
+                    raise
         if (target == "rack_approach"
                 and self.provider.static_rack_world_anchor_available(observation)):
             return self.provider.bind_static_rack_approach(
-                target, command.arm, observation, measured_tcp_pose=measured,
+                target, arm, observation, measured_tcp_pose=measured,
                 offset_m=self.approach_offset_m)
-        return self.provider.bind_approach_anchor(target, command.arm, observation,
+        return self.provider.bind_approach_anchor(target, arm, observation,
             measured_tcp_pose=measured, offset_m=self.approach_offset_m)
 
     def _prepare_hang_targets(self, arm, observation, requested_target):

@@ -2,11 +2,11 @@
 
 Run from the repository root:
 
-    conda run -n robotwin env PYTHONPATH=$PWD python docs/Collaboration/Olusola/make_figures.py
+    conda run -n robotwin env PYTHONPATH=$PWD python docs/Collaboration/Olusola/guides/perception/make_figures.py
 
 Then rebuild the PDF:
 
-    cd docs/Collaboration/Olusola && conda run -n texbuild tectonic -X compile perception_guide.tex
+    cd docs/Collaboration/Olusola/guides/perception && conda run -n texbuild tectonic -X compile perception_guide.tex
 
 What must exist first
 ---------------------
@@ -63,7 +63,7 @@ from PIL import Image
 
 from harness.perception.replay import load_public_observation
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[5]  # the repository root
 DATA = ROOT / "data" / "perception"
 REPORTS = DATA / "reports"
 OUT = Path(__file__).resolve().parent / "figures"

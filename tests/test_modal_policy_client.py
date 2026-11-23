@@ -1,13 +1,14 @@
 """Modal policy client deadlines; no Modal account or network."""
 
 import threading
+import io
 from types import SimpleNamespace
 import unittest
 
 import numpy as np
 
 from harness.environment.layout import ACTION_DIM
-from harness.vla.modal_client import ModalPolicyClient, call_with_timeout
+from harness.vla.modal_client import ModalPolicyClient, call_with_timeout, pack_observation
 from tests.helpers import images
 
 
@@ -19,6 +20,13 @@ def client(act_chunk, timeout_seconds):
 
 
 class ModalPolicyClientTimeoutTests(unittest.TestCase):
+    def test_perception_camera_is_excluded_from_policy_payload(self):
+        original = images()
+        packed, _, _ = pack_observation(
+            {**original, "perception_camera": original["head_camera"]}, np.zeros(ACTION_DIM))
+        with np.load(io.BytesIO(packed)) as archive:
+            self.assertEqual(set(archive.files), {*original, "state"})
+
     def test_a_policy_call_that_never_returns_raises_instead_of_hanging(self):
         released = threading.Event()
         policy = client(lambda *args, **kwargs: released.wait(), timeout_seconds=0.05)

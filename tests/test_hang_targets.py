@@ -1,13 +1,17 @@
 """CPU tests for episode rack-frame caching and grasp-aware hang targets."""
 
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import numpy as np
 
 from harness.environment.base import Observation
 from harness.perception.anchors import AnchorRegistry
-from harness.perception.hang_targets import StaticRackFrameCache, bind_hang_targets
+from harness.perception.hang_targets import (DepthRackFrame, StaticRackFrameCache, bind_hang_targets,
+                                            rack_frame_from_pose)
+from harness.perception.object_pose import ObjectPose
+from harness.perception.pose_grounding import _pose_matrix
 from harness.perception.grounding import (Detection, DetectionBatch,
                                           RGBDPerceptionProvider)
 from harness.perception.preparation import PerceptionAnchorPreparer
@@ -76,6 +80,26 @@ class HangTargetTests(unittest.TestCase):
                                    self.cache.resolve(self.obs))
         self.assertEqual(self.cache.metadata()["observation_sequence"], 0)
 
+    def test_invalid_seat_does_not_leave_partially_prepared_approach(self):
+        anchors = AnchorRegistry()
+        tcp = (0., 0., 1., 1., 0., 0., 0.)
+        near = (0.1, 0., 1., 1., 0., 0., 0.)
+        far = (0.8, 0., 1., 1., 0., 0., 0.)
+        with patch("harness.perception.hang_targets.tcp_targets_for_mug_alignment",
+                   return_value=(near, far)):
+            with self.assertRaisesRegex(ValueError, "hang_target_out_of_reach"):
+                bind_hang_targets(self.cache, self.obs, report("mug_handle", 0, MUG_POINTS),
+                                  tcp_pose=tcp, anchors=anchors, arm="right")
+        for name in ("rack_approach", "rack_seat"):
+            with self.assertRaisesRegex(ValueError, "anchor_missing_or_stale"):
+                anchors.resolve(name, "right", self.obs)
+
+    def test_explicit_cache_clear_requires_new_episode_grounding(self):
+        self.cache.clear()
+        self.assertFalse(self.cache.metadata()["available"])
+        with self.assertRaisesRegex(ValueError, "rack_frame_not_cached"):
+            self.cache.resolve(make_observation())
+
     def test_camera_calibration_change_invalidates_episode_cache(self):
         with self.assertRaisesRegex(ValueError, "rack_frame_camera_changed"):
             self.cache.resolve(make_observation(1, calibration_shift=1.0))
@@ -121,7 +145,11 @@ class HangTargetTests(unittest.TestCase):
             self.cache, self.obs, report("mug_handle", 0, MUG_POINTS),
             tcp_pose=tcp, anchors=anchors, arm="right")
         self.assertEqual(set(result), {"rack_approach", "rack_seat"})
-        self.assertGreater(result["rack_approach"].pose[0], result["rack_seat"].pose[0])
+        from harness.perception.pose_grounding import _pose_matrix
+        rack_z = _pose_matrix(self.cache.resolve(self.obs))[:3, 2]
+        tcp_delta = (np.asarray(result["rack_approach"].pose[:3])
+                     - np.asarray(result["rack_seat"].pose[:3]))
+        self.assertAlmostEqual(float(tcp_delta @ rack_z), -0.10)
         for anchor in result.values():
             self.assertEqual(anchor.observation_sequence, 0)
             self.assertEqual(anchor.source, "perception")
@@ -184,6 +212,44 @@ class HangTargetTests(unittest.TestCase):
         summary = provider.planner_summary(self.obs)
         self.assertTrue(summary["rack_static_reference"]["world_anchor_available"])
         self.assertNotIn("world_position_xyz", summary["rack_static_reference"])
+
+
+
+def depth_rack_pose():
+    return ObjectPose("rack", (0.2, 0.15, 0.75), (0., 0., 1.), True, None, (1., 0., 0.), .9, True,
+                      "pole_and_peg_fit_2_cameras", ("head_camera", "right_camera"), 0,
+                      {"peg_seat": (0.25, 0.15, 0.90), "peg_tip": (0.29, 0.15, 0.93)})
+
+
+class DepthRackFrameTests(unittest.TestCase):
+    def test_missing_depth_fit_retains_an_existing_public_rack_cache(self):
+        expected = (0.25, 0.15, 0.9, 1.0, 0.0, 0.0, 0.0)
+        fallback = SimpleNamespace(resolve=lambda observation: expected)
+        provider = SimpleNamespace(observe=lambda observation: None, episode_rack_pose=None)
+        cache = DepthRackFrame(provider, fallback=fallback)
+        self.assertEqual(cache.resolve(object()), expected)
+        provider.episode_rack_pose = depth_rack_pose()
+        np.testing.assert_allclose(cache.resolve(object()),
+                                   rack_frame_from_pose(depth_rack_pose()))
+
+    def test_the_depth_rack_frame_follows_the_opus_keypoint_convention(self):
+        transform = _pose_matrix(rack_frame_from_pose(depth_rack_pose()))
+
+        np.testing.assert_allclose(transform[:3, 3], (0.25, 0.15, 0.90))  # origin at the seat
+        np.testing.assert_allclose(transform[:3, 0], (0.8, 0., 0.6), atol=1e-6)  # along the peg to its tip
+        self.assertGreater(transform[2, 1], 0.7)  # +y up the rack's vertical plane
+
+    def test_the_depth_rack_frame_is_unavailable_until_the_provider_has_a_rack_pose(self):
+        provider = SimpleNamespace(observe=lambda _observation: None, episode_rack_pose=None)
+
+        with self.assertRaisesRegex(ValueError, "depth_rack_pose_unavailable"):
+            DepthRackFrame(provider).resolve(object())
+
+    def test_the_depth_rack_frame_resolves_from_the_provider_pose(self):
+        provider = SimpleNamespace(observe=lambda _observation: None, episode_rack_pose=depth_rack_pose())
+
+        np.testing.assert_allclose(DepthRackFrame(provider).resolve(object()),
+                                   rack_frame_from_pose(depth_rack_pose()))
 
 
 if __name__ == "__main__":

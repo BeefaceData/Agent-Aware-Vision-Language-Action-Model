@@ -13,7 +13,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from harness.environment.layout import CAMERAS
+from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
+
+AVAILABLE_CAMERAS = (*CAMERAS, *PERCEPTION_CAMERAS)
 
 PROMPTS = ("rack", "wire rack", "mug rack", "hanging rack")
 MAX_FRAME_REQUESTS = 12
@@ -24,7 +26,7 @@ def validate_selection(sequences, cameras):
             or any(type(seq) is not int or seq < 0 for seq in sequences)
             or len(set(sequences)) != len(sequences)):
         raise ValueError("invalid_saved_sequences")
-    if (not cameras or any(camera not in CAMERAS for camera in cameras)
+    if (not cameras or any(camera not in AVAILABLE_CAMERAS for camera in cameras)
             or len(set(cameras)) != len(cameras)):
         raise ValueError("invalid_camera_selection")
     if len(sequences) * len(cameras) > MAX_FRAME_REQUESTS:
@@ -95,7 +97,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--observations", type=Path, required=True)
     parser.add_argument("--sequences", type=int, nargs="+", required=True)
-    parser.add_argument("--cameras", choices=CAMERAS, nargs="+", default=["head_camera"])
+    parser.add_argument("--cameras", choices=AVAILABLE_CAMERAS, nargs="+", default=["head_camera"])
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     report = replay(args.observations, args.sequences, args.cameras, args.output)

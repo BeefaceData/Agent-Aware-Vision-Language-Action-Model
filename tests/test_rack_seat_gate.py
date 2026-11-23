@@ -9,6 +9,7 @@ from harness.predicates.registry import PredicateRegistry
 from harness.predicates.rack_seat_gate import RackSeatReleaseGate
 from harness.skills.schemas import SkillCommand, SkillResult
 from harness.schemas import StateSummary
+from harness.runtime.orchestrator import SkillOrchestrator
 
 
 class RackSeatGateTests(unittest.TestCase):
@@ -65,6 +66,45 @@ class RackSeatGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SkillCommand.model_validate({"action": "release", "arm": "right",
                 "parameters": {"authorization": "simulator_contact"}})
+
+    def test_gate_requires_current_public_anchor_and_matching_motion_result(self):
+        cases = (
+            (Anchor(self.pose, 3, "perception"), self.result),
+            (Anchor(self.pose, 5, "perception"), self.result),
+            (Anchor(self.pose, 4, "development_oracle"), self.result),
+            (self.anchor, self.result.model_copy(update={"controlled_arms": "left"})),
+            (self.anchor, self.result.model_copy(update={"skill": "rotate_wrist"})),
+        )
+        for anchor, result in cases:
+            with self.subTest(anchor=anchor, skill=result.skill, arms=result.controlled_arms):
+                self.gate.record(self.command, self.result, self.anchor)
+                self.gate.record(self.command, result, anchor)
+                self.assertFalse(self.gate.available)
+
+    def test_uncertain_or_terminal_seat_clears_prior_authorization(self):
+        for update in ({"execution_uncertain": True}, {"episode_terminal": True},
+                       {"completed": False, "stop_reason": "target_not_reached"}):
+            with self.subTest(update=update):
+                self.gate.record(self.command, self.result, self.anchor)
+                self.gate.record(self.command, self.result.model_copy(update=update), self.anchor)
+                self.assertFalse(self.gate.available)
+
+    def test_development_oracle_anchor_is_resolved_with_explicit_permission(self):
+        oracle_anchor = Anchor(self.pose, 4, "development_oracle")
+
+        def resolve(name, arm, observation, *, allow_oracle=False):
+            if not allow_oracle:
+                raise ValueError("oracle_anchor_not_allowed")
+            return oracle_anchor
+
+        orchestrator = SkillOrchestrator.__new__(SkillOrchestrator)
+        orchestrator.executor = SimpleNamespace(
+            anchors=SimpleNamespace(resolve=resolve), allow_oracle=True)
+
+        resolved = orchestrator._rack_seat_target(
+            self.command, Observation(4, {}, (0.0,) * 14), None)
+
+        self.assertIs(resolved, oracle_anchor)
 
 
 if __name__ == "__main__":

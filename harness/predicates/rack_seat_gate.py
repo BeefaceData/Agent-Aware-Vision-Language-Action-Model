@@ -17,7 +17,7 @@ class RackSeatReleaseGate:
     name = "rack_seat_aligned"
 
     def __init__(self, environment, *, position_tolerance_m=0.015,
-                 orientation_tolerance_rad=0.10):
+                 orientation_tolerance_rad=0.10, unavailable_is_false=False):
         self.environment = environment
         self.position_tolerance_m = float(position_tolerance_m)
         self.orientation_tolerance_rad = float(orientation_tolerance_rad)
@@ -29,6 +29,7 @@ class RackSeatReleaseGate:
         self._arm = None
         self._target = None
         self._after_sequence = None
+        self.unavailable_is_false = unavailable_is_false
 
     @property
     def available(self):
@@ -39,9 +40,12 @@ class RackSeatReleaseGate:
         action = command.action.value if hasattr(command.action, "value") else command.action
         valid = (action == "move_to" and command.parameters.target == "rack_seat"
                  and result is not None and result.completed
+                 and result.skill == "move_to" and result.controlled_arms == command.arm
                  and not result.execution_uncertain and not result.episode_terminal
                  and result.stop_reason == "completed"
                  and target_anchor is not None and result.observation_after is not None
+                 and target_anchor.source == "perception"
+                 and target_anchor.observation_sequence == result.observation_before
                  and result.position_error_m is not None
                  and result.orientation_error_rad is not None
                  and result.position_error_m <= self.position_tolerance_m
@@ -59,12 +63,13 @@ class RackSeatReleaseGate:
     def evaluate(self, name, observation, *, arm="auto"):
         if name != self.name:
             return None
-        value, reason = None, "rack_seat_alignment_unavailable"
+        value = False if self.unavailable_is_false else None
+        reason = "rack_seat_not_confirmed" if self.unavailable_is_false else "rack_seat_alignment_unavailable"
         if self.available:
             if arm not in ("auto", self._arm):
                 value, reason = False, "wrong_arm_for_grounded_rack_seat"
             elif observation.sequence < self._after_sequence:
-                value, reason = None, "rack_seat_observation_stale"
+                value, reason = (False if self.unavailable_is_false else None), "rack_seat_observation_stale"
             else:
                 try:
                     actual = pose7(self.environment.arm_state(self._arm)["pose"])
@@ -73,6 +78,6 @@ class RackSeatReleaseGate:
                              and orientation_error <= self.orientation_tolerance_rad)
                     reason = "measured_tcp_at_grounded_rack_seat" if value else "tcp_left_rack_seat"
                 except (KeyError, TypeError, ValueError, RuntimeError):
-                    value, reason = None, "measured_tcp_unavailable"
+                    value, reason = (False if self.unavailable_is_false else None), "measured_tcp_unavailable"
         return PredicateResult(name=name, value=value, source="runtime",
             observation_sequence=observation.sequence, reason=reason)

@@ -1,0 +1,34 @@
+# Development-only replay of the right-grasp failure boundary. Public RGB-D
+# perception remains active; the simulator oracle fills only unknown predicates.
+record_video: true
+render_once_per_step: true
+max_turns: 16
+perception:
+  rgbd_enabled: true
+  perception_camera: default
+  depth_pose_anchors: true
+recipe:
+  arm: right
+  max_retries: 2
+  stage_before_first_vla: false
+  stage:
+    max_physics_ticks: 1000
+    target: mug_pregrasp
+  retreat:
+    target: mug_recovery_clearance
+    orientation_mode: preserve_current
+    max_physics_ticks: 1800
+  vla:
+    max_chunks: 16
+    chunk_size: 16
+    max_policy_actions: 256
+handoff:
+  max_chunks: 16
+  chunk_size: 16
+  max_policy_actions: 256
+budget:
+  max_skill_calls: 16
+  max_analytic_ticks: 5000
+  max_policy_actions: 1200
+  max_vla_chunks: 120
+stop_after_right_pickup: true

@@ -1,0 +1,27 @@
+# Development-only: replay an empty-grasp boundary, move to the fixed grounded
+# mug clearance, then return control to the frozen VLA with oracle gates.
+record_video: true
+max_turns: 12
+perception:
+  rgbd_enabled: true
+  perception_camera: default
+  depth_pose_anchors: true
+recipe:
+  arm: left
+  max_retries: 2
+  stage_before_first_vla: false
+  stage:
+    max_physics_ticks: 2000
+    target: mug_pregrasp
+  retreat:
+    target: mug_recovery_clearance
+    orientation_mode: preserve_current
+  vla:
+    max_chunks: 8
+    chunk_size: 16
+    max_policy_actions: 128
+budget:
+  max_skill_calls: 12
+  max_analytic_ticks: 4000
+  max_policy_actions: 300
+  max_vla_chunks: 16

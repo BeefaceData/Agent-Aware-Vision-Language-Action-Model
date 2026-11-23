@@ -35,11 +35,14 @@ videos/
 *.md
 !/README.md
 !/CONTRIBUTE_README.md
+!/SETUP_LOCAL.md
 !/harness/prompts/*.md
 !/.agents/skills/**/*.md
 !/docs/Collaboration/*.md
 !/docs/Collaboration/*/
 !/docs/Collaboration/*/*.md
+!/docs/Collaboration/*/*/
+!/docs/Collaboration/*/*/*.md
 
 # Python and OS caches
 __pycache__/

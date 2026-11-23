@@ -1,6 +1,6 @@
 """Opt-in sampled RGB replay; recording never advances simulator physics.
 
-One frame per policy target and every 25 analytic ticks, played at 10 fps.
+One frame per policy target and every 5 analytic ticks, encoded at 30 fps.
 This is a diagnostic sampling convention, not a real-time motion recording.
 """
 
@@ -12,29 +12,69 @@ from harness.jsonl import append_jsonl
 from harness.environment.local import LocalEnvironmentClient
 from harness.environment.base import CAMERAS
 
+VIDEO_FPS = 30
+ANALYTIC_FRAME_INTERVAL_TICKS = 5
+
 
 class EpisodeVideo:
-    def __init__(self, output):
+    """Explicit ``cameras`` record a fixed grid; without them the set is chosen
+    from the first observation (head + supervisor camera when present)."""
+
+    def __init__(self, output, *, cameras=None):
         import imageio.v2 as imageio
+        if cameras is not None and (not 1 <= len(cameras) <= 5 or len(set(cameras)) != len(cameras)):
+            raise ValueError("invalid_video_cameras")
+        self.grid = cameras is not None
+        self.cameras = tuple(cameras) if cameras is not None else None
         self.output = Path(output)
         self.frames = 0
         self.closed = False
-        self.writer = imageio.get_writer(self.output / "episode.mp4", fps=10,
-            codec="libx264", output_params=["-g", "10", "-movflags", "+frag_keyframe+empty_moov"])
+        self.writer = imageio.get_writer(self.output / "episode.mp4", fps=VIDEO_FPS,
+            codec="libx264", output_params=["-g", str(VIDEO_FPS),
+                                             "-movflags", "+frag_keyframe+empty_moov"])
 
-    def append(self, observation, kind, policy_actions, analytic_ticks):
+    def _grid_picture(self, observation):
         from PIL import Image, ImageDraw
-        if self.closed:
-            raise RuntimeError("video_closed")
+        count = len(self.cameras)
+        columns = 3 if count > 4 else (2 if count == 4 else count)
+        rows = (count + columns - 1) // columns
+        picture = Image.new("RGB", (320*columns, 240*rows + 32))
+        draw = ImageDraw.Draw(picture)
+        for i, camera in enumerate(self.cameras):
+            x, y = (i % columns)*320, (i // columns)*240
+            picture.paste(Image.fromarray(observation.images[camera]).resize((320, 240)), (x, y))
+            # Multi-row recordings label each panel without adding image rows.
+            label_y = y+222 if rows > 1 else 242
+            draw.rectangle((x, label_y, x+180, label_y+16), fill="black")
+            draw.text((x+4, label_y), camera, fill="white")
+        return picture, draw, 240*rows+17
+
+    def _auto_picture(self, observation):
+        from PIL import Image, ImageDraw
+        cameras = (("head_camera", "perception_camera")
+                   if "perception_camera" in observation.images else CAMERAS)
+        if self.cameras is None:
+            self.cameras = cameras
+        elif self.cameras != cameras:
+            raise ValueError("recording_camera_set_changed")
         picture = Image.new("RGB", (960, 272))
         draw = ImageDraw.Draw(picture)
-        for i, camera in enumerate(CAMERAS):
-            picture.paste(Image.fromarray(observation.images[camera]).resize((320, 240)), (i*320, 0))
-            draw.text((i*320+4, 242), camera, fill="white")
-        draw.text((4, 257), f"SAMPLED 10 fps | {kind} | policy {policy_actions} | analytic ticks {analytic_ticks} | obs {observation.sequence}", fill="white")
+        panel_width = 960 // len(cameras)
+        for i, camera in enumerate(cameras):
+            label = "Supervisor camera" if camera == "perception_camera" else camera
+            picture.paste(Image.fromarray(observation.images[camera]).resize((panel_width, 240)),
+                          (i*panel_width, 0))
+            draw.text((i*panel_width+4, 242), label, fill="white")
+        return picture, draw, 257
+
+    def append(self, observation, kind, policy_actions, analytic_ticks):
+        if self.closed:
+            raise RuntimeError("video_closed")
+        picture, draw, text_y = (self._grid_picture if self.grid else self._auto_picture)(observation)
+        draw.text((4, text_y), f"SAMPLED {VIDEO_FPS} fps | {kind} | policy {policy_actions} | analytic ticks {analytic_ticks} | obs {observation.sequence}", fill="white")
         self.writer.append_data(np.asarray(picture))
         append_jsonl(self.output / "video_frames.jsonl", dict(frame=self.frames,
-            playback_seconds=self.frames/10, observation_sequence=observation.sequence,
+            playback_seconds=self.frames/VIDEO_FPS, observation_sequence=observation.sequence,
             kind=kind, policy_actions=policy_actions, analytic_ticks=analytic_ticks))
         self.frames += 1
 
@@ -45,8 +85,11 @@ class EpisodeVideo:
 
     def metadata(self):
         return dict(path="episode.mp4", frame_index="video_frames.jsonl", frames=self.frames,
-                    fps=10, timing="sampled: one frame/policy target; one/25 analytic ticks; boundary frames",
-                    real_time=False, closed=self.closed)
+                    fps=VIDEO_FPS,
+                    timing=(f"sampled: one frame/policy target; one/{ANALYTIC_FRAME_INTERVAL_TICKS} "
+                            "analytic ticks; boundary frames"),
+                    real_time=False, closed=self.closed,
+                    cameras=list(self.cameras or CAMERAS))
 
 
 class RecordingEnvironment(LocalEnvironmentClient):
@@ -80,10 +123,10 @@ class RecordingEnvironment(LocalEnvironmentClient):
         self._record(observation, self.policy_kind)
         return observation
 
-    def tick(self, *args, **kwargs):
-        super().tick(*args, **kwargs)
+    def apply_native_qpos(self, *args, **kwargs):
+        super().apply_native_qpos(*args, **kwargs)
         self.analytic_ticks += 1
-        if self.analytic_ticks % 25 == 0:
+        if self.analytic_ticks % ANALYTIC_FRAME_INTERVAL_TICKS == 0:
             self._record(super().observe(), "analytic")
 
     def observe(self):

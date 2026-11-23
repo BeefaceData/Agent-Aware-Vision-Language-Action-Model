@@ -6,66 +6,79 @@ TCP poses. It has no simulator imports and does not decide when a hang is safe.
 
 import numpy as np
 
-from .geometry import pose7
+from .geometry import (matrix_pose as _matrix_pose, pose7,
+                       pose_matrix as _pose_matrix,
+                       rotation_to_quaternion as _rotation_to_quaternion)
 from .rgbd import RGBDCamera
 
 
-def _rotation_to_quaternion(rotation):
-    """Convert a right-handed 3x3 rotation matrix to RoboTwin's wxyz format."""
-    matrix = np.asarray(rotation, dtype=float)
-    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
-        raise ValueError("invalid_rotation")
-    if (not np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-5)
-            or np.linalg.det(matrix) < 0.999):
-        raise ValueError("rotation_not_right_handed")
-    trace = float(np.trace(matrix))
-    if trace > 0:
-        scale = np.sqrt(trace + 1.0) * 2.0
-        q = np.array([0.25 * scale,
-                      (matrix[2, 1] - matrix[1, 2]) / scale,
-                      (matrix[0, 2] - matrix[2, 0]) / scale,
-                      (matrix[1, 0] - matrix[0, 1]) / scale])
-    else:
-        index = int(np.argmax(np.diag(matrix)))
-        if index == 0:
-            scale = np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
-            q = np.array([(matrix[2, 1] - matrix[1, 2]) / scale, 0.25 * scale,
-                          (matrix[0, 1] + matrix[1, 0]) / scale,
-                          (matrix[0, 2] + matrix[2, 0]) / scale])
-        elif index == 1:
-            scale = np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
-            q = np.array([(matrix[0, 2] - matrix[2, 0]) / scale,
-                          (matrix[0, 1] + matrix[1, 0]) / scale, 0.25 * scale,
-                          (matrix[1, 2] + matrix[2, 1]) / scale])
-        else:
-            scale = np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
-            q = np.array([(matrix[1, 0] - matrix[0, 1]) / scale,
-                          (matrix[0, 2] + matrix[2, 0]) / scale,
-                          (matrix[1, 2] + matrix[2, 1]) / scale, 0.25 * scale])
-    q /= np.linalg.norm(q)
-    return q
+def measured_peg_centerline(camera, points_uv, width_uv, *, max_depth_gap_m=.06):
+    """Register a visible shaft using opposing mid-shaft silhouette samples.
+
+    Pixel semantics remain caller evidence. No CAD pose or hidden endpoint is
+    inferred. The three axis points establish orientation; the opposing width
+    samples establish a centerline offset on that same observed shaft.
+    """
+    frame = _pose_matrix(grounded_frame_from_pixels(camera, points_uv,
+        max_depth_gap_m=max_depth_gap_m))
+    width_uv = np.asarray(width_uv, dtype=float)
+    if width_uv.shape != (2, 2) or not np.isfinite(width_uv).all():
+        raise ValueError("visible_peg_cross_section_required")
+    surfaces, errors = [], []
+    for u, v in width_uv:
+        x, y = np.rint((u, v)).astype(int)
+        h, w = camera.depth_m.shape
+        if not (1 <= x < w-1 and 1 <= y < h-1):
+            raise ValueError("surface_neighborhood_out_of_bounds")
+        patch = camera.depth_m[y-1:y+2, x-1:x+2]
+        if np.any(patch <= 0) or np.ptp(patch) > max_depth_gap_m:
+            raise ValueError("surface_depth_discontinuous")
+        point = np.asarray(camera.unproject(u, v, radius=1))
+        error = max(np.linalg.norm(np.asarray(camera.unproject(u+du, v+dv, radius=1))-point)
+                    for du, dv in ((1,0),(-1,0),(0,1),(0,-1))) + float(np.ptp(patch))
+        surfaces.append(point)
+        errors.append(float(error))
+    axis = frame[:3, 0]
+    width_vector = surfaces[1]-surfaces[0]
+    axial_width = float(width_vector @ axis)
+    radius = float(np.linalg.norm(width_vector-axis*axial_width)/2)
+    radius_error = sum(errors)/2
+    if radius <= radius_error or abs(axial_width) > sum(errors):
+        raise ValueError("peg_radius_subpixel_or_wrong_cross_section")
+    midpoint = (surfaces[0]+surfaces[1])/2
+    origin = frame[:3, 3]
+    baseline = np.linalg.norm(np.asarray(camera.unproject(*points_uv[1], radius=1))-origin)
+    along = float((midpoint-origin) @ axis)
+    if not radius <= along <= baseline-radius:
+        raise ValueError("peg_cross_section_not_midshaft")
+    correction = midpoint-origin-axis*along
+    if np.linalg.norm(correction) > radius+sum(errors):
+        raise ValueError("peg_cross_section_axis_inconsistent")
+    frame[:3, 3] += correction
+    return dict(pose_world_wxyz=_matrix_pose(frame), radius_m=radius,
+        radius_uncertainty_m=radius_error, centerline_offset_m=float(np.linalg.norm(correction)),
+        position_sensitivity_m=sum(errors),
+        basis="current public opposing mid-shaft surfaces; no CAD registration",
+        systematic_calibration_error="unknown")
 
 
-def _pose_matrix(value):
-    pose = pose7(value)
-    w, x, y, z = pose[3:]
-    rotation = np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-        [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)],
-    ])
-    transform = np.eye(4)
-    transform[:3, :3], transform[:3, 3] = rotation, pose[:3]
-    return transform
-
-
-def _matrix_pose(transform):
-    transform = np.asarray(transform, dtype=float)
-    if (transform.shape != (4, 4) or not np.isfinite(transform).all()
-            or not np.allclose(transform[3], (0, 0, 0, 1), atol=1e-7)):
-        raise ValueError("invalid_transform")
-    q = _rotation_to_quaternion(transform[:3, :3])
-    return np.concatenate((transform[:3, 3], q))
+def frame_from_axes(origin, x_direction, plane_direction):
+    """A right-handed frame at ``origin`` as a pose: +x along ``x_direction``,
+    +y towards ``plane_direction`` within their plane, +z = x cross y."""
+    x_axis = np.asarray(x_direction, dtype=float)
+    y_axis = np.asarray(plane_direction, dtype=float)
+    if np.linalg.norm(x_axis) < 1e-9:
+        raise ValueError("degenerate_frame_axes")
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = y_axis - x_axis * float(y_axis @ x_axis)
+    if np.linalg.norm(y_axis) < 1e-6:
+        raise ValueError("degenerate_frame_axes")
+    y_axis /= np.linalg.norm(y_axis)
+    z_axis = np.cross(x_axis, y_axis)
+    return _matrix_pose(np.block([
+        [np.column_stack((x_axis, y_axis, z_axis)), np.asarray(origin, dtype=float).reshape(3, 1)],
+        [np.zeros((1, 3)), np.ones((1, 1))],
+    ]))
 
 
 def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
@@ -89,6 +102,15 @@ def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
     for u, v in pixels:
         if camera.local_depth_gap(u, v, search_radius=8) > max_depth_gap_m:
             raise ValueError("keypoint_depth_discontinuity")
+        # Unprojection uses this 3x3 median. A foreground median alone can hide
+        # background pixels at a thin handle/peg edge and fabricate continuity.
+        x, y = map(int, np.rint((u, v)))
+        height, width = camera.depth_m.shape
+        patch = camera.depth_m[max(0, y-1):min(height, y+2),
+                               max(0, x-1):min(width, x+2)]
+        valid = patch[(patch > 0) & np.isfinite(patch)]
+        if valid.size and float(valid.max() - valid.min()) > max_depth_gap_m:
+            raise ValueError("keypoint_depth_discontinuity")
         points.append(np.asarray(camera.unproject(u, v, radius=1), dtype=float))
     origin, x_point, plane_point = points
     x_axis = x_point - origin
@@ -101,36 +123,33 @@ def grounded_frame_from_pixels(camera, points_uv, *, max_depth_gap_m=0.06,
     y_length = float(np.linalg.norm(y_axis))
     if not min_axis_length_m <= y_length <= max_axis_length_m:
         raise ValueError("plane_axis_baseline_out_of_bounds")
-    y_axis /= y_length
-    z_axis = np.cross(x_axis, y_axis)
-    z_axis /= np.linalg.norm(z_axis)
-    y_axis = np.cross(z_axis, x_axis)
-    return _matrix_pose(np.block([
-        [np.column_stack((x_axis, y_axis, z_axis)), origin.reshape(3, 1)],
-        [np.zeros((1, 3)), np.ones((1, 1))],
-    ]))
+    return frame_from_axes(origin, x_axis, y_axis)
 
 
 def tcp_targets_for_mug_alignment(tcp_pose, mug_function_pose, rack_function_pose,
-                                  *, approach_offset_m=0.05):
+                                  *, approach_offset_m=0.05, seat_offset_m=0.05):
     """Return prehang and aligned TCP poses from measured/grounded 6D frames.
 
     ``mug_function_pose`` is the visible mug handle's functional frame and
-    ``rack_function_pose`` is the selected hanger peg's mating frame. The
-    current TCP-to-mug transform is preserved, so the solution adapts to the
-    actual grasp rather than assuming a fixed wrist/object offset.
+    ``rack_function_pose`` is the selected hanger peg's mating frame. RoboTwin's
+    ``hanging_mug`` task uses ``pre_dis=0.05`` and ``dis=-0.05`` along the
+    functional frame's local +Z axis. Reproduce those offsets: approach at
+    ``-approach_offset_m`` and seat at ``+seat_offset_m``. The current TCP-to-
+    mug transform is preserved, so the solution adapts to the actual grasp.
     """
-    if (isinstance(approach_offset_m, bool) or not np.isfinite(approach_offset_m)
-            or not 0.01 <= approach_offset_m <= 0.10):
-        raise ValueError("approach_offset_out_of_bounds")
+    offsets = (approach_offset_m, seat_offset_m)
+    if (any(isinstance(value, bool) for value in offsets)
+            or not np.isfinite(offsets).all()
+            or not 0.01 <= approach_offset_m <= 0.10
+            or not 0.01 <= seat_offset_m <= 0.10):
+        raise ValueError("hang_frame_offset_out_of_bounds")
     tcp, mug, rack = map(_pose_matrix, (tcp_pose, mug_function_pose, rack_function_pose))
     tcp_to_mug = np.linalg.inv(tcp) @ mug
+    rack_z = rack[:3, 2]
     target_mug = rack.copy()
-    # The rack frame's local +X axis points from the peg seat toward its free
-    # tip. Start beyond that tip, then move back along the peg to seat the
-    # handle. No world-space rack coordinate is introduced.
+    target_mug[:3, 3] += rack_z * float(seat_offset_m)
     prehang_mug = rack.copy()
-    prehang_mug[:3, 3] += rack[:3, 0] * float(approach_offset_m)
+    prehang_mug[:3, 3] -= rack_z * float(approach_offset_m)
     prehang_tcp = prehang_mug @ np.linalg.inv(tcp_to_mug)
     target_tcp = target_mug @ np.linalg.inv(tcp_to_mug)
     return _matrix_pose(prehang_tcp), _matrix_pose(target_tcp)

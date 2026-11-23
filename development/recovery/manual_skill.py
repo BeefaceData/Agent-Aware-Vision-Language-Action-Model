@@ -68,7 +68,7 @@ def run_manual(bank, checkpoint, simulator, output, *, parameters=None, max_tick
         options = {}
         if video:
             import imageio.v2 as imageio
-            video_writer = imageio.get_writer(output / "recovery.mp4", fps=10)
+            video_writer = imageio.get_writer(output / "recovery.mp4", fps=30)
             options["frame_callback"] = lambda: video_writer.append_data(
                 observation_of(simulator.task, simulator.blank, False)["head_camera"])
         context = MANUAL_SKILLS[skill_id][1](
@@ -105,7 +105,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint_id")
     parser.add_argument("--skill", choices=tuple(MANUAL_SKILLS), default="retry_grasp")
-    parser.add_argument("--video", action="store_true", help="record rack recovery at 10 frames per simulated second")
+    parser.add_argument("--video", action="store_true", help="record rack recovery at 30 playback frames per second")
     parser.add_argument("--path", default="data/checkpoints")
     parser.add_argument("--output", required=True, help="new directory for this one manual attempt")
     parser.add_argument("--robotwin-root", default="RoboTwin")

@@ -46,6 +46,52 @@ def capture_with(sequences):
 
 
 class Sam3CacheTests(unittest.TestCase):
+    def test_selection_limits_remote_calls_without_modifying_source_frames(self):
+        directory = capture_with([0, 8, 16, 24, 32])
+        self.addCleanup(directory.cleanup)
+        worker = FakeWorker()
+        cache = build_cache(directory.name, worker, every=2, max_frames=2,
+                            camera="head_camera", log=lambda _: None)
+        self.assertEqual(worker.calls, [(0, "head_camera", True), (16, "head_camera", True)])
+        self.assertEqual(cache["cameras"], ["head_camera"])
+        self.assertEqual(len(list(Path(directory.name, "observations").glob("*.npz"))), 5)
+
+    def test_missing_requested_camera_does_not_query_worker(self):
+        directory = capture_with([0])
+        self.addCleanup(directory.cleanup)
+        worker = FakeWorker()
+        with self.assertRaisesRegex(ValueError, "sam3_replay_camera_missing"):
+            build_cache(directory.name, worker, camera="perception_camera")
+        self.assertEqual(worker.calls, [])
+
+    def test_resume_preserves_frame_selection_and_completed_camera_answers(self):
+        directory = capture_with([0, 8, 16, 24, 32])
+        self.addCleanup(directory.cleanup)
+        first = build_cache(directory.name, FakeWorker(), every=2, max_frames=2,
+                            camera="head_camera", log=lambda _: None)
+        worker = FakeWorker()
+        cache = build_cache(directory.name, worker, every=2, max_frames=2,
+                            camera="head_camera", done_frames={"0": first["frames"]["0"]},
+                            log=lambda _: None)
+        self.assertEqual(worker.calls, [(16, "head_camera", True)])
+        self.assertEqual(cache, first)
+
+    def test_resume_queries_missing_cameras_without_repeating_completed_answers(self):
+        directory = capture_with([0])
+        self.addCleanup(directory.cleanup)
+        first = build_cache(directory.name, FakeWorker(), camera="head_camera", log=lambda _: None)
+        worker = FakeWorker()
+        cache = build_cache(directory.name, worker, done_frames=first["frames"], log=lambda _: None)
+        self.assertEqual({camera for _, camera, _ in worker.calls}, set(CAMERAS)-{"head_camera"})
+        self.assertEqual(cache["frames"]["0"]["head_camera"], first["frames"]["0"]["head_camera"])
+
+    def test_invalid_selection_does_not_query_worker(self):
+        worker = FakeWorker()
+        for options in ({"every": 0}, {"max_frames": 0}, {"camera": "unknown"}):
+            with self.assertRaisesRegex(ValueError, "invalid_sam3_replay_selection"):
+                build_cache("not_read", worker, **options)
+        self.assertEqual(worker.calls, [])
+
     def test_queries_every_camera_of_every_frame_once(self):
         directory = capture_with([0, 16])
         worker = FakeWorker()
@@ -56,6 +102,19 @@ class Sam3CacheTests(unittest.TestCase):
         self.assertEqual(sorted(cache["frames"]), ["0", "16"])
         self.assertEqual(len(worker.calls), 2 * len(CAMERAS))
         self.assertTrue(all(include_rack for _sequence, _camera, include_rack in worker.calls))
+
+    def test_an_interrupted_run_continues_without_querying_done_frames_again(self):
+        directory = capture_with([0, 16])
+        first = build_cache(directory.name, FakeWorker(), log=lambda message: None)
+        worker, saved = FakeWorker(), []
+
+        cache = build_cache(directory.name, worker, log=lambda message: None,
+                            done_frames={"0": first["frames"]["0"]}, save_progress=saved.append)
+        directory.cleanup()
+
+        self.assertEqual({sequence for sequence, _camera, _rack in worker.calls}, {16})
+        self.assertEqual(cache, first)
+        self.assertEqual(len(saved), 1)
 
     def test_a_captured_perception_camera_is_cached_too(self):
         directory = tempfile.TemporaryDirectory()

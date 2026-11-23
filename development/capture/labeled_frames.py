@@ -102,6 +102,7 @@ def simulator_label(task, *, contact_names, initial_mug_pose, lifted_before, seq
         "sequence": sequence,
         "policy_actions": policy_actions,
         "mug": {"pose": mug_pose,
+                "model_id": int(task.mug_id),
                 "functional_point": [float(v) for v in task.mug.get_functional_point(0)],
                 "tilt_deg": tilt_deg(initial_mug_pose, mug_pose),
                 "height_change_m": mug_pose[2] - initial_mug_pose[2]},

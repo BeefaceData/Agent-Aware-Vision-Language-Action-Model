@@ -5,7 +5,7 @@ import numpy as np
 from .anchors import Anchor
 from .geometry import pose7
 from .opus_frame import ground_public_object_frame_rgbd
-from .pose_grounding import tcp_targets_for_mug_alignment
+from .pose_grounding import frame_from_axes, tcp_targets_for_mug_alignment, measured_peg_centerline
 from .rgbd import calibration_sha256, intrinsic_sha256
 
 
@@ -38,6 +38,10 @@ class StaticRackFrameCache:
         camera_name = report["camera"]
         image = np.asarray(observation.images[camera_name])
         camera = (observation.camera_frames or {})[camera_name]
+        if report.get("centerline_from_cross_section") is True:
+            registration = measured_peg_centerline(camera, report["keypoints_px"],
+                report.get("peg_width_px"), max_depth_gap_m=self.max_depth_gap_m)
+            pose = registration["pose_world_wxyz"]
         self._reference = {
             "pose": tuple(pose7(pose)),
             "camera": camera_name,
@@ -53,6 +57,8 @@ class StaticRackFrameCache:
         reference = self._reference
         if reference is None:
             raise ValueError("rack_frame_not_cached")
+        if observation.sequence < reference["sequence"]:
+            raise ValueError("rack_frame_observation_before_reference")
         camera_name = reference["camera"]
         image = observation.images.get(camera_name)
         camera = (observation.camera_frames or {}).get(camera_name)
@@ -77,6 +83,40 @@ class StaticRackFrameCache:
                 "camera_calibration_sha256": reference["calibration_sha256"]}
 
 
+def rack_frame_from_pose(rack_pose):
+    """The rack peg frame from a depth rack pose, in the Opus keypoint frame's convention.
+
+    Origin: the peg seat, where a hung handle comes to rest; +x along the peg
+    towards its free tip; +y up the pole (the rack's vertical plane).
+    """
+    seat = np.asarray(rack_pose.key_points["peg_seat"], dtype=float)
+    tip = np.asarray(rack_pose.key_points["peg_tip"], dtype=float)
+    return pose7(frame_from_axes(seat, tip - seat, rack_pose.axis))
+
+
+class DepthRackFrame:
+    """Stands in for ``StaticRackFrameCache`` with the provider's depth rack pose.
+
+    The provider keeps the rack pose for the episode once two views agree, so
+    later occlusion, or a detector failure on this frame, does not matter, as
+    with the Opus cache.
+    """
+
+    def __init__(self, provider, *, fallback=None):
+        self.provider = provider
+        self.fallback = fallback
+
+    def resolve(self, observation):
+        # Observing first lets this view confirm a rack pose not yet kept.
+        self.provider.observe(observation)
+        rack_pose = self.provider.episode_rack_pose
+        if rack_pose is None:
+            if self.fallback is not None:
+                return self.fallback.resolve(observation)
+            raise ValueError("depth_rack_pose_unavailable")
+        return rack_frame_from_pose(rack_pose)
+
+
 def bind_hang_targets(cache, observation, mug_report, *, tcp_pose,
                       anchors, arm, approach_offset_m=0.05,
                       max_target_distance_m=0.65):
@@ -84,10 +124,11 @@ def bind_hang_targets(cache, observation, mug_report, *, tcp_pose,
 
     The rack is episode-static; the mug handle must be grounded in the current
     observation because its pose follows the actual grasp. The resulting
-    symbolic anchors are ``rack_approach`` (outside the peg tip) and
-    ``rack_seat`` (handle aligned with the peg seat). This function computes
-    geometry only; callers still sequence MOVE_TO and RELEASE through the
-    existing skill vocabulary and release guard.
+    symbolic anchors are ``rack_approach`` (the task's 5 cm pre-placement
+    offset) and ``rack_seat`` (the 5 cm placement offset RoboTwin uses for
+    ``hanging_mug``). Both offsets follow the grounded rack frame's local +Z
+    axis. This function computes geometry only; callers still sequence MOVE_TO
+    and RELEASE through the existing skill vocabulary and release guard.
     """
     if arm not in ("left", "right"):
         raise ValueError("hang_target_arm_required")
@@ -102,12 +143,15 @@ def bind_hang_targets(cache, observation, mug_report, *, tcp_pose,
     prehang_tcp, seat_tcp = tcp_targets_for_mug_alignment(
         measured_tcp, mug_pose, rack_pose,
         approach_offset_m=approach_offset_m)
+    prepared = {}
     for name, target in (("rack_approach", prehang_tcp), ("rack_seat", seat_tcp)):
         target = pose7(target)
         distance = float(np.linalg.norm(target[:3] - measured_tcp[:3]))
         if distance > max_target_distance_m:
             raise ValueError("hang_target_out_of_reach")
-        anchors.bind(name, arm, Anchor(tuple(target), observation.sequence,
-                                       source="perception"))
+        prepared[name] = Anchor(tuple(target), observation.sequence, source="perception")
+    # Reject the complete target pair before publishing either anchor.
+    for name, anchor in prepared.items():
+        anchors.bind(name, arm, anchor)
     return {"rack_approach": anchors.resolve("rack_approach", arm, observation),
             "rack_seat": anchors.resolve("rack_seat", arm, observation)}

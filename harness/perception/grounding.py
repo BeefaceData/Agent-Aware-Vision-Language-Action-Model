@@ -12,8 +12,10 @@ from typing import Protocol
 
 import numpy as np
 
-from .anchors import Anchor, AnchorRegistry
+from .anchors import Anchor, AnchorRegistry, MUG_RECOVERY_CLEARANCE_M
 from .geometry import pose7
+from .object_pose import (MUG, RACK, UPRIGHT_MAX_TILT_DEG, ObjectPose, masked_surface, object_pose,
+                          pole_with_peg_pose, same_peg)
 from .rgbd import RGBDCamera, calibration_sha256
 from harness.environment.layout import CAMERAS, PERCEPTION_CAMERAS
 from harness.predicates.base import PredicateResult
@@ -21,7 +23,12 @@ from harness.predicates.base import PredicateResult
 
 SEMANTIC_LABELS = frozenset({"mug", "rack", "table"})
 SYMBOLIC_ANCHORS = frozenset({
-    "mug_pregrasp", "rack_approach", "rack_seat", "table_approach"})
+    "mug_pregrasp", "mug_recovery_clearance", "rack_approach", "rack_seat",
+    "table_approach"})
+
+TOPPLED_EVIDENCE_REASONS = frozenset({
+    "mug_axis_tilted_not_upright", "mug_surface_faces_up_not_upright",
+})
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,11 @@ class GroundingResult:
     mug_lift_seen: bool = False
     mug_staged_on_table: bool | None = None
     mug_staged_reason: str = "not_provable_from_semantic_rgbd_alone"
+    mug_pose: ObjectPose | None = None
+    mug_pose_reason: str = "mug_geometry_unavailable"
+    # The rack is static: its first complete fit is kept for the episode.
+    rack_pose: ObjectPose | None = None
+    rack_pose_reason: str = "rack_geometry_unavailable"
 
 
 class RGBDPerceptionProvider:
@@ -129,6 +141,8 @@ class RGBDPerceptionProvider:
     # 2.6-4.0 cm in the seed 0-4 captures, while 95% of mugs resting on the
     # table moved less than 2 cm between observations.
     MUG_SETTLED_MAX_STEP_M = 0.02
+    MUG_ABSENCE_CONFIRMATION_OBSERVATIONS = 2
+    SCENE_COVERAGE_CAMERA = "perception_camera"
 
     def __init__(self, detector: SemanticDetector, anchors: AnchorRegistry | None = None,
                  *, camera_order=(*CAMERAS, *PERCEPTION_CAMERAS),
@@ -177,7 +191,13 @@ class RGBDPerceptionProvider:
         self._static_rack_frame_cache = None
         self._mug_lift_tracker = None
         self._mug_lift_tracker_enabled = False
+        self._rack_pose = None
+        self._rack_candidate = None
+        self._depth_rack_pose_required = False
         self._last_batches = ()
+        self._scene_coverage_sequence = None
+        self._mug_absence_count = 0
+        self._mug_absence_last_sequence = None
 
     def set_mug_lift_evidence_tracker(self, tracker):
         """Use an optional table-relative public lift source for mug_lifted."""
@@ -344,6 +364,16 @@ class RGBDPerceptionProvider:
                                             "perception"))
         return self.anchors.resolve(name, arm, observation)
 
+    @property
+    def episode_rack_pose(self):
+        """The depth rack pose kept for the episode once two views agreed, else None."""
+        return self._rack_pose
+
+    def enable_depth_pose_anchors(self):
+        """Keep rack masks available until the depth rack fit is confirmed."""
+        self._depth_rack_pose_required = True
+        self._set_detector_rack_reference(self._rack_pose is not None)
+
     def static_rack_world_anchor_available(self, observation):
         reference = self._static_rack_reference
         available = bool(reference is not None
@@ -406,7 +436,8 @@ class RGBDPerceptionProvider:
     def _set_detector_rack_reference(self, initialized):
         configure = getattr(self.detector, "set_static_rack_reference", None)
         if callable(configure):
-            configure(initialized)
+            configure(initialized and not (
+                self._depth_rack_pose_required and self._rack_pose is None))
 
     def observe(self, observation):
         """Ground one public observation; duplicate or old sequences fail closed."""
@@ -421,6 +452,7 @@ class RGBDPerceptionProvider:
         self._last_batches = ()
         frames = observation.camera_frames or {}
         if not frames:
+            self._reset_mug_absence()
             result = GroundingResult(sequence, {}, {label: "rgbd_unavailable" for label in SEMANTIC_LABELS})
             self._last_result = result
             return result
@@ -433,27 +465,32 @@ class RGBDPerceptionProvider:
         try:
             batch = self.detector.detect(public_images, observation_sequence=sequence)
         except Exception:
+            self._reset_mug_absence()
             result = GroundingResult(sequence, {}, {label: "detector_unavailable" for label in SEMANTIC_LABELS})
             self._last_result = result
             return result
         batches = ((batch,) if isinstance(batch, DetectionBatch)
                    else tuple(batch) if isinstance(batch, (tuple, list)) else ())
         if not batches or any(not isinstance(item, DetectionBatch) for item in batches):
+            self._reset_mug_absence()
             result = GroundingResult(sequence, {}, {label: "stale_detection" for label in SEMANTIC_LABELS})
             self._last_result = result
             return result
         if any(item.observation_sequence != sequence for item in batches):
+            self._reset_mug_absence()
             result = GroundingResult(sequence, {}, {label: "stale_detection" for label in SEMANTIC_LABELS})
             self._last_result = result
             return result
         if any(item.camera not in self.camera_order or item.camera not in frames
                or item.camera not in observation.images for item in batches):
+            self._reset_mug_absence()
             result = GroundingResult(sequence, {}, {label: "camera_frame_unavailable" for label in SEMANTIC_LABELS})
             self._last_result = result
             return result
         self._last_batches = batches
 
         objects, status = {}, {label: "not_detected" for label in SEMANTIC_LABELS}
+        scene_camera_table_grounded = False
         for label in SEMANTIC_LABELS:
             estimates, reasons = [], []
             for item in batches:
@@ -475,6 +512,8 @@ class RGBDPerceptionProvider:
                     reasons.append(reason)
                 else:
                     estimates.append(estimate)
+                    if label == "table" and item.camera == self.SCENE_COVERAGE_CAMERA:
+                        scene_camera_table_grounded = True
             if estimates:
                 objects[label] = max(estimates, key=lambda item: item.confidence)
                 status[label] = "grounded"
@@ -487,6 +526,25 @@ class RGBDPerceptionProvider:
                 status[label] = next((reason for reason in priority if reason in reasons), reasons[0])
 
         mug = objects.get("mug")
+        self._scene_coverage_sequence = (sequence if scene_camera_table_grounded else None)
+        if mug is not None:
+            self._mug_absence_count = 0
+            self._mug_absence_last_sequence = sequence
+        elif (scene_camera_table_grounded and status.get("mug") == "not_detected"
+              and self._mug_absence_last_sequence != sequence):
+            self._mug_absence_count += 1
+            self._mug_absence_last_sequence = sequence
+        elif not scene_camera_table_grounded or status.get("mug") != "not_detected":
+            self._reset_mug_absence()
+        table_height = self._table_height(objects.get("table"))
+        mug_pose, mug_pose_reason = (None, "mug_geometry_unavailable") if mug is None else \
+            self._mug_pose(batches, frames, table_height, sequence)
+        rack_pose_reason = "fitted_earlier_this_episode"
+        if self._rack_pose is None:
+            self._rack_pose, rack_pose_reason = self._confirmed_rack(
+                *self._fit_rack(batches, frames, table_height, sequence))
+        if self._depth_rack_pose_required and self._rack_pose is not None:
+            self._set_detector_rack_reference(True)
         previous_mug_height = self._previous_mug_height
         if mug is not None:
             self._previous_mug_height = mug.position[2]
@@ -497,7 +555,7 @@ class RGBDPerceptionProvider:
                 # support distinguish a completed transfer from the mug's
                 # initial resting pose without consulting simulator state.
                 self._mug_lift_seen = True
-        release_ready, release_reason = self._table_support_evidence(objects)
+        release_ready, release_reason = self._table_support_evidence(objects, mug_pose=mug_pose)
         # A few mug silhouette points can overlap the table mask while the
         # mug is still being carried. A returned mug must also be at roughly
         # its episode-start table height before support can authorize release.
@@ -519,7 +577,8 @@ class RGBDPerceptionProvider:
         else:
             staged, staged_reason = release_ready, release_reason
         result = GroundingResult(sequence, objects, status, release_ready, release_reason,
-                                 self._mug_lift_seen, staged, staged_reason)
+                                 self._mug_lift_seen, staged, staged_reason, mug_pose, mug_pose_reason,
+                                 self._rack_pose, rack_pose_reason)
         self._last_result = result
         return result
 
@@ -621,19 +680,64 @@ class RGBDPerceptionProvider:
         """
         labels = {"mug_pregrasp": "mug", "rack_approach": "rack",
                   "table_approach": "table"}
+        result = self._fresh_result_for_anchor(name, arm, observation, offset_m)
+        target = result.objects.get(labels[name])
+        if target is None or result.status.get(labels[name]) != "grounded":
+            raise ValueError("grounded_target_unavailable")
+        return self._bind_standoff(name, arm, observation, np.asarray(target.position, dtype=float),
+                                   measured_tcp_pose, offset_m)
+
+    def bind_recovery_clearance_anchor(self, name, arm, observation, *, measured_tcp_pose):
+        """Bind the fixed mug-relative endpoint for a waypoint recovery move."""
+        if name != "mug_recovery_clearance":
+            raise ValueError("unsupported_recovery_clearance_anchor")
+        result = self._fresh_result_for_anchor(name, arm, observation, 0.0)
+        mug = result.objects.get("mug")
+        if mug is None or result.status.get("mug") != "grounded":
+            raise ValueError("grounded_target_unavailable")
+        measured = pose7(measured_tcp_pose)
+        target = np.asarray(mug.position, dtype=float).copy()
+        target[2] += MUG_RECOVERY_CLEARANCE_M
+        anchor_pose = np.concatenate((target, measured[3:]))
+        self.anchors.bind(name, arm, Anchor(tuple(anchor_pose), observation.sequence,
+                                            "perception"))
+        return self.anchors.resolve(name, arm, observation)
+
+    def bind_pose_approach_anchor(self, name, arm, observation, *, measured_tcp_pose,
+                                  offset_m=0.12):
+        """Like ``bind_approach_anchor``, but aimed with the depth-fitted poses.
+
+        ``mug_pregrasp``: the mask's median point moved onto the trusted mug
+        axis, which keeps its height but removes the pull towards the camera.
+        ``rack_approach``: the rack pose's peg seat. Raises
+        ``pose_target_unavailable`` when there is no such pose.
+        """
+        result = self._fresh_result_for_anchor(name, arm, observation, offset_m)
+        mug, mug_pose, rack_pose = result.objects.get("mug"), result.mug_pose, result.rack_pose
+        mug_grounded = mug is not None and result.status.get("mug") == "grounded"
+        if name == "mug_pregrasp" and mug_grounded and mug_pose is not None and mug_pose.trusted:
+            on_axis, axis = np.asarray(mug_pose.position, dtype=float), np.asarray(mug_pose.axis, dtype=float)
+            point = on_axis + float((np.asarray(mug.position) - on_axis) @ axis) * axis
+        elif name == "rack_approach" and rack_pose is not None:
+            point = np.asarray(rack_pose.key_points["peg_seat"], dtype=float)
+        else:
+            raise ValueError("pose_target_unavailable")
+        return self._bind_standoff(name, arm, observation, point, measured_tcp_pose, offset_m)
+
+    def _fresh_result_for_anchor(self, name, arm, observation, offset_m):
         if name not in SYMBOLIC_ANCHORS or arm not in ("left", "right"):
             raise ValueError("unsupported_symbolic_anchor")
         if (isinstance(offset_m, bool) or not np.isfinite(offset_m)
                 or not 0 <= offset_m <= self.max_approach_offset_m):
             raise ValueError("approach_offset_out_of_bounds")
-        start = pose7(measured_tcp_pose)
         result = self._last_result
         if result is None or result.observation_sequence != observation.sequence:
             raise ValueError("grounding_missing_or_stale")
-        target = result.objects.get(labels[name])
-        if target is None or result.status.get(labels[name]) != "grounded":
-            raise ValueError("grounded_target_unavailable")
-        point = np.asarray(target.position, dtype=float)
+        return result
+
+    def _bind_standoff(self, name, arm, observation, point, measured_tcp_pose, offset_m):
+        """Bind a waypoint ``offset_m`` short of ``point`` on the line from the measured TCP."""
+        start = pose7(measured_tcp_pose)
         delta = point - start[:3]
         distance = float(np.linalg.norm(delta))
         if distance <= 1e-6 or distance > self.max_anchor_distance_m:
@@ -656,6 +760,27 @@ class RGBDPerceptionProvider:
         if name == "mug_visible":
             value = "mug" in result.objects if result.status.get("mug") in ("grounded", "not_detected") else None
             reason = result.status.get("mug", "unknown")
+        elif name == "mug_in_workspace":
+            if "mug" in result.objects:
+                value, reason = True, "mug_grounded_in_public_rgbd"
+            elif (result.status.get("mug") == "not_detected"
+                  and self._scene_coverage_sequence == observation.sequence):
+                value = (False if self._mug_absence_count >=
+                         self.MUG_ABSENCE_CONFIRMATION_OBSERVATIONS else None)
+                reason = ("mug_absent_from_repeatedly_observed_workspace" if value is False
+                          else "mug_absence_confirmation_pending")
+            else:
+                value, reason = None, "scene_coverage_or_mug_detection_unavailable"
+        elif name == "mug_toppled":
+            if result.release_ready_reason in TOPPLED_EVIDENCE_REASONS:
+                value, reason = True, result.release_ready_reason
+            elif result.release_ready is True:
+                value, reason = False, "upright_table_support_confirmed"
+            elif (result.mug_pose is not None and result.mug_pose.trusted
+                  and result.mug_pose.tilt_deg() <= UPRIGHT_MAX_TILT_DEG):
+                value, reason = False, "trusted_upright_mug_pose"
+            else:
+                value, reason = None, "mug_orientation_or_support_unavailable"
         elif name == "rack_visible":
             value = "rack" in result.objects if result.status.get("rack") in ("grounded", "not_detected") else None
             reason = result.status.get("rack", "unknown")
@@ -738,6 +863,11 @@ class RGBDPerceptionProvider:
         return {"name": name, "value": value, "source": "perception",
                 "observation_sequence": observation.sequence, "reason": reason}
 
+    def _reset_mug_absence(self):
+        self._scene_coverage_sequence = None
+        self._mug_absence_count = 0
+        self._mug_absence_last_sequence = None
+
     def evaluate(self, name, observation, *, arm="auto"):
         """Predicate-provider adapter used by ``PredicateRegistry``.
 
@@ -772,6 +902,50 @@ class RGBDPerceptionProvider:
         if len(candidates) > 1 and candidates[0].confidence-candidates[1].confidence < self.ambiguity_margin:
             return None, "ambiguous_instances"
         return candidates[0], "grounded"
+
+    @staticmethod
+    def _table_height(table):
+        if table is None or not table.surface_points:
+            return None
+        return float(np.median(np.asarray(table.surface_points)[:, 2]))
+
+    def _surfaces(self, label, batches, frames, table_height):
+        """Each camera's surface of ``label``, from its unambiguous, confident mask."""
+        surfaces = {}
+        for batch in batches:
+            selected, _reason = self._select(batch.detections, label)
+            if selected is not None and selected.mask.shape == frames[batch.camera].depth_m.shape:
+                surfaces[batch.camera] = masked_surface(frames[batch.camera], selected.mask,
+                                                        table_height_m=table_height)
+        return surfaces
+
+    def _mug_pose(self, batches, frames, table_height, sequence):
+        """Fit the mug's body in every camera that has an unambiguous mug mask."""
+        return object_pose(self._surfaces("mug", batches, frames, table_height), MUG,
+                           table_height_m=table_height, observation_sequence=sequence)
+
+    def _confirmed_rack(self, pose, reason):
+        """Keep a rack pose for the episode only once two views agree on the peg tip.
+
+        Two cameras in one observation agree inside ``pole_with_peg_pose``. A
+        single-camera fit waits for the next observation's fit to match it, so
+        one bad view (an arm across the peg, a stray mask) cannot fix a wrong
+        hang target for the whole episode.
+        """
+        if pose is None:
+            return None, reason
+        if len(pose.cameras) > 1:
+            return pose, reason
+        candidate, self._rack_candidate = self._rack_candidate, pose
+        if candidate is not None and same_peg(candidate, pose):
+            return pose, "pole_and_peg_fit_confirmed_by_a_second_observation"
+        return None, "rack_fit_awaiting_confirmation"
+
+    def _fit_rack(self, batches, frames, table_height, sequence):
+        # The rack's base plate is part of the mask, so table points stay in;
+        # the pole fit drops the plate itself.
+        return pole_with_peg_pose(self._surfaces("rack", batches, frames, None), RACK,
+                                  table_height_m=table_height, observation_sequence=sequence)
 
     def _estimate(self, detection, frame, sequence, camera, image):
         ys, xs = np.nonzero(detection.mask)
@@ -825,7 +999,7 @@ class RGBDPerceptionProvider:
             boundary_points, normalized_bbox, median_rgb, visible_extent, median_normal_z), "grounded"
 
     @staticmethod
-    def _table_support_evidence(objects, *, neighborhood_m=0.14, tolerance_m=0.025,
+    def _table_support_evidence(objects, *, mug_pose=None, neighborhood_m=0.14, tolerance_m=0.025,
                                 min_local_points=3, min_mug_points=3, upright_max_normal_z=0.25,
                                 support_view_cameras=("head_camera", *PERCEPTION_CAMERAS)):
         """Conservatively detect an upright mug resting on the locally visible tabletop.
@@ -842,6 +1016,12 @@ class RGBDPerceptionProvider:
         toppled mug can see only its flat base, which faces sideways too, so
         support is judged only from the elevated fixed views: across two
         five-seed captures every wrist-view release_ready=true (22) was wrong.
+
+        The surface direction cannot tell a toppled mug seen end-on (its flat
+        base faces sideways too) from an upright one, so a fitted body axis,
+        when there is one, must also be upright; either test can veto. Any
+        fitted axis lying down vetoes; only a trusted one can stand in for the
+        surface test when that had too few pixels.
         """
         mug, table = objects.get("mug"), objects.get("table")
         if mug is None or table is None:
@@ -866,8 +1046,10 @@ class RGBDPerceptionProvider:
         support_fraction = float(supported.mean())
         if int(supported.sum()) < min_mug_points or support_fraction < 0.05:
             return None, "mug_table_support_not_established"
-        if mug.median_normal_z is None:
-            return None, "mug_orientation_unavailable"
-        if mug.median_normal_z > upright_max_normal_z:
+        if mug_pose is not None and mug_pose.tilt_deg() > UPRIGHT_MAX_TILT_DEG:
+            return False, "mug_axis_tilted_not_upright"
+        if mug.median_normal_z is not None and mug.median_normal_z > upright_max_normal_z:
             return False, "mug_surface_faces_up_not_upright"
+        if mug.median_normal_z is None and (mug_pose is None or not mug_pose.trusted):
+            return None, "mug_orientation_unavailable"
         return True, "mug_silhouette_meets_local_table"

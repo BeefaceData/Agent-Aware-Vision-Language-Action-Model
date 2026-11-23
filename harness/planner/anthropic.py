@@ -48,11 +48,21 @@ class AnthropicSettings(Model):
 
 
 class AnthropicPlanner:
-    def __init__(self, settings, *, client=None, require_pixel_grounding=False):
+    def __init__(self, settings, *, client=None, require_pixel_grounding=False,
+                 preserve_policy_actions=False, runtime_grasp_monitor=True):
         self.settings = AnthropicSettings.model_validate(settings.model_dump())
         if type(require_pixel_grounding) is not bool:
             raise ValueError("pixel_grounding_mode_must_be_boolean")
         self.require_pixel_grounding = require_pixel_grounding
+        if type(preserve_policy_actions) is not bool:
+            raise ValueError("policy_passthrough_mode_must_be_boolean")
+        self.preserve_policy_actions = preserve_policy_actions
+        if type(runtime_grasp_monitor) is not bool:
+            raise ValueError("grasp_monitor_mode_must_be_boolean")
+        # False when the runner has no local per-action grasp monitor; VLA calls
+        # then keep the normal feedback-boundary behavior instead of stopping
+        # as failure_monitor_unavailable.
+        self.runtime_grasp_monitor = runtime_grasp_monitor
         self.prompt, self.prompt_hash = prompt_bundle(self.settings.task_scope)
         self.calls = self.attempts = 0
         self._feedback_phase = None
@@ -420,6 +430,8 @@ class AnthropicPlanner:
 
     def _runtime_grasp_failure_arm(self, context, phase):
         """Choose a local grasp monitor from public phase evidence, not model output."""
+        if not self.runtime_grasp_monitor:
+            return None
         if phase == "grasp":
             return "left"
         if (phase == "handoff"

@@ -51,8 +51,10 @@ class AnalyticSkill:
             # stop at the native benchmark's >0.8 command threshold.
             if not opening and env.native_success: return "task_success"
             if context.motion_started:
-                measured = motion.state(arm).joints
-                inactive = motion.state(other).joints
+                # Tracking compares joints only; an unavailable TCP pose is
+                # judged by the release predicate below, not as an execution error.
+                measured = np.asarray(env.arm_state(arm)["joints"], dtype=float)
+                inactive = np.asarray(env.arm_state(other)["joints"], dtype=float)
                 for compared_arm, measured_joints, commanded_joints, comparison in (
                     (arm, measured, last_position, "controlled_arm"),
                     (other, inactive, other_hold.joints, "inactive_arm"),
@@ -102,8 +104,9 @@ class AnalyticSkill:
             last_position = np.asarray(position).copy()
             context.log({"event_type": "measured_tick", "physics_tick": context.physics_ticks,
                          "physics_seconds": context.physics_ticks / 250.0,
-                         "arm": arm, "measured_joints": motion.state(arm).joints.tolist(),
-                         "measured_ee_pose": motion.state(arm).pose.tolist()})
+                         # Logging records raw measurements and never stops motion itself.
+                         "arm": arm, "measured_joints": np.asarray(env.arm_state(arm)["joints"], float).tolist(),
+                         "measured_ee_pose": np.asarray(env.arm_state(arm)["pose"], float).tolist()})
 
         executor = TickExecutor(min(command.parameters.max_physics_ticks, context.tick_limit),
                                 advance=advance, guard=guard, log=context.log, arm=arm)
@@ -263,7 +266,8 @@ class AnalyticSkill:
                     if not retreat_met:
                         return "target_not_reached"
                     return "completed"
-                if context.position_error > 0.015 or context.orientation_error > 0.10:
+                if (stable_samples < SETTLE_STABLE_SAMPLES
+                        or context.position_error > 0.015 or context.orientation_error > 0.10):
                     return "target_not_reached"
             elif abs(final["gripper"]-gripper_target) > 0.01:
                 return "gripper_target_not_reached"

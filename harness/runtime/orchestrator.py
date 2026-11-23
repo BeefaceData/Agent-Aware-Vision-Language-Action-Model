@@ -20,6 +20,8 @@ from harness.skills.schemas import (SkillCommand, SkillType,
 # grounding choice instead of ending the episode. Initial pixel + two retries.
 MAX_GROUNDING_RESELECTIONS = 2
 HANG_GROUNDING_REJECTIONS = frozenset({
+    "rack_frame_observation_before_reference", "mug_frame_camera_mismatch",
+    "x_axis_baseline_out_of_bounds", "plane_axis_baseline_out_of_bounds", "depth_unavailable",
     "depth_rack_pose_unavailable",
     "rack_frame_not_cached", "rack_frame_camera_unavailable", "rack_frame_camera_changed",
     "grounding_report_stale_or_wrong_camera", "grounding_confidence_too_low",
@@ -171,7 +173,7 @@ def predicate_true(predicates, name):
 class SkillOrchestrator:
     def __init__(self, executor, planner, *, log, save_observation, episode_id,
                  seed, max_turns=20, prepare=None, completion_predicate="mug_lifted", memory=None,
-                 invariant_check=lambda: None):
+                 invariant_check=lambda: None, hanging_recovery=None):
         if type(max_turns) is not int or not 1 <= max_turns <= 1000:
             raise ValueError("invalid_planner_turn_budget")
         self.executor, self.planner = executor, planner
@@ -182,6 +184,7 @@ class SkillOrchestrator:
         self.completion_predicate = completion_predicate
         self.memory = memory
         self.invariant_check = invariant_check
+        self.hanging_recovery = hanging_recovery
         self._started = False
 
     def _predicates(self, observation, *, native_success=None):
@@ -255,6 +258,7 @@ class SkillOrchestrator:
         success = None
         milestone = False
         acquired = False
+        recovery_report = None
         terminal_phase, terminal_outcome = MILESTONE_OUTCOMES[self.completion_predicate]
         try:
             for turn in range(1, self.max_turns + 1):
@@ -334,6 +338,33 @@ class SkillOrchestrator:
                     "command": command.model_dump(mode="json"),
                     "planner_latency_seconds": latency, "planner_metadata": selection.metadata})
 
+                if self.hanging_recovery is not None:
+                    self.invariant_check()
+                    recovery_report = self.hanging_recovery.consider(selection, observation,
+                        remaining=self._remaining_budget(turn, grounding_reselections))
+                    if recovery_report is not None and recovery_report.get("status") == "recovery_deferred":
+                        command = SkillCommand.model_validate(recovery_report["policy_command"])
+                        if command.action != SkillType.VLA_ACT:
+                            raise ValueError("hanging_deferral_requires_policy_command")
+                        if recovery_report.get("refresh_observation"):
+                            # A supervisor skill moved the robot after the planner's frame.
+                            observation = executor.environment.observe()
+                        self.log({**base, "event_type": "hanging_recovery_deferred",
+                            "report": recovery_report, "command": command.model_dump(mode="json")})
+                        grounding_feedback = recovery_report["reason"]
+                        recovery_report = None
+                    if recovery_report is not None:
+                        turns = turn
+                        executor.calls += len(recovery_report.get("stages", {}))
+                        # Recovery's total already includes settling and post-retreat hold ticks.
+                        executor.executed_physics_ticks += recovery_report.get("analytic_ticks", 0)
+                        success = recovery_report.get("native_success")
+                        outcome = recovery_report["status"]
+                        phase = ("RECOVERY_COMPLETED" if outcome == "recovery_sequence_completed_support_unverified"
+                                 else "RECOVERY_BLOCKED" if outcome == "recovery_blocked" else "FAILED")
+                        self.log({**base, "event_type": "hanging_recovery_result", "report": recovery_report})
+                        break
+
                 error_stage = "anchor_preparation"
                 prepared, rejection_code = self._prepare_anchor(
                     command, observation, camera_to_avoid_this_turn)
@@ -404,13 +435,19 @@ class SkillOrchestrator:
                     break
                 recoverable_failure = any(flags.values())
                 if previous.episode_terminal or (not previous.completed and not recoverable_failure):
-                    if success:
+                    # The benchmark checker can turn positive partway through
+                    # opening. It must not erase a later guarded hang failure.
+                    failed_hang_release = (command.action == SkillType.RELEASE
+                        and command.parameters.authorization == "rack_seat_alignment"
+                        and not confirmed)
+                    completed_success = success and not failed_hang_release
+                    if completed_success:
                         outcome = "task_success"
                     elif previous.completed and executor.calls >= executor.budget.max_skill_calls:
                         outcome = "skill_call_budget_exhausted"
                     else:
                         outcome = failure or previous.stop_reason
-                    phase = "COMPLETE" if success else "FAILED"
+                    phase = "COMPLETE" if completed_success else "FAILED"
                     break
                 if recoverable_failure:
                     # Known motion/contact/perception feedback returns fresh state
@@ -444,6 +481,8 @@ class SkillOrchestrator:
         # Preserve achieved milestones even when a later phase fails, so a
         # placement/handoff failure does not erase a successful grasp.
         summary["acquisition_confirmed"] = acquired
+        if recovery_report is not None:
+            summary["hanging_recovery"] = recovery_report
         self.log({"event_type": "episode_summary", **summary})
         return summary
 

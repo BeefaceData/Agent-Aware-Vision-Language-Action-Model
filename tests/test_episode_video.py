@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from development.demos.episode_video import EpisodeVideo, RecordingEnvironment
+from development.demos.episode_video import VIDEO_FPS, EpisodeVideo, RecordingEnvironment
 from harness.environment.local import LocalEnvironmentClient
 from harness.environment.base import Observation
 from harness.environment.base import CAMERAS
@@ -23,6 +23,42 @@ def observation_with_supervisor_camera(sequence):
 
 
 class VideoTests(unittest.TestCase):
+    def test_five_camera_video_keeps_both_perception_views_and_sampling_rate(self):
+        current = observation(0)
+        current.images["perception_camera"] = np.zeros((480,640,3),np.uint8)
+        current.images["perception_reverse_camera"] = np.full((480,640,3),255,np.uint8)
+        cameras = (*CAMERAS,"perception_camera","perception_reverse_camera")
+        writer = Mock()
+        with tempfile.TemporaryDirectory() as directory,patch("imageio.v2.get_writer",return_value=writer) as create:
+            video = EpisodeVideo(directory,cameras=cameras)
+            video.append(current,"reset",0,0)
+            video.close()
+        picture = writer.append_data.call_args.args[0]
+        self.assertEqual(picture.shape,(512,960,3))
+        self.assertGreater(picture[250:400,330:600].mean(),240)
+        self.assertEqual(create.call_args.kwargs["fps"],VIDEO_FPS)
+        self.assertEqual(video.metadata()["cameras"],list(cameras))
+        self.assertFalse(video.metadata()["real_time"])
+
+    def test_four_camera_video_contains_perception_panel(self):
+        import imageio.v2 as imageio
+        current = observation(0)
+        current.images["perception_camera"] = np.full((240, 320, 3), 255, dtype=np.uint8)
+        cameras = (*CAMERAS, "perception_camera")
+        with tempfile.TemporaryDirectory() as tmp:
+            video = EpisodeVideo(tmp, cameras=cameras)
+            try:
+                video.append(current, "baseline", 0, 0)
+            finally:
+                video.close()
+            reader = imageio.get_reader(Path(tmp) / "episode.mp4")
+            try:
+                frame = reader.get_data(0)
+            finally:
+                reader.close()
+            self.assertEqual(frame.shape, (512, 640, 3))
+            self.assertGreater(frame[250:400, 330:600].mean(), 240)
+
     def test_supervisor_recording_uses_head_and_fixed_scene_camera(self):
         with tempfile.TemporaryDirectory() as tmp:
             video = EpisodeVideo(tmp)

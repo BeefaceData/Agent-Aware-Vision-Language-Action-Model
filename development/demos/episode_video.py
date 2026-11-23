@@ -17,20 +17,40 @@ ANALYTIC_FRAME_INTERVAL_TICKS = 5
 
 
 class EpisodeVideo:
-    def __init__(self, output):
+    """Explicit ``cameras`` record a fixed grid; without them the set is chosen
+    from the first observation (head + supervisor camera when present)."""
+
+    def __init__(self, output, *, cameras=None):
         import imageio.v2 as imageio
+        if cameras is not None and (not 1 <= len(cameras) <= 5 or len(set(cameras)) != len(cameras)):
+            raise ValueError("invalid_video_cameras")
+        self.grid = cameras is not None
+        self.cameras = tuple(cameras) if cameras is not None else None
         self.output = Path(output)
         self.frames = 0
         self.closed = False
-        self.cameras = None
         self.writer = imageio.get_writer(self.output / "episode.mp4", fps=VIDEO_FPS,
             codec="libx264", output_params=["-g", str(VIDEO_FPS),
                                              "-movflags", "+frag_keyframe+empty_moov"])
 
-    def append(self, observation, kind, policy_actions, analytic_ticks):
+    def _grid_picture(self, observation):
         from PIL import Image, ImageDraw
-        if self.closed:
-            raise RuntimeError("video_closed")
+        count = len(self.cameras)
+        columns = 3 if count > 4 else (2 if count == 4 else count)
+        rows = (count + columns - 1) // columns
+        picture = Image.new("RGB", (320*columns, 240*rows + 32))
+        draw = ImageDraw.Draw(picture)
+        for i, camera in enumerate(self.cameras):
+            x, y = (i % columns)*320, (i // columns)*240
+            picture.paste(Image.fromarray(observation.images[camera]).resize((320, 240)), (x, y))
+            # Multi-row recordings label each panel without adding image rows.
+            label_y = y+222 if rows > 1 else 242
+            draw.rectangle((x, label_y, x+180, label_y+16), fill="black")
+            draw.text((x+4, label_y), camera, fill="white")
+        return picture, draw, 240*rows+17
+
+    def _auto_picture(self, observation):
+        from PIL import Image, ImageDraw
         cameras = (("head_camera", "perception_camera")
                    if "perception_camera" in observation.images else CAMERAS)
         if self.cameras is None:
@@ -45,7 +65,13 @@ class EpisodeVideo:
             picture.paste(Image.fromarray(observation.images[camera]).resize((panel_width, 240)),
                           (i*panel_width, 0))
             draw.text((i*panel_width+4, 242), label, fill="white")
-        draw.text((4, 257), f"SAMPLED {VIDEO_FPS} fps | {kind} | policy {policy_actions} | analytic ticks {analytic_ticks} | obs {observation.sequence}", fill="white")
+        return picture, draw, 257
+
+    def append(self, observation, kind, policy_actions, analytic_ticks):
+        if self.closed:
+            raise RuntimeError("video_closed")
+        picture, draw, text_y = (self._grid_picture if self.grid else self._auto_picture)(observation)
+        draw.text((4, text_y), f"SAMPLED {VIDEO_FPS} fps | {kind} | policy {policy_actions} | analytic ticks {analytic_ticks} | obs {observation.sequence}", fill="white")
         self.writer.append_data(np.asarray(picture))
         append_jsonl(self.output / "video_frames.jsonl", dict(frame=self.frames,
             playback_seconds=self.frames/VIDEO_FPS, observation_sequence=observation.sequence,
@@ -60,8 +86,8 @@ class EpisodeVideo:
     def metadata(self):
         return dict(path="episode.mp4", frame_index="video_frames.jsonl", frames=self.frames,
                     fps=VIDEO_FPS,
-                    timing=("sampled: one frame/policy target; one/5 analytic ticks; "
-                            "boundary frames"),
+                    timing=(f"sampled: one frame/policy target; one/{ANALYTIC_FRAME_INTERVAL_TICKS} "
+                            "analytic ticks; boundary frames"),
                     real_time=False, closed=self.closed,
                     cameras=list(self.cameras or CAMERAS))
 

@@ -57,7 +57,8 @@ class RunSkillsEpisodeTests(unittest.TestCase):
 
     def run_main(self, directory, environment, *, config_text=CONFIG):
         config = directory / "config.yaml"
-        config.write_text(config_text)
+        # Exact bytes: write_text uses CRLF line endings on Windows, which changes the config hash.
+        config.write_bytes(config_text.encode())
         oracle = PredicateRegistry(HangingMugPredicates(environment.evidence,
                                                         source="development_oracle"))
         with patch("development.simulator.local_simulator.LocalSimulator", FakeSimulator), \
@@ -114,7 +115,7 @@ class RunSkillsEpisodeTests(unittest.TestCase):
     def test_manifest_provenance_handles_unavailable_git_without_fabricating_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.yaml"
-            config.write_text(CONFIG)
+            config.write_bytes(CONFIG.encode())
             with patch.object(run_skills.subprocess, "run", side_effect=FileNotFoundError):
                 provenance = run_skills.latency_provenance(config)
             self.assertIsNone(provenance["source_commit"])

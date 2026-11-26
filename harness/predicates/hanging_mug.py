@@ -20,6 +20,9 @@ Grip = Annotated[StrictFloat, Field(ge=0, le=1)]
 GRASP_FAILURE_CLOSED_ACTIONS = 80
 GRASP_FAILURE_CONTACT_LOSS_ACTIONS = 4
 GRASP_FAILURE_FAR_MISS_ACTIONS = 8
+# A fully open finger can brush the mug during a normal approach. Contact loss
+# becomes grasp-failure evidence only after the policy has started closing.
+GRASP_CONTACT_ARMING_OPENING = 0.75
 # Recorded valid right-gripper contacts were about 0.12--0.14 m in RoboTwin's
 # TCP convention; clear misses began above 0.26 m. Keep margin on both sides.
 GRASP_FAILURE_FAR_DISTANCE_M = 0.22
@@ -191,10 +194,14 @@ class HangingMugPredicates:
 
         attempt["monitor_reason"] = None
 
-        if contact:
+        closure_started = grip <= GRASP_CONTACT_ARMING_OPENING
+        if contact and closure_started:
             attempt["contact_seen"] = True
             attempt["contact_loss_actions"] = 0
             attempt["monitor_reason"] = "vla_contact_acquired"
+        elif contact:
+            attempt["contact_loss_actions"] = 0
+            attempt["monitor_reason"] = "open_gripper_contact_ignored"
         elif closed and supported and attempt["contact_seen"]:
             attempt["contact_loss_actions"] += 1
             attempt["monitor_reason"] = "vla_contact_loss_pending"

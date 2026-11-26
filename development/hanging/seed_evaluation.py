@@ -55,7 +55,7 @@ def _command(kind, seed, target, model):
                 "--time-limit-minutes", "70", "--perception-camera", "close"]
     return [sys.executable, "-m", "modal", "run", "modal_apps/simulator.py::supervised_hanging",
             "--model", model, *common, "--time-limit-minutes", "75", "--max-turns", "80",
-            "--perception-view", "close", "--complementary-view"]
+            "--perception-view", "close", "--complementary-view", "--policy-grace-actions", "0"]
 
 
 def _run_id(root, seed, kind):

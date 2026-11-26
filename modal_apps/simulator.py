@@ -492,7 +492,7 @@ def supervised_hanging(model: str, seed: int = 4, max_actions: int = 900,
                        chunk_size: int = 16, time_limit_minutes: int = 30,
                        max_turns: int = 80, output: str = "", complementary_view: bool = False,
                        perception_view: str = "default", hand_back_to_policy: bool = True,
-                       policy_grace_actions: int = 160, skip_observations: bool = False,
+                       policy_grace_actions: int = 0, skip_observations: bool = False,
                        grasp_recovery: bool = True, grasp_retries: int = 2,
                        empty_hand_opening: float = .19):
     """One serial full-task supervisor run; no recorded entry or demo override.

@@ -47,7 +47,7 @@ class SupervisedOptions:
     # In the seed-5 policy-only success the hang finished about 105 actions
     # after the usual entry.
     hand_back_to_policy: bool = True
-    policy_grace_actions: int = 160
+    policy_grace_actions: int = 0
     # Public grasp-loss detection plus Thabo's re-grasp sequence (right arm).
     grasp_recovery: bool = True
     grasp_retries: int = 2

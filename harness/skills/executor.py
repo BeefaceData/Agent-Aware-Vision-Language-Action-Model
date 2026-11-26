@@ -139,7 +139,6 @@ class SkillExecutor:
             )
             self.terminal = (reason in {"aborted", "cancelled", "execution_error", "task_success",
                                         "failure_monitor_unavailable",
-                                        "grasp_monitor_watchdog_exhausted",
                                         "episode_budget_exhausted", "tracking_error", "safety_violation"}
                              and not recoverable_tracking_error
                              or self.calls >= self.budget.max_skill_calls)

@@ -91,7 +91,8 @@ class HangingRecoveryHook:
     def __init__(self, environment, provider, store, *, episode_id, deadline, log,
                  policy_chunk_size=16, visibility_action_budget=900, visibility_check_budget=20,
                  pause_policy_on_entry=True, require_current_lift=False,
-                 hand_back_to_policy=False, policy_grace_actions=0, grasp_recovery=None):
+                 hand_back_to_policy=False, policy_grace_actions=0, grasp_recovery=None,
+                 grasp_recoveries=None):
         if type(pause_policy_on_entry) is not bool or type(hand_back_to_policy) is not bool:
             raise ValueError("invalid_hanging_takeover_mode")
         if type(policy_grace_actions) is not int or policy_grace_actions < 0:
@@ -101,7 +102,12 @@ class HangingRecoveryHook:
         self.hand_back_to_policy = hand_back_to_policy
         self.policy_grace_actions = policy_grace_actions
         self.handed_back = None
-        self.grasp_recovery = grasp_recovery
+        if grasp_recovery is not None and grasp_recoveries is not None:
+            raise ValueError("duplicate_grasp_recovery_configuration")
+        recoveries = (() if grasp_recovery is None else (grasp_recovery,))
+        if grasp_recoveries is not None:
+            recoveries = tuple(grasp_recoveries)
+        self.grasp_recoveries = recoveries
         if type(policy_chunk_size) is not int or policy_chunk_size <= 0:
             raise ValueError("invalid_hanging_policy_chunk_size")
         if (type(visibility_action_budget) is not int or visibility_action_budget <= 0
@@ -198,21 +204,24 @@ class HangingRecoveryHook:
 
     def _consider_regrasp(self, observation, remaining):
         """Re-grasp after a confirmed loss; the policy then resumes from scratch."""
-        if self.grasp_recovery is None or self.attempts:
+        if not self.grasp_recoveries or self.attempts:
             return None  # An executed hanging attempt owns the rest of the episode.
-        basis = self.grasp_recovery.check(observation)
-        if basis is None:
-            return None
-        result = self.grasp_recovery.recover(observation, basis, remaining=remaining)
-        if result is None or result.get("status") != "grasp_recovery_completed":
-            return None  # Waiting for a usable frame, or recovery stopped: the policy keeps control.
+        recovery = basis = result = None
+        for candidate in self.grasp_recoveries:
+            candidate_basis = candidate.check(observation)
+            if candidate_basis is not None:
+                recovery, basis = candidate, candidate_basis
+                result = candidate.recover(observation, basis, remaining=remaining)
+                break
+        if recovery is None or result is None or result.get("status") != "grasp_recovery_completed":
+            return None  # No loss, waiting for evidence, or recovery stopped: policy keeps control.
         # The hanging supervisor starts over for the new grasp.
         self.handed_back = self._blocked_takeover = None
         self.entry_sequence = self.entry_policy_remaining = None
         self.visibility_checks = self.next_visibility_action = 0
         self.last_visibility_sequence = None
         self._decision(observation, "regrasp_hand_back_to_policy", basis, control_owner="policy",
-                       grasp_retry=result.get("attempt"))
+                       grasp_retry=result.get("attempt"), grasp_arm=getattr(recovery, "arm", None))
         turn = self._policy_turn(observation, remaining, "grasp_recovery_completed")
         if turn is not None:
             turn["refresh_observation"] = True  # The arm moved since the planner's frame.
@@ -387,25 +396,29 @@ def run_controller(environment, vla, provider, store, planner, options, *, episo
     def invariant():
         if time.monotonic() >= deadline:
             raise TimeoutError("supervisor_episode_deadline")
-    grasp = None
+    grasp = {}
     if getattr(options, "grasp_recovery", False):
         from development.hanging.grasp_recovery import GraspRecovery
-        grasp = GraspRecovery(environment, executor, provider, log=log, arm="right",
-                              empty_opening=options.empty_hand_opening, max_retries=options.grasp_retries)
-        provider.measured_hand_empty = grasp.hand_empty
+        grasp = {arm: GraspRecovery(environment, executor, provider, log=log, arm=arm,
+                                   empty_opening=options.empty_hand_opening,
+                                   max_retries=options.grasp_retries)
+                 for arm in ("left", "right")}
+        provider.measured_hand_empty = lambda arm: (
+            grasp[arm].hand_empty(arm) if arm in grasp else None)
     hook = HangingRecoveryHook(environment, provider, store, episode_id=episode_id,
                                deadline=deadline, log=log, policy_chunk_size=options.chunk_size,
                                visibility_action_budget=options.max_actions,
                                pause_policy_on_entry=False, require_current_lift=True,
                                hand_back_to_policy=options.hand_back_to_policy,
                                policy_grace_actions=options.policy_grace_actions,
-                               grasp_recovery=grasp)
+                               grasp_recoveries=grasp.values())
     summary = SkillOrchestrator(executor, planner, log=log, save_observation=store.save,
         episode_id=episode_id, seed=options.seed, max_turns=options.max_turns,
         completion_predicate="task_success", prepare=prepare, invariant_check=invariant,
         hanging_recovery=hook).run()
-    if grasp is not None and isinstance(summary, dict):
-        summary["grasp_recovery"] = grasp.summary()
+    if grasp and isinstance(summary, dict):
+        summary["grasp_recovery"] = {
+            arm: recovery.summary() for arm, recovery in grasp.items()}
     return summary
 
 

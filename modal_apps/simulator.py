@@ -5,10 +5,10 @@ fills the asset Volume once, measures a GPU (spike), and runs whole
 ``run_skills.py`` episodes remotely with the same arguments as locally.
 
     modal run modal_apps/simulator.py::download_assets   # once; CPU only
-    SIM_GPU=T4 modal run modal_apps/simulator.py::spike
+    SIM_GPU=L4 modal run modal_apps/simulator.py::spike
     modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
-    SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
-    SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
+    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
+    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
       --output-root data/perception/frames_cam                              # ... with the perception camera
 
 Episode-only options: ``--time-limit-minutes N`` (default 90) and
@@ -56,7 +56,8 @@ VOLUME_SETTLE_SECONDS = 5
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
 # SIM_GPU may list fallbacks, e.g. "L4,A10G,T4": Modal uses the first type with free
 # capacity instead of queueing for one. GPU is the label used in names and messages.
-GPU_CHOICES = tuple(name.strip() for name in os.environ.get("SIM_GPU", "T4").split(",") if name.strip())
+DEFAULT_GPU = "L4"
+GPU_CHOICES = tuple(name.strip() for name in os.environ.get("SIM_GPU", DEFAULT_GPU).split(",") if name.strip())
 GPU = "-".join(GPU_CHOICES)
 GPU_REQUEST = list(GPU_CHOICES) if len(GPU_CHOICES) > 1 else GPU_CHOICES[0]
 
@@ -659,7 +660,7 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
 
 @app.local_entrypoint()
 def reset_observation(seed: int = 3, perception_camera: str = "default"):
-    """Capture one reset-only RGB-D frame and download it from the Modal T4 worker."""
+    """Capture one reset-only RGB-D frame and download it from the Modal GPU worker."""
     sys.path.insert(0, str(REPO))
     from harness.environment.perception_cameras import parse_camera_spec
 

@@ -24,6 +24,7 @@ import time
 import modal
 
 APP_NAME = "robotwin-policy"
+DEFAULT_GPU = "L4"
 MODEL_REPO = "Neotix-Robotics/robotwin-hanging-mug-dit"
 
 MOUNT = "/model-data"
@@ -54,7 +55,7 @@ image = (
 
 @app.cls(
     image=image,
-    gpu="T4",
+    gpu=DEFAULT_GPU,
     timeout=60 * 60,
     scaledown_window=10 * 60,
     max_containers=1,

@@ -26,15 +26,15 @@ walkthrough with diagrams, see `docs/v1/robot_mug_guide.pdf`.
 
 | Component | Code | Runs on |
 |---|---|---|
-| Episode runner: RoboTwin simulator, CuRobo, harness | `run_skills.py`, `harness/` | Modal T4 (route 1) **or** your NVIDIA GPU (route 2) |
-| Frozen Neotix policy | `modal_apps/policy.py` | Modal, T4, both routes |
-| SAM 3 segmentation (optional) | `modal_apps/sam3.py` | Modal, T4, both routes |
+| Episode runner: RoboTwin simulator, CuRobo, harness | `run_skills.py`, `harness/` | Modal L4 (route 1) **or** your NVIDIA GPU (route 2) |
+| Frozen Neotix policy | `modal_apps/policy.py` | Modal, L4, both routes |
+| SAM 3 segmentation (optional) | `modal_apps/sam3.py` | Modal, L4, both routes |
 | Opus planner and perception prompts (optional) | `harness/planner/`, `harness/perception/` | Anthropic API, both routes |
 
 Both routes take the same `run_skills.py` options and produce the same output
 folder layout.
 
-- **Route 1, Modal.** The simulator runs in a fresh T4 cloud container for each
+- **Route 1, Modal.** The simulator runs in a fresh L4 cloud container for each
   episode, and your machine needs no GPU. Three-camera RGB-D rendering measured
   about 344 ms per observation on T4.
 - **Route 2, local.** You get the simulator in reach for debugging. It needs
@@ -188,11 +188,11 @@ Limitations today:
 
 ### M5. Simulator GPU
 
-The simulator, frozen policy worker, and SAM 3 worker default to Modal T4 GPUs.
-Use `SIM_GPU=T4` explicitly for recovery experiments to keep costs consistent.
+The simulator, frozen policy worker, and SAM 3 worker default to Modal L4 GPUs.
+Use `SIM_GPU=L4` explicitly for recovery experiments to keep costs consistent.
 
 ```bash
-SIM_GPU=T4 modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME
+SIM_GPU=L4 modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME
 ```
 
 Main also supports an explicit `SIM_GPU` override or ranked fallback list for
@@ -204,15 +204,15 @@ Measured with the spike (seed 3; three RGB-D cameras):
 
 | GPU | Render 3 RGB-D cameras | CuRobo plan | Approx. $/h* | Notes |
 |---|---|---|---|---|
-| T4 | 344 ms | 88 ms | ~0.59 | default and selected for recovery experiments |
+| T4 | 344 ms | 88 ms | ~0.59 | historical comparison |
 | A10G | 153 ms | 73 ms | ~1.10 | historical comparison |
-| L4 | 110 ms | 86 ms | ~0.80 | historical comparison |
+| L4 | 110 ms | 86 ms | ~0.80 | default and selected for recovery experiments |
 | Laptop RTX 2050 (route 2) | 800 ms | 322 ms | — | for comparison |
 
 \*Approximate; check Modal's pricing page.
 
-The T4 is selected for the current recovery experiments to keep GPU usage
-consistent and credit-efficient. The L4 and A10G measurements are historical comparisons.
+The L4 is selected for the current recovery experiments for faster rendering
+while preserving a single, consistent hardware condition. T4 and A10G are historical comparisons.
 
 **Do the images match?** All three tested GPUs render the same images as the local
 GPU (mean difference 0.03/255). Still record which GPU produced a result.
@@ -230,11 +230,11 @@ GPU (mean difference 0.03/255). Still record which GPU produced a result.
 
 For offline perception evaluation (see `CONTRIBUTE_README.md`), roll out the frozen
 policy and save public frames plus simulator labels, one seed after another.
-L4 took about 7 minutes per 900-action seed in the earlier comparison; current
-captures use T4 to conserve credits and may take longer:
+L4 took about 7 minutes per 900-action seed in the earlier comparison and is
+the current capture default:
 
 ```bash
-SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
+SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
 ```
 
 The manifest records which GPU actually ran. Each seed is downloaded into `data/perception/frames/seed_<N>`. Options:
@@ -435,7 +435,8 @@ Exit code 0 means a success outcome such as `acquisition_confirmed` or
 ### Policy and SAM 3 GPUs
 
 Both routes use the same deployed workers. Their GPU is fixed in the app
-definition: `gpu="T4"` in `modal_apps/policy.py` and `modal_apps/sam3.py`. To
+definition: `gpu=DEFAULT_GPU` (currently `L4`) in `modal_apps/policy.py` and
+`modal_apps/sam3.py`. To
 change it, edit that value and redeploy:
 
 ```bash

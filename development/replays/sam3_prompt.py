@@ -1,7 +1,7 @@
 """Compare fixed rack prompts on saved public RGB views using Modal SAM 3.
 
 No simulator is started and SAM 3 is never loaded on the local GPU. Each
-sequence/camera pair makes one request to the existing T4 worker.
+sequence/camera pair makes one request to the existing L4 worker.
 """
 
 import argparse
@@ -87,7 +87,7 @@ def replay(observations_dir, sequences, cameras, output, *, app_name="robotwin-p
                     "variants": variants})
     report = {"schema_version": 1, "mode": "saved_frame_sam3_rack_prompt_replay",
         "robot_motion": False, "simulator_started": False,
-        "local_sam3_loaded": False, "worker_gpu": "Modal T4",
+        "local_sam3_loaded": False, "worker_gpu": "Modal L4",
         "prompt_variants": list(PROMPTS), "requests": rows}
     (output / "results.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     return report

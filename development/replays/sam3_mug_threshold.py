@@ -80,13 +80,13 @@ def replay(output, *, detector=None):
 
     report = {"schema_version": 1, "mode": "saved_public_rgb_sam3_mug_cutoff_replay",
               "robot_motion": False, "simulator_started": False,
-              "local_gpu_used": False, "worker_gpu": "T4",
+              "local_gpu_used": False, "worker_gpu": "L4",
               "threshold": MUG_SCORE_THRESHOLD, "camera": "head_camera",
               "rack_inference": False, "sample_count": len(rows), "samples": rows}
     (output / "results.json").write_text(
         json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     lines = ["# SAM 3 mug threshold replay", "",
-        "Saved public head-camera RGB only; sequential Modal T4 calls, no simulator or local GPU.",
+        "Saved public head-camera RGB only; sequential Modal L4 calls, no simulator or local GPU.",
         "Mug score cutoff: **0.40**. Green is the returned mask; outlines show its image-space bounds.", "",
         "| Phase | Observation | Status | Score | Mask area | Overlay |",
         "|---|---:|---|---:|---:|---|"]

@@ -118,7 +118,7 @@ def _finish_fetches(root, fetches):
                 observations_complete=_observations_complete(root/f"seed{seed}"/kind, kind)))+"\n")
 
 
-def fetch_all(root, *, gpu="L4,A10G,T4", popen=subprocess.Popen):
+def fetch_all(root, *, gpu="L4", popen=subprocess.Popen):
     """Fetch any run's missing RGB-D from the runs Volume (resumable), then rebuild the report."""
     root = Path(root)
     plan = json.loads((root/"plan.json").read_text())
@@ -299,7 +299,7 @@ def collect(root):
     launches = {}
     for row in _read_jsonl(root/"launches.jsonl"):
         launches[(row["seed"], row["kind"])] = row
-    gpu = (plan.get("gpu") or "T4").split(",")[0]
+    gpu = (plan.get("gpu") or "L4").split(",")[0]
     rows = []
     for seed in plan.get("seeds") or sorted(int(p.name[4:]) for p in root.glob("seed*") if p.name[4:].isdigit()):
         for kind in KINDS:
@@ -541,7 +541,7 @@ def main(argv=None):
     run_parser.add_argument("--root", type=Path, required=True)
     run_parser.add_argument("--seeds", required=True)
     run_parser.add_argument("--model", default="claude-opus-5-5")
-    run_parser.add_argument("--gpu", default="L4,A10G,T4")
+    run_parser.add_argument("--gpu", default="L4")
     report_parser = sub.add_parser("report")
     report_parser.add_argument("--root", type=Path, required=True)
     fetch_parser = sub.add_parser("fetch", help="download any missing per-step RGB-D, then rebuild the report")

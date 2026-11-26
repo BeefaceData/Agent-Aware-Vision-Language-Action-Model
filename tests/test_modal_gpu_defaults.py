@@ -8,10 +8,10 @@ from modal_apps.simulator import DEFAULT_GPU as SIMULATOR_GPU
 
 
 class ModalGPUDefaultsTests(unittest.TestCase):
-    def test_all_gpu_backed_apps_default_to_l4(self):
+    def test_all_gpu_backed_apps_default_to_t4(self):
         self.assertEqual(
             {"policy": POLICY_GPU, "sam3": SAM3_GPU, "simulator": SIMULATOR_GPU},
-            {"policy": "L4", "sam3": "L4", "simulator": "L4"},
+            {"policy": "T4", "sam3": "T4", "simulator": "T4"},
         )
 
 

@@ -14,7 +14,7 @@ import modal
 
 
 APP_NAME = "robotwin-perception-sam3"
-DEFAULT_GPU = "L4"
+DEFAULT_GPU = "T4"
 MODEL_REPO = "facebook/sam3"
 MOUNT = "/perception-data"
 WEIGHTS = f"{MOUNT}/sam3"

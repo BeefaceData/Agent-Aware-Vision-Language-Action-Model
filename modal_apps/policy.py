@@ -24,7 +24,7 @@ import time
 import modal
 
 APP_NAME = "robotwin-policy"
-DEFAULT_GPU = "L4"
+DEFAULT_GPU = "T4"
 MODEL_REPO = "Neotix-Robotics/robotwin-hanging-mug-dit"
 
 MOUNT = "/model-data"

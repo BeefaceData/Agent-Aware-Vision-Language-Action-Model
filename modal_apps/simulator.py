@@ -5,10 +5,10 @@ fills the asset Volume once, measures a GPU (spike), and runs whole
 ``run_skills.py`` episodes remotely with the same arguments as locally.
 
     modal run modal_apps/simulator.py::download_assets   # once; CPU only
-    SIM_GPU=L4 modal run modal_apps/simulator.py::spike
+    SIM_GPU=T4 modal run modal_apps/simulator.py::spike
     modal run modal_apps/simulator.py::episode --config ... --output data/runs/NAME [...]
-    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
-    SIM_GPU=L4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
+    SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4   # labelled perception frames
+    SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0 --perception-camera default \
       --output-root data/perception/frames_cam                              # ... with the perception camera
 
 Episode-only options: ``--time-limit-minutes N`` (default 90) and
@@ -45,7 +45,7 @@ EPISODE_INPUTS = "/tmp/episode-inputs"
 SHUTDOWN_GRACE_SECONDS = 5 * 60
 # Covers episode_request.MAX_TIME_LIMIT_MINUTES (210) plus shutdown and Volume commit.
 EPISODE_FUNCTION_TIMEOUT_SECONDS = 4 * 60 * 60
-# One 900-action labelled capture takes roughly 10 minutes on an L4.
+# T4 is the default because it has been more consistently schedulable for this project.
 CAPTURE_FUNCTION_TIMEOUT_SECONDS = 60 * 60
 # Files committed inside a container can take seconds to appear in this
 # machine's listing of the Volume; downloads wait up to a minute for them.
@@ -56,7 +56,7 @@ VOLUME_SETTLE_SECONDS = 5
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
 # SIM_GPU may list fallbacks, e.g. "L4,A10G,T4": Modal uses the first type with free
 # capacity instead of queueing for one. GPU is the label used in names and messages.
-DEFAULT_GPU = "L4"
+DEFAULT_GPU = "T4"
 GPU_CHOICES = tuple(name.strip() for name in os.environ.get("SIM_GPU", DEFAULT_GPU).split(",") if name.strip())
 GPU = "-".join(GPU_CHOICES)
 GPU_REQUEST = list(GPU_CHOICES) if len(GPU_CHOICES) > 1 else GPU_CHOICES[0]

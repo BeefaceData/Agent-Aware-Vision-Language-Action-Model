@@ -360,7 +360,8 @@ class SkillOrchestrator:
                         executor.executed_physics_ticks += recovery_report.get("analytic_ticks", 0)
                         success = recovery_report.get("native_success")
                         outcome = recovery_report["status"]
-                        phase = ("RECOVERY_COMPLETED" if outcome == "recovery_sequence_completed_support_unverified"
+                        phase = ("COMPLETE" if outcome == "task_success"
+                                 else "RECOVERY_COMPLETED" if outcome == "recovery_sequence_completed_support_unverified"
                                  else "RECOVERY_BLOCKED" if outcome == "recovery_blocked" else "FAILED")
                         self.log({**base, "event_type": "hanging_recovery_result", "report": recovery_report})
                         break

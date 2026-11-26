@@ -303,7 +303,8 @@ class BenchmarkBlindEnvironment:
 
 
 def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
-                   log=lambda event: None, settle_after_seat=True, failure_detail=None):
+                   log=lambda event: None, settle_after_seat=True, failure_detail=None,
+                   allow_development_oracle=False):
     """Execute one bounded sequence from current state; stop at the first failure.
 
     The native success checker is reported but never consulted for control.
@@ -320,7 +321,8 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
     try:
         executor = SkillExecutor(BenchmarkBlindEnvironment(environment), NoPolicy(), log=record, anchors=anchors,
             predicates=PredicateRegistry(rack_seat_gate=gate), cancelled=lambda: time.monotonic() >= deadline,
-            budget=EpisodeBudget(max_skill_calls=5, max_analytic_ticks=12000))
+            budget=EpisodeBudget(max_skill_calls=5, max_analytic_ticks=12000),
+            allow_development_oracle=allow_development_oracle)
         commands = (
             ("approach", SkillCommand(action="move_to", arm="right",
                 parameters={"target": "rack_approach", "max_physics_ticks": 3000})),

@@ -81,6 +81,18 @@ class RackSeatGateTests(unittest.TestCase):
                 self.gate.record(self.command, result, anchor)
                 self.assertFalse(self.gate.available)
 
+    def test_development_gate_accepts_oracle_anchor_only_when_explicitly_enabled(self):
+        gate = RackSeatReleaseGate(
+            self.environment, allowed_anchor_sources=("perception", "development_oracle"))
+        gate.record(
+            self.command, self.result,
+            Anchor(self.pose, 4, "development_oracle"))
+
+        self.assertTrue(gate.available)
+        predicate = gate.evaluate(
+            "rack_seat_aligned", Observation(5, {}, (0.0,) * 14), arm="right")
+        self.assertTrue(predicate.value)
+
     def test_uncertain_or_terminal_seat_clears_prior_authorization(self):
         for update in ({"execution_uncertain": True}, {"episode_terminal": True},
                        {"completed": False, "stop_reason": "target_not_reached"}):

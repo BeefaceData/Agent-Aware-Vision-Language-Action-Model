@@ -494,7 +494,8 @@ def supervised_hanging(model: str, seed: int = 4, max_actions: int = 900,
                        perception_view: str = "default", hand_back_to_policy: bool = True,
                        policy_grace_actions: int = 0, skip_observations: bool = False,
                        grasp_recovery: bool = True, grasp_retries: int = 2,
-                       empty_hand_opening: float = .19):
+                       empty_hand_opening: float = .19,
+                       development_oracle_fallback: bool = False):
     """One serial full-task supervisor run; no recorded entry or demo override.
 
     ``--skip-observations`` leaves per-step RGB-D on the runs Volume; fetch it later
@@ -506,7 +507,8 @@ def supervised_hanging(model: str, seed: int = 4, max_actions: int = 900,
                                 hand_back_to_policy=hand_back_to_policy,
                                 policy_grace_actions=policy_grace_actions,
                                 grasp_recovery=grasp_recovery, grasp_retries=grasp_retries,
-                                empty_hand_opening=empty_hand_opening)
+                                empty_hand_opening=empty_hand_opening,
+                                development_oracle_fallback=development_oracle_fallback)
     options.validate()
     run_id = f"supervised_hanging_seed{seed}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{time.time_ns()}"
     target = Path(output).resolve() if output else REPO/"data/runs"/run_id

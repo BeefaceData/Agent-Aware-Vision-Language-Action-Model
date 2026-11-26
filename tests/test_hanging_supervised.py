@@ -1177,6 +1177,37 @@ class SupervisedHangingTests(unittest.TestCase):
         provider.propose.assert_called_once()  # Geometry is checked only after the grace period.
         self.assertEqual(after["status"], "recovery_deferred")
 
+    def test_explicit_development_fallback_bypasses_public_visibility_wait(self):
+        environment = PublicEnvironment(x=0.)
+        environment.sequence = 416
+        provider = self.lifted_provider(416)
+        proposal = runtime.ProposalResult("unknown", "complete_visible_aperture_unavailable")
+        provider.propose.return_value = proposal
+        target_provider = Mock(return_value={
+            "rack_approach": (0., 0., 1., 1., 0., 0., 0.),
+            "rack_seat": (0., 0., 1., 1., 0., 0., 0.),
+        })
+        hook = self.hand_back_hook(
+            provider, environment, development_oracle_targets=target_provider,
+            development_success_confirmation=True)
+        selection = PlannerSelection(SkillCommand(action="vla_act"), "HANG")
+
+        with patch("development.hanging.supervised.recover_current", return_value={
+                "status": "recovery_sequence_completed_support_unverified",
+                "native_success": True, "stages": {}}) as recover:
+            result = hook.consider(
+                selection, environment.observe(), remaining=dict(
+                    policy_actions=400, vla_chunks=30, skill_calls=30,
+                    analytic_ticks=12000))
+
+        self.assertEqual(result["status"], "task_success")
+        self.assertEqual(
+            result["task_success_confirmation"],
+            "development_oracle_native_checker")
+        self.assertIs(
+            recover.call_args.kwargs["development_oracle_targets"], target_provider)
+        self.assertIs(recover.call_args.kwargs["initial_proposal"], proposal)
+
     def test_stops_before_motion_hand_control_back_to_the_policy(self):
         remaining = dict(policy_actions=400, vla_chunks=30, skill_calls=30, analytic_ticks=12000)
         selection = PlannerSelection(SkillCommand(action="vla_act"), "HANG")
@@ -1410,6 +1441,36 @@ class SupervisedHangingTests(unittest.TestCase):
         self.assertEqual(summary["policy_actions"], 0)
         self.assertEqual(summary["hanging_recovery"], result)
         self.assertEqual(environment.ticks, 0)  # Hook execution itself is mocked.
+
+    def test_development_oracle_fills_only_unknown_workspace_predicate(self):
+        environment = PublicEnvironment(x=0.)
+        provider = Mock(source="perception")
+        provider.evaluate.side_effect = lambda name, observation, **kwargs: PredicateResult(
+            name=name, value=None, source="perception",
+            observation_sequence=observation.sequence, reason="public_evidence_unknown")
+        provider.planner_summary.return_value = {}
+
+        class WorkspaceOracle:
+            source = "development_oracle"
+
+            def evaluate(self, name, observation, *, arm="auto"):
+                return PredicateResult(
+                    name=name, value=False if name == "mug_in_workspace" else None,
+                    source=self.source, observation_sequence=observation.sequence,
+                    reason="development_workspace_check")
+
+        planner = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            summary = run_controller(
+                environment, Mock(), provider,
+                ObservationStore(Path(directory)/"observations"), planner,
+                SupervisedOptions("claude-test"), episode_id="episode",
+                deadline=time.monotonic()+10, log=lambda event: None,
+                development_oracle_predicates=WorkspaceOracle())
+
+        self.assertEqual(summary["outcome"], "mug_out_of_workspace")
+        self.assertTrue(summary["development_oracle"])
+        planner.select.assert_not_called()
 
     def test_frozen_policy_turn_then_real_four_stage_recovery_in_cpu_environment(self):
         environment = PublicEnvironment(x=0.)

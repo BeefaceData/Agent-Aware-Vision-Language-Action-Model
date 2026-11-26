@@ -192,6 +192,40 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(result["stages"], {})
         self.assertEqual(environment.ticks, 0)
 
+    def test_explicit_development_fallback_uses_one_frozen_target_pair(self):
+        observation, _, tcp = self.fixture()
+        environment = SimpleNamespace(arm_state=lambda arm: {"pose": tcp.copy()})
+        approach = tuple(tcp + np.array([.01, 0., 0., 0., 0., 0., 0.]))
+        seat = tuple(tcp + np.array([.02, 0., 0., 0., 0., 0., 0.]))
+        targets = Mock(return_value={"rack_approach": approach, "rack_seat": seat})
+        events = []
+
+        def preparation_only(env, prepare, anchors, gate, store, **kwargs):
+            for name in ("rack_approach", "rack_seat"):
+                command = SkillCommand(
+                    action="move_to", arm="right", parameters={"target": name})
+                anchor = prepare(command, observation)
+                self.assertEqual(anchor.source, "development_oracle")
+                self.assertEqual(anchor.pose, {"rack_approach": approach, "rack_seat": seat}[name])
+            self.assertIn("development_oracle", gate.allowed_anchor_sources)
+            self.assertTrue(kwargs["allow_development_oracle"])
+            return dict(status="prepared", stages={}, native_success=True)
+
+        with patch.object(runtime, "execute_stages", side_effect=preparation_only):
+            result = recover_current(
+                environment, Mock(), episode_id="episode-a",
+                deadline=time.monotonic()+10,
+                initial_proposal=ProposalResult("unknown", "public_geometry_unavailable"),
+                development_oracle_targets=targets, log=events.append)
+
+        targets.assert_called_once_with("right")
+        self.assertEqual(result["information_source"], "development_oracle")
+        self.assertEqual(result["entry_assessment"]["fallback_source"], "development_oracle")
+        fallback = next(
+            event for event in events
+            if event["event_type"] == "development_oracle_hang_target_fallback")
+        self.assertEqual(fallback["public_reason"], "public_geometry_unavailable")
+
     def test_shared_execution_has_no_recording_or_fixed_entry_dependencies(self):
         for module in (motion, runtime):
             source = inspect.getsource(module)

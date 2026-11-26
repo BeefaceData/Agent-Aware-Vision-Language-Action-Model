@@ -16,11 +16,32 @@ MIN_MUG_HEIGHT_M = -0.05
 TOPPLED_TILT_DEG = 45.0
 
 
+def oracle_hang_geometry(task, arm):
+    """Compose development-only hanging targets from live simulator frames."""
+    from harness.perception.pose_grounding import tcp_targets_for_mug_alignment
+
+    current = tuple(map(float, getattr(task.robot, f"get_{arm}_ee_pose")()))
+    mug_pose = tuple(map(float, task.mug.get_functional_point(0)))
+    rack_pose = tuple(map(float, task.rack.get_functional_point(0)))
+    approach, seat = tcp_targets_for_mug_alignment(current, mug_pose, rack_pose)
+    return {
+        "measured_ee_pose": current,
+        "mug_function_pose": mug_pose,
+        "rack_function_pose": rack_pose,
+        "targets": {"rack_approach": approach, "rack_seat": seat},
+    }
+
+
+def oracle_hang_targets(task, arm):
+    """Return the target pair used only by explicitly flagged development runs."""
+    return oracle_hang_geometry(task, arm)["targets"]
+
+
 def oracle_anchor_preparer(task, anchors, *, log):
     """Re-ground a supported symbol at the current frame; never a planner tool."""
     from harness.perception.anchors import Anchor
-    from harness.perception.pose_grounding import tcp_targets_for_mug_alignment
     left_home = None
+    hang_targets = {}
 
     def prepare(command, observation):
         nonlocal left_home
@@ -61,11 +82,11 @@ def oracle_anchor_preparer(task, anchors, *, log):
                                 source="development_oracle"))
             return
         if command.parameters.target in ("rack_approach", "rack_seat"):
-            current = getattr(task.robot, f"get_{command.arm}_ee_pose")()
-            mug_pose = task.mug.get_functional_point(0)
-            rack_pose = task.rack.get_functional_point(0)
-            approach, seat = tcp_targets_for_mug_alignment(current, mug_pose, rack_pose)
-            targets = {"rack_approach": approach, "rack_seat": seat}
+            # Freeze approach and seat from one geometry snapshot. Recomputing
+            # the seat after the approach changes the TCP-to-mug transform and
+            # can shift the release target even though the rack did not move.
+            targets = hang_targets.setdefault(
+                command.arm, oracle_hang_targets(task, command.arm))
             pose = tuple(map(float, targets[command.parameters.target]))
             log({"event_type": "anchor_oracle_evidence", "name": command.parameters.target,
                  "arm": command.arm, "observation_sequence": observation.sequence,

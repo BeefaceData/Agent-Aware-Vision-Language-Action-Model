@@ -42,16 +42,17 @@ class SupervisedOptions:
     max_turns: int = 80
     complementary_view: bool = False
     perception_view: str = "default"
-    # The supervisor never ends an episode before motion; the policy keeps
-    # control for this many actions after a confirmed lift before any takeover.
-    # In the seed-5 policy-only success the hang finished about 105 actions
-    # after the usual entry.
+    # Number of frozen-policy actions allowed after confirmed lift. Zero means
+    # immediate analytic takeover; nonzero values are retained for ablations.
     hand_back_to_policy: bool = True
     policy_grace_actions: int = 0
-    # Public grasp-loss detection plus Thabo's re-grasp sequence (right arm).
+    # Public grasp-loss detection plus the same re-grasp sequence for both arms.
     grasp_recovery: bool = True
     grasp_retries: int = 2
     empty_hand_opening: float = .19  # calibrated: empty 0.18, held 0.25
+    # Simulator-only fallback for controlled development experiments. Public
+    # perception remains the default and is always attempted first.
+    development_oracle_fallback: bool = False
 
     def validate(self):
         from development.hanging.baseline import validate_options
@@ -80,6 +81,8 @@ class SupervisedOptions:
         if (isinstance(self.empty_hand_opening, bool) or not isinstance(self.empty_hand_opening, (int, float))
                 or not 0 <= self.empty_hand_opening < .5):
             raise ValueError("invalid_empty_hand_opening")
+        if type(self.development_oracle_fallback) is not bool:
+            raise ValueError("invalid_development_oracle_fallback")
 
 
 class HangingRecoveryHook:
@@ -92,7 +95,8 @@ class HangingRecoveryHook:
                  policy_chunk_size=16, visibility_action_budget=900, visibility_check_budget=20,
                  pause_policy_on_entry=True, require_current_lift=False,
                  hand_back_to_policy=False, policy_grace_actions=0, grasp_recovery=None,
-                 grasp_recoveries=None):
+                 grasp_recoveries=None, development_oracle_targets=None,
+                 development_success_confirmation=False):
         if type(pause_policy_on_entry) is not bool or type(hand_back_to_policy) is not bool:
             raise ValueError("invalid_hanging_takeover_mode")
         if type(policy_grace_actions) is not int or policy_grace_actions < 0:
@@ -108,6 +112,13 @@ class HangingRecoveryHook:
         if grasp_recoveries is not None:
             recoveries = tuple(grasp_recoveries)
         self.grasp_recoveries = recoveries
+        if (development_oracle_targets is not None
+                and not callable(development_oracle_targets)):
+            raise ValueError("invalid_development_oracle_target_provider")
+        if type(development_success_confirmation) is not bool:
+            raise ValueError("invalid_development_success_confirmation")
+        self.development_oracle_targets = development_oracle_targets
+        self.development_success_confirmation = development_success_confirmation
         if type(policy_chunk_size) is not int or policy_chunk_size <= 0:
             raise ValueError("invalid_hanging_policy_chunk_size")
         if (type(visibility_action_budget) is not int or visibility_action_budget <= 0
@@ -195,7 +206,8 @@ class HangingRecoveryHook:
             report = dict(status="recovery_stopped", reason="planner_abort_overridden", stages={})
         else:
             report = self._consider(selection, observation, remaining=remaining)
-        if report is None or report.get("status") == "recovery_deferred" or report.get("stages"):
+        if (report is None or report.get("status") in {"recovery_deferred", "task_success"}
+                or report.get("stages")):
             return report
         self.handed_back = report.get("reason") or report.get("status")
         self._decision(observation, "hand_back_to_policy", self.handed_back, control_owner="policy",
@@ -289,16 +301,24 @@ class HangingRecoveryHook:
             measured_tcp = self.environment.arm_state("right")["pose"]
             proposal = self.provider.propose(observation, measured_tcp, episode_id=self.episode_id)
         except Exception as exc:
-            if self.pause_policy_on_entry:
+            if self.development_oracle_targets is not None:
+                proposal = ProposalResult("unknown", "hanging_evidence_provider_error")
+                self.log(dict(event_type="development_oracle_fallback_requested",
+                              observation_sequence=observation.sequence,
+                              public_reason=proposal.reason,
+                              public_failure=sanitized_failure(exc)))
+            elif self.pause_policy_on_entry:
                 return self._block_takeover(observation, "hanging_evidence_provider_error",
                                             failure=sanitized_failure(exc))
-            return dict(status="recovery_stopped", reason="hanging_evidence_provider_error",
-                        failure=sanitized_failure(exc), stages={})
+            else:
+                return dict(status="recovery_stopped", reason="hanging_evidence_provider_error",
+                            failure=sanitized_failure(exc), stages={})
         if not isinstance(proposal, ProposalResult):
             return dict(status="recovery_stopped", reason="invalid_provider_result", stages={})
-        if self.pause_policy_on_entry and proposal.status == "unknown":
+        if (self.pause_policy_on_entry and proposal.status == "unknown"
+                and self.development_oracle_targets is None):
             return self._block_takeover(observation, proposal.reason, entry_status=proposal.status)
-        if proposal.status != "confirmed":
+        if proposal.status != "confirmed" and self.development_oracle_targets is None:
             if observation.sequence != self.last_visibility_sequence:
                 self.visibility_checks += 1
                 self.last_visibility_sequence = observation.sequence
@@ -331,6 +351,10 @@ class HangingRecoveryHook:
             return dict(status="recovery_stopped", reason=proposal.reason, stages={},
                         entry_status=proposal.status,
                         visibility_budget_exhausted=(proposal.reason in WAITABLE_GEOMETRY_REASONS))
+        if proposal.status != "confirmed":
+            self._decision(observation, "use_development_oracle_fallback", proposal.reason,
+                           geometry_status=proposal.status,
+                           information_source="development_oracle")
         # Worst-case four stages plus settling/hold fit below this reservation.
         if remaining.get("analytic_ticks", 0) < 9000 or remaining.get("skill_calls", 0) < 4:
             if self.pause_policy_on_entry:
@@ -340,9 +364,16 @@ class HangingRecoveryHook:
         self._decision(observation, "grounded_contact_recovery", "current_geometry_available",
                        geometry_status=proposal.status,
                        intervention_basis="bounded_final_contact_skill_not_proven_vla_failure")
-        return recover_current(self.environment, self.store, episode_id=self.episode_id,
-                               deadline=min(self.deadline, time.monotonic()+600),
-                               provider=self.provider, log=self.log)
+        report = recover_current(
+            self.environment, self.store, episode_id=self.episode_id,
+            deadline=min(self.deadline, time.monotonic()+600), provider=self.provider,
+            initial_proposal=proposal,
+            development_oracle_targets=self.development_oracle_targets,
+            log=self.log)
+        if self.development_success_confirmation and report.get("native_success") is True:
+            report["status"] = "task_success"
+            report["task_success_confirmation"] = "development_oracle_native_checker"
+        return report
 
 
 def service_preflight(options, client, policy_client):
@@ -380,14 +411,18 @@ def build_supervised_planner(options, client):
         runtime_grasp_monitor=getattr(options, "public_grasp_monitor", False))
 
 
-def run_controller(environment, vla, provider, store, planner, options, *, episode_id, deadline, log):
+def run_controller(environment, vla, provider, store, planner, options, *, episode_id, deadline, log,
+                   development_oracle_targets=None, development_oracle_predicates=None):
     """Uses the existing supervisor; caller owns reset and recording resources."""
     anchors = AnchorRegistry()
     executor = SkillExecutor(environment, vla, log=log, anchors=anchors,
         budget=EpisodeBudget(max_skill_calls=options.max_turns+4, max_analytic_ticks=12000,
                              max_policy_actions=options.max_actions,
                              max_vla_chunks=(options.max_actions+options.chunk_size-1)//options.chunk_size),
-        predicates=PredicateRegistry(perception=provider), cancelled=lambda: time.monotonic() >= deadline)
+        predicates=PredicateRegistry(
+            perception=provider, fallback_oracle=development_oracle_predicates),
+        cancelled=lambda: time.monotonic() >= deadline,
+        allow_development_oracle=development_oracle_predicates is not None)
     def prepare(command, observation):
         # Acquisition and table handoff remain frozen-policy-owned. The hooked
         # bounded pipeline is the only analytic controller enabled by this runner.
@@ -411,7 +446,9 @@ def run_controller(environment, vla, provider, store, planner, options, *, episo
                                pause_policy_on_entry=False, require_current_lift=True,
                                hand_back_to_policy=options.hand_back_to_policy,
                                policy_grace_actions=options.policy_grace_actions,
-                               grasp_recoveries=grasp.values())
+                               grasp_recoveries=grasp.values(),
+                               development_oracle_targets=development_oracle_targets,
+                               development_success_confirmation=options.development_oracle_fallback)
     summary = SkillOrchestrator(executor, planner, log=log, save_observation=store.save,
         episode_id=episode_id, seed=options.seed, max_turns=options.max_turns,
         completion_predicate="task_success", prepare=prepare, invariant_check=invariant,
@@ -490,8 +527,16 @@ def run(robotwin_root, output, options, *, fixture_loader=None):
         provider = PublicRGBDHangingProvider(shared, model=options.model, episode_id=output.name,
                                             store=store, log=log, fixture=fixture_assets)
         planner = build_supervised_planner(options, shared)
-        report["summary"] = run_controller(environment, ModalVLAClient(worker=policy_client), provider,
-            store, planner, options, episode_id=output.name, deadline=deadline, log=log)
+        development_targets = development_predicates = None
+        if options.development_oracle_fallback:
+            from development.simulator.skill_oracle import oracle_hang_targets, oracle_predicates
+            development_targets = lambda arm: oracle_hang_targets(simulator.task, arm)
+            development_predicates = oracle_predicates(simulator.task, log=log)
+        report["summary"] = run_controller(
+            environment, ModalVLAClient(worker=policy_client), provider, store, planner,
+            options, episode_id=output.name, deadline=deadline, log=log,
+            development_oracle_targets=development_targets,
+            development_oracle_predicates=development_predicates)
         report["status"] = report["summary"]["outcome"]
         report["final_observation"] = store.save(environment.observe())
         report["model_requests"] = shared.requests

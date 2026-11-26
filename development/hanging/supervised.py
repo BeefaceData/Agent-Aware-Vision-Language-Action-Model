@@ -545,6 +545,11 @@ def run(robotwin_root, output, options, *, fixture_loader=None):
         report.update(status="run_failed" if report["simulator_started"] else "preflight_failed",
                       failure=sanitized_failure(exc))
     finally:
+        # A Modal/client cancellation derives from BaseException and bypasses
+        # the Exception handler above. Do not mislabel an interrupted physical
+        # episode as a preflight failure merely because its terminal summary
+        # was never returned.
+        mark_interrupted_physical_run(report)
         if environment is not None and store is not None:
             try:
                 report["final_observation"] = store.save(environment.observe())
@@ -568,4 +573,11 @@ def run(robotwin_root, output, options, *, fixture_loader=None):
             report["perception_requests"] = provider.requests
         report["elapsed_seconds"] = time.monotonic()-started
         (output/"report.json").write_text(json.dumps(report, indent=2, allow_nan=False)+"\n")
+    return report
+
+
+def mark_interrupted_physical_run(report):
+    """Correct the untouched default status after a BaseException cancellation."""
+    if report["simulator_started"] and report["status"] == "preflight_failed":
+        report.update(status="interrupted", interrupted=True)
     return report

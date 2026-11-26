@@ -18,7 +18,7 @@ from development.hanging.public_provider import (
 )
 from development.hanging.supervised import (
     SupervisedOptions, HangingRecoveryHook, service_preflight, run_controller, run,
-    build_supervised_planner,
+    build_supervised_planner, mark_interrupted_physical_run,
 )
 from harness.environment.base import Observation
 from harness.environment.layout import CAMERAS
@@ -48,6 +48,18 @@ def visible(**updates):
 
 
 class SupervisedHangingTests(unittest.TestCase):
+    def test_cancelled_physical_run_is_not_labeled_as_preflight_failure(self):
+        report = mark_interrupted_physical_run({
+            "status": "preflight_failed", "simulator_started": True,
+        })
+        self.assertEqual(report["status"], "interrupted")
+        self.assertTrue(report["interrupted"])
+
+        genuine_preflight = mark_interrupted_physical_run({
+            "status": "preflight_failed", "simulator_started": False,
+        })
+        self.assertEqual(genuine_preflight["status"], "preflight_failed")
+
     def test_deferred_takeover_still_requires_current_public_lift(self):
         environment = PublicEnvironment(x=0.)
         environment.sequence = 17

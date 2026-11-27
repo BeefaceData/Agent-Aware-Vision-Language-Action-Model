@@ -104,6 +104,34 @@ class SeedEvaluationTests(unittest.TestCase):
             self.assertIsNone(seed_evaluation._start_fetch(root, 15, "policy_only", {}, popen))
             self.assertEqual(len(commands), 1)
 
+    def test_supervised_observation_completeness_uses_boundary_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)/"supervised"
+            observations = target/"observations"
+            observations.mkdir(parents=True)
+            reset = "observation_00000000.npz"
+            final = "observation_00000900.npz"
+            (target/"report.json").write_text(json.dumps({
+                "summary": {"policy_actions": 900},
+                "final_observation": {
+                    "sequence": 900, "path": f"observations/{final}",
+                },
+            }))
+            (target/"supervisor_events.jsonl").write_text(json.dumps({
+                "event_type": "planner_selection",
+                "observation_before": {
+                    "sequence": 0, "path": f"observations/{reset}",
+                },
+            }) + "\n")
+            (observations/reset).write_bytes(b"")
+            (observations/final).write_bytes(b"")
+
+            self.assertTrue(seed_evaluation._observations_complete(
+                target, "supervised"))
+            (observations/final).unlink()
+            self.assertFalse(seed_evaluation._observations_complete(
+                target, "supervised"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,7 @@ class LocalSimulator:
             raise ValueError("invalid_perception_cameras")
         self.perception_camera_specs = tuple(perception_cameras)
         self.perception_cameras = {}
+        self._perception_payload = {}
         from harness.environment.robotwin import build_task
         self.task, self.setup = build_task(str(Path(robotwin_root).resolve()), "hanging_mug")
         if rgbd_enabled:
@@ -49,6 +50,9 @@ class LocalSimulator:
 
     def __call__(self, host, port, path, payload):
         import torch
+        refresh_perception = path == "/reset" or payload.get("refresh_perception", True)
+        if type(refresh_perception) is not bool:
+            raise ValueError("invalid_perception_refresh_setting")
         start = time.perf_counter()
         step_id = None
         phase = "request"
@@ -69,6 +73,7 @@ class LocalSimulator:
                 from harness.environment.perception_cameras import add_fixed_camera
                 self.perception_cameras = {spec.name: add_fixed_camera(self.task.scene, spec)
                                            for spec in self.perception_camera_specs}
+                self._perception_payload = {}
                 # This flag is scoped to the local agentic runner. The frozen
                 # baseline runner and RoboTwin's ordinary evaluation path keep
                 # their native terminal behavior.
@@ -88,7 +93,7 @@ class LocalSimulator:
         self._diagnostic("simulator_phase_started", phase=phase, step_id=step_id)
         phase_start = time.perf_counter()
         try:
-            observation = self.observation(success)
+            observation = self.observation(success, refresh_perception=refresh_perception)
         except Exception as exc:
             self._diagnostic("simulator_phase_failed", phase=phase, step_id=step_id,
                              error_type=type(exc).__name__)
@@ -134,13 +139,41 @@ class LocalSimulator:
                          elapsed_ms=(time.perf_counter() - phase_start) * 1000)
         return success
 
-    def observation(self, success):
-        """Render the current observation payload, including any perception cameras."""
+    def observation(self, success, *, refresh_perception=True):
+        """Render policy cameras and optionally refresh the fixed RGB-D cameras.
+
+        Fixed-camera snapshots are immutable between supervisor boundaries. A
+        policy action therefore reuses the last snapshot instead of paying for
+        two 1200x900 RGB-D renders that neither the frozen policy nor the video
+        decision logic consumes. Supervisor ``observe()`` calls retain the
+        default and always return a fresh calibrated snapshot.
+        """
+        if type(refresh_perception) is not bool:
+            raise ValueError("invalid_perception_refresh_setting")
         from harness.environment.robotwin import observation_of
-        return observation_of(self.task, self.blank, success, self.perception_cameras)
+        payload = observation_of(self.task, self.blank, success)
+        cached = getattr(self, "_perception_payload", {})
+        if self.perception_cameras and (refresh_perception or not cached):
+            from harness.environment.perception_cameras import fixed_camera_payload
+            snapshot = {}
+            for name, camera in self.perception_cameras.items():
+                snapshot.update(fixed_camera_payload(name, camera))
+            self._perception_payload = snapshot
+        snapshot = getattr(self, "_perception_payload", {})
+        if refresh_perception:
+            payload.update(snapshot)
+        else:
+            # The video uses only the primary supervisor view. Excluding the
+            # reverse 1200x900 RGB-D arrays also avoids copying a boundary-only
+            # geometry view through every policy action.
+            payload.update({key: value for key, value in snapshot.items()
+                            if key == "perception_camera"
+                            or key.startswith("perception_camera__")})
+        return payload
 
     def close(self):
         if self.initialized:
             self.task.close_env()
             self.perception_cameras = {}
+            self._perception_payload = {}
             self.initialized = False

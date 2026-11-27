@@ -1034,6 +1034,26 @@ class PredicateTests(unittest.TestCase):
         self.assertTrue(result.value)
         self.assertEqual(result.reason, "closed_gripper_lost_mug_contact")
 
+    def test_open_gripper_approach_contact_does_not_arm_grasp_loss(self):
+        def approach_brush(obs):
+            touching = 1 <= obs.sequence < 4
+            closing = obs.sequence >= 4
+            return evidence(obs.sequence, left_contact=touching,
+                            left_bilateral=False,
+                            left_gripper=0.0 if closing else 1.0)
+
+        gate = HangingMugPredicates(approach_brush, source="development_oracle")
+        observation = lambda n: Observation(n, images(0), (0.,) * 14)
+        gate.evaluate("mug_lifted", observation(0))
+        self.assertTrue(gate.begin_attempt(
+            "grasp_attempt_failed", observation(0), arm="left"))
+
+        for n in range(1, 12):
+            gate.evaluate("mug_lifted", observation(n))
+            result = gate.evaluate("grasp_attempt_failed", observation(n))
+            self.assertFalse(result.value)
+        self.assertNotEqual(result.reason, "closed_gripper_lost_mug_contact")
+
     def test_grasp_failure_monitor_ignores_loss_of_inherited_analytic_contact(self):
         def inherited_contact(obs):
             touching = obs.sequence < 3

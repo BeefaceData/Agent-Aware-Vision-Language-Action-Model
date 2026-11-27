@@ -20,12 +20,15 @@ class EpisodeVideo:
     """Explicit ``cameras`` record a fixed grid; without them the set is chosen
     from the first observation (head + supervisor camera when present)."""
 
-    def __init__(self, output, *, cameras=None):
+    def __init__(self, output, *, cameras=None, perception_boundary_sampled=False):
         import imageio.v2 as imageio
         if cameras is not None and (not 1 <= len(cameras) <= 5 or len(set(cameras)) != len(cameras)):
             raise ValueError("invalid_video_cameras")
+        if type(perception_boundary_sampled) is not bool:
+            raise ValueError("invalid_perception_sampling_setting")
         self.grid = cameras is not None
         self.cameras = tuple(cameras) if cameras is not None else None
+        self.perception_boundary_sampled = perception_boundary_sampled
         self.output = Path(output)
         self.frames = 0
         self.closed = False
@@ -61,7 +64,9 @@ class EpisodeVideo:
         draw = ImageDraw.Draw(picture)
         panel_width = 960 // len(cameras)
         for i, camera in enumerate(cameras):
-            label = "Supervisor camera" if camera == "perception_camera" else camera
+            label = (("Supervisor camera (boundary snapshot)"
+                      if self.perception_boundary_sampled else "Supervisor camera")
+                     if camera == "perception_camera" else camera)
             picture.paste(Image.fromarray(observation.images[camera]).resize((panel_width, 240)),
                           (i*panel_width, 0))
             draw.text((i*panel_width+4, 242), label, fill="white")
@@ -88,17 +93,23 @@ class EpisodeVideo:
                     fps=VIDEO_FPS,
                     timing=(f"sampled: one frame/policy target; one/{ANALYTIC_FRAME_INTERVAL_TICKS} "
                             "analytic ticks; boundary frames"),
+                    perception_sampling=("boundary snapshots reused between feedback points"
+                                         if self.perception_boundary_sampled else "current observation"),
                     real_time=False, closed=self.closed,
                     cameras=list(self.cameras or CAMERAS))
 
 
 class RecordingEnvironment(LocalEnvironmentClient):
-    def __init__(self, simulator, video, **options):
+    def __init__(self, simulator, video, *, record_refreshed_boundaries=False, **options):
+        if type(record_refreshed_boundaries) is not bool:
+            raise ValueError("invalid_boundary_recording_setting")
         super().__init__(simulator, **options)
         self.video = video
+        self.record_refreshed_boundaries = record_refreshed_boundaries
         self.policy_actions = self.analytic_ticks = 0
         self.policy_kind = "vla_act"
         self._recorded_sequence = None
+        self._recorded_boundary_sequence = None
 
     def _record(self, observation, kind):
         self.video.append(observation, kind, self.policy_actions, self.analytic_ticks)
@@ -108,6 +119,7 @@ class RecordingEnvironment(LocalEnvironmentClient):
         observation = super().reset(seed)
         self.policy_actions = self.analytic_ticks = 0
         self._record(observation, "reset")
+        self._recorded_boundary_sequence = observation.sequence
         return observation
 
     def step(self, action):
@@ -131,6 +143,11 @@ class RecordingEnvironment(LocalEnvironmentClient):
 
     def observe(self):
         observation = super().observe()
+        if (self.record_refreshed_boundaries
+                and observation.sequence != self._recorded_boundary_sequence):
+            self._record(observation, "perception_boundary")
+            self._recorded_boundary_sequence = observation.sequence
+            return observation
         # Preserve the endpoint of a short analytic skill without duplicating
         # frames during repeated predicate/planner observation reads.
         if observation.sequence != self._recorded_sequence:

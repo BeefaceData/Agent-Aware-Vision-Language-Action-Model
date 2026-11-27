@@ -45,7 +45,7 @@ EPISODE_INPUTS = "/tmp/episode-inputs"
 SHUTDOWN_GRACE_SECONDS = 5 * 60
 # Covers episode_request.MAX_TIME_LIMIT_MINUTES (210) plus shutdown and Volume commit.
 EPISODE_FUNCTION_TIMEOUT_SECONDS = 4 * 60 * 60
-# One 900-action labelled capture takes roughly 10 minutes on an L4.
+# T4 is the default because it has been more consistently schedulable for this project.
 CAPTURE_FUNCTION_TIMEOUT_SECONDS = 60 * 60
 # Files committed inside a container can take seconds to appear in this
 # machine's listing of the Volume; downloads wait up to a minute for them.
@@ -56,7 +56,8 @@ VOLUME_SETTLE_SECONDS = 5
 CUDA_ARCHES = "7.5;8.0;8.6;8.9"
 # SIM_GPU may list fallbacks, e.g. "L4,A10G,T4": Modal uses the first type with free
 # capacity instead of queueing for one. GPU is the label used in names and messages.
-GPU_CHOICES = tuple(name.strip() for name in os.environ.get("SIM_GPU", "T4").split(",") if name.strip())
+DEFAULT_GPU = "T4"
+GPU_CHOICES = tuple(name.strip() for name in os.environ.get("SIM_GPU", DEFAULT_GPU).split(",") if name.strip())
 GPU = "-".join(GPU_CHOICES)
 GPU_REQUEST = list(GPU_CHOICES) if len(GPU_CHOICES) > 1 else GPU_CHOICES[0]
 
@@ -492,9 +493,10 @@ def supervised_hanging(model: str, seed: int = 4, max_actions: int = 900,
                        chunk_size: int = 16, time_limit_minutes: int = 30,
                        max_turns: int = 80, output: str = "", complementary_view: bool = False,
                        perception_view: str = "default", hand_back_to_policy: bool = True,
-                       policy_grace_actions: int = 160, skip_observations: bool = False,
+                       policy_grace_actions: int = 0, skip_observations: bool = False,
                        grasp_recovery: bool = True, grasp_retries: int = 2,
-                       empty_hand_opening: float = .19):
+                       empty_hand_opening: float = .19,
+                       development_oracle_fallback: bool = False):
     """One serial full-task supervisor run; no recorded entry or demo override.
 
     ``--skip-observations`` leaves per-step RGB-D on the runs Volume; fetch it later
@@ -506,7 +508,8 @@ def supervised_hanging(model: str, seed: int = 4, max_actions: int = 900,
                                 hand_back_to_policy=hand_back_to_policy,
                                 policy_grace_actions=policy_grace_actions,
                                 grasp_recovery=grasp_recovery, grasp_retries=grasp_retries,
-                                empty_hand_opening=empty_hand_opening)
+                                empty_hand_opening=empty_hand_opening,
+                                development_oracle_fallback=development_oracle_fallback)
     options.validate()
     run_id = f"supervised_hanging_seed{seed}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{time.time_ns()}"
     target = Path(output).resolve() if output else REPO/"data/runs"/run_id
@@ -657,7 +660,7 @@ def frames(seeds: str = "0,1,2,3,4", every: int = 16, max_actions: int = 900, ch
 
 @app.local_entrypoint()
 def reset_observation(seed: int = 3, perception_camera: str = "default"):
-    """Capture one reset-only RGB-D frame and download it from the Modal T4 worker."""
+    """Capture one reset-only RGB-D frame and download it from the Modal GPU worker."""
     sys.path.insert(0, str(REPO))
     from harness.environment.perception_cameras import parse_camera_spec
 

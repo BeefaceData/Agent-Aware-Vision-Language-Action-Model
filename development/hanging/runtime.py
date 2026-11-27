@@ -184,13 +184,22 @@ def validate_current_geometry(observation, measured_tcp, result, *, episode_id):
         return GroundingResult("rejected", str(exc))
 
 
-def recover_current(environment, store, *, episode_id, deadline, provider=None, log=lambda event: None):
-    """Run only after current public evidence confirms entry; no fixed-step trigger."""
+def recover_current(environment, store, *, episode_id, deadline, provider=None,
+                    initial_proposal=None, development_oracle_targets=None,
+                    log=lambda event: None):
+    """Run the hanging sequence from public geometry or an explicit dev fallback."""
     provider = provider if provider is not None else UnavailableHangingProvider()
+    if development_oracle_targets is not None and not callable(development_oracle_targets):
+        raise ValueError("invalid_development_oracle_target_provider")
     anchors = AnchorRegistry()
+    allowed_sources = (("perception", "development_oracle")
+                       if development_oracle_targets is not None else ("perception",))
     gate = RackSeatReleaseGate(environment, position_tolerance_m=.005,
-                              orientation_tolerance_rad=.05, unavailable_is_false=True)
+                              orientation_tolerance_rad=.05, unavailable_is_false=True,
+                              allowed_anchor_sources=allowed_sources)
     initial_material = initial_tcp = initial_targets = initial_camera = None
+    initial_source = None
+    pending_proposal = initial_proposal
     assessment = dict(status="unknown", reason="entry_not_assessed")
 
     def confirm_tracking(observation, measured_tcp):
@@ -210,7 +219,8 @@ def recover_current(environment, store, *, episode_id, deadline, provider=None, 
             raise ValueError(confirmation["reason"])
 
     def prepare(command, observation):
-        nonlocal initial_material, initial_tcp, initial_targets, initial_camera, assessment
+        nonlocal initial_material, initial_tcp, initial_targets, initial_camera
+        nonlocal initial_source, pending_proposal, assessment
         if command.action.value != "move_to":
             return None
         if time.monotonic() >= deadline:
@@ -221,23 +231,55 @@ def recover_current(environment, store, *, episode_id, deadline, provider=None, 
             # grasp its TCP targets stay valid as the hand moves, so the seat
             # never depends on refitting a handle that is partly hidden near the
             # rack; the fresh image only confirms the handle moved with the hand.
-            confirm_tracking(observation, measured_tcp)
+            if initial_source == "perception":
+                confirm_tracking(observation, measured_tcp)
             for name, pose in initial_targets.items():
-                anchors.bind(name, "right", Anchor(tuple(pose), observation.sequence, source="perception"))
+                anchors.bind(name, "right", Anchor(
+                    tuple(pose), observation.sequence, source=initial_source))
             log(dict(event_type="aperture_target_reuse", observation_sequence=observation.sequence,
-                     basis="first validated fit; rigid grasp confirmed in current image"))
-            return anchors.resolve(command.parameters.target, "right", observation)
-        try:
-            proposed = provider.propose(observation, np.asarray(measured_tcp).copy(), episode_id=episode_id)
-        except Exception as exc:
-            raise ValueError("hanging_evidence_provider_error") from exc
+                     basis=("first validated fit; rigid grasp confirmed in current image"
+                            if initial_source == "perception"
+                            else "frozen development-oracle target pair"),
+                     information_source=initial_source))
+            return anchors.resolve(
+                command.parameters.target, "right", observation,
+                allow_oracle=initial_source == "development_oracle")
+        if pending_proposal is not None:
+            proposed, pending_proposal = pending_proposal, None
+        else:
+            try:
+                proposed = provider.propose(
+                    observation, np.asarray(measured_tcp).copy(), episode_id=episode_id)
+            except Exception as exc:
+                raise ValueError("hanging_evidence_provider_error") from exc
         grounded = validate_current_geometry(observation, measured_tcp, proposed, episode_id=episode_id)
         assessment = dict(status=grounded.status, reason=grounded.reason,
                           observation_sequence=observation.sequence)
         log(dict(event_type="hanging_entry_assessment", observation_sequence=observation.sequence,
                  status=grounded.status, reason=grounded.reason))
         if grounded.status != "confirmed":
-            raise ValueError(grounded.reason)
+            if development_oracle_targets is None:
+                raise ValueError(grounded.reason)
+            raw_targets = development_oracle_targets("right")
+            if not isinstance(raw_targets, dict) or set(raw_targets) != {
+                    "rack_approach", "rack_seat"}:
+                raise ValueError("invalid_development_oracle_hang_targets")
+            initial_targets = {
+                name: tuple(map(float, pose7(pose)))
+                for name, pose in raw_targets.items()
+            }
+            initial_source = "development_oracle"
+            assessment["fallback_source"] = initial_source
+            for name, pose in initial_targets.items():
+                anchors.bind(name, "right", Anchor(
+                    pose, observation.sequence, source=initial_source))
+            log(dict(event_type="development_oracle_hang_target_fallback",
+                     observation_sequence=observation.sequence,
+                     public_status=grounded.status, public_reason=grounded.reason,
+                     information_source=initial_source,
+                     target_pair_basis="single simulator geometry snapshot"))
+            return anchors.resolve(command.parameters.target, "right", observation,
+                                   allow_oracle=True)
         geometry = grounded.geometry
         targets, evidence = aperture_targets(observation, geometry.aperture, geometry.rack_pose,
                                              measured_tcp, geometry.proposal.mating_prior,
@@ -246,13 +288,17 @@ def recover_current(environment, store, *, episode_id, deadline, provider=None, 
         initial_tcp = _pose_matrix(measured_tcp)
         initial_camera = geometry.proposal.camera
         initial_targets = dict(targets)
+        initial_source = "perception"
         for name, pose in targets.items():
             anchors.bind(name, "right", Anchor(tuple(pose), observation.sequence, source="perception"))
         log(dict(event_type="aperture_target_preparation", observation_sequence=observation.sequence,
                  evidence=evidence))
         return anchors.resolve(command.parameters.target, "right", observation)
 
-    report = execute_stages(environment, prepare, anchors, gate, store, deadline=deadline, log=log)
+    report = execute_stages(
+        environment, prepare, anchors, gate, store, deadline=deadline, log=log,
+        allow_development_oracle=development_oracle_targets is not None)
     return {**report, "entry_assessment": assessment,
+            "information_source": initial_source or "unavailable",
             "retention": dict(status="unknown", reason="public_support_evaluator_unavailable",
                               observed_ticks=report.get("post_retreat_observation_only_ticks", 0))}

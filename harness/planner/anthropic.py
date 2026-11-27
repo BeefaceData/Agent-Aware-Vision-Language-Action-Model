@@ -49,7 +49,8 @@ class AnthropicSettings(Model):
 
 class AnthropicPlanner:
     def __init__(self, settings, *, client=None, require_pixel_grounding=False,
-                 preserve_policy_actions=False, runtime_grasp_monitor=True):
+                 preserve_policy_actions=False, runtime_grasp_monitor=True,
+                 include_observation_images=True, development_oracle_fallback=False):
         self.settings = AnthropicSettings.model_validate(settings.model_dump())
         if type(require_pixel_grounding) is not bool:
             raise ValueError("pixel_grounding_mode_must_be_boolean")
@@ -59,14 +60,25 @@ class AnthropicPlanner:
         self.preserve_policy_actions = preserve_policy_actions
         if type(runtime_grasp_monitor) is not bool:
             raise ValueError("grasp_monitor_mode_must_be_boolean")
+        if type(include_observation_images) is not bool:
+            raise ValueError("planner_image_setting_must_be_boolean")
+        if type(development_oracle_fallback) is not bool:
+            raise ValueError("development_oracle_fallback_must_be_boolean")
         # False when the runner has no local per-action grasp monitor; VLA calls
         # then keep the normal feedback-boundary behavior instead of stopping
         # as failure_monitor_unavailable.
         self.runtime_grasp_monitor = runtime_grasp_monitor
+        self.include_observation_images = include_observation_images
+        self.development_oracle_fallback = development_oracle_fallback
         self.prompt, self.prompt_hash = prompt_bundle(self.settings.task_scope)
         self.calls = self.attempts = 0
         self._feedback_phase = None
         self._feedback_phase_start_action = 0
+        # A development-only runtime gate may confirm a lift before public
+        # perception can. Remember that the owning grasp monitor has finished
+        # so the next VLA call cannot immediately stop on the same latched
+        # predicate. This state is never included in the model request.
+        self._completed_private_grasp_phases = set()
         self._last_vla_phase = None
         self.active_phase = "grasp"
         self.unknown_vla_feedback = 0
@@ -86,9 +98,31 @@ class AnthropicPlanner:
         self.client = client
 
     def select(self, context):
+        phase_at_turn_start = self.active_phase
+        private_phase_gate = (self._remember_private_grasp_milestone(context.previous)
+                              if self.development_oracle_fallback else None)
+        boundary_phase_gate = self._development_phase_floor(context, self.settings.task_scope)
+        if boundary_phase_gate == "handoff":
+            self._completed_private_grasp_phases.add("grasp")
+        elif boundary_phase_gate == "hang":
+            self._completed_private_grasp_phases.update(("grasp", "handoff"))
+        development_phase_gate = private_phase_gate
+        if boundary_phase_gate is not None:
+            development_phase_gate = (boundary_phase_gate if development_phase_gate is None
+                                      else self._later_phase(development_phase_gate,
+                                                            boundary_phase_gate))
+        if (development_phase_gate is not None
+                and self._later_phase(self.active_phase, development_phase_gate) != self.active_phase):
+            self.active_phase = self._later_phase(self.active_phase, development_phase_gate)
+        else:
+            development_phase_gate = None
         metadata = {"provider": "anthropic", "model": self.settings.model,
                     "prompt_sha256": self.prompt_hash,
                     "memory_snapshot_sha256": context.memory.snapshot_sha256 if context.memory else None}
+        if development_phase_gate is not None:
+            # This development-only control signal is logged for auditability
+            # and consumed by the local hanging hook. It is never sent to Opus.
+            metadata["development_oracle_phase_gate"] = development_phase_gate
         if self.failed or self.calls >= self.settings.max_calls:
             return self._abort("planner_call_budget_or_terminal", metadata)
         if context.previous and (context.previous.episode_terminal or context.previous.execution_uncertain
@@ -100,7 +134,6 @@ class AnthropicPlanner:
         vla_limits = self.settings.vla.model_copy(update={
             "max_chunks": min(self.settings.vla.max_chunks,
                                self.settings.planner_feedback_chunks)})
-        phase_at_turn_start = self.active_phase
         public_phase = self._public_phase_floor(context, self.settings.task_scope)
         self.active_phase = self._later_phase(self.active_phase, public_phase)
         vla_phase = self.active_phase
@@ -185,7 +218,8 @@ class AnthropicPlanner:
                     # A pixel rejected by trusted depth validation is neither a
                     # useful precedent nor a coordinate to repeat on reselection.
                     history=(self.history[:-1] if context.grounding_feedback else self.history[-8:]),
-                    pixel_grounding=self.require_pixel_grounding)}])
+                    pixel_grounding=self.require_pixel_grounding,
+                    include_observation_images=self.include_observation_images)}])
             # Retain bounded diagnostics even when parsing rejects this response.
             # No raw content, thinking, error body or tool arguments are logged.
             stop_reason = response.get("stop_reason") if isinstance(response, dict) else response.stop_reason
@@ -237,7 +271,10 @@ class AnthropicPlanner:
             claimed_phase = parsed.task_phase
             if self.settings.task_scope == "acquisition" and claimed_phase != "grasp":
                 raise InvalidPlannerResponse("phase_outside_task_scope")
-            phase_before = phase_at_turn_start
+            # The development gate has already advanced the runtime phase, but
+            # remains absent from the model payload. Resolve Opus's claim from
+            # that internal floor so it cannot move the controller backward.
+            phase_before = self.active_phase
             public_phase = self._public_phase_floor(context, self.settings.task_scope)
             # No action has run before the first planner turn, so the task
             # cannot already be in handoff/hang absent a public milestone.
@@ -248,6 +285,7 @@ class AnthropicPlanner:
                               self._resolve_phase(phase_before, public_phase, claimed_phase))
             if (self.settings.task_scope == "full_task" and selected_phase == "hang"
                     and phase_before != "hang"
+                    and development_phase_gate != "hang"
                     and not self._handoff_complete_confirmed(context)):
                 # Require public transfer evidence for the first transition,
                 # then retain the monotonic phase through later occlusion.
@@ -303,7 +341,9 @@ class AnthropicPlanner:
             return self._abort("planner_request_or_validation_failed", metadata)
         metadata.update(provider_call=self.calls, elapsed_seconds=time.perf_counter()-tick)
         metadata.update(task_phase=vla_phase,
-            phase_basis=("public_milestone" if public_phase != phase_before else "planner_assessment"),
+            phase_basis=("development_oracle_milestone" if development_phase_gate is not None
+                         else "public_milestone" if public_phase != phase_at_turn_start
+                         else "planner_assessment"),
             phase_claim_corrected=phase_correction,
             phase_evidence=parsed.phase_evidence,
             phase_evidence_chars=len(parsed.phase_evidence))
@@ -323,6 +363,10 @@ class AnthropicPlanner:
 
     def _abort(self, reason, metadata):
         self.failed = True
+        # Preserve the controller phase even though the selection itself is
+        # terminal. Recovery hooks need to distinguish a transient planner
+        # failure during HANG from an abort that is outside their scope.
+        metadata.setdefault("task_phase", self.active_phase)
         return PlannerSelection(SkillCommand(action="abort", reason=reason),
                                 "FAILED", max(0, self.attempts-1), metadata)
 
@@ -359,6 +403,18 @@ class AnthropicPlanner:
                 or public.get("left_transfer_complete")):
             return "handoff"
         return "grasp"
+
+    def _development_phase_floor(self, context, task_scope="acquisition"):
+        """Resolve private positive milestones only in explicit hybrid mode."""
+        if not self.development_oracle_fallback or task_scope == "acquisition":
+            return None
+        confirmed = {item.name for item in context.predicates
+                     if item.source == "development_oracle" and item.value is True}
+        if {"handoff_confirmed", "right_mug_lifted", "task_success"} & confirmed:
+            return "hang"
+        if {"mug_lifted", "mug_staged_on_table", "left_transfer_complete"} & confirmed:
+            return "handoff"
+        return None
 
     @staticmethod
     def _later_phase(left, right):
@@ -432,13 +488,52 @@ class AnthropicPlanner:
         """Choose a local grasp monitor from public phase evidence, not model output."""
         if not self.runtime_grasp_monitor:
             return None
+        if phase in self._completed_private_grasp_phases:
+            return None
         if phase == "grasp":
             return "left"
         if (phase == "handoff"
-                and self._right_transfer_stage_confirmed(context)
+                and (self._right_transfer_stage_confirmed(context)
+                     or self._private_right_grasp_is_plausible(context))
                 and not self._public_predicate_true(context, "right_mug_lifted")):
             return "right"
         return None
+
+    def _private_right_grasp_is_plausible(self, context):
+        """Use public semantics only to arm the development oracle monitor.
+
+        The image proposal is not accepted as a lift predicate. It only says
+        the episode has reached a plausible right-arm pickup state, after the
+        oracle already confirmed the left-arm acquisition milestone.
+        """
+        visual = context.visual_context or {}
+        return ("grasp" in self._completed_private_grasp_phases
+                and visual.get("stage") == "hanging"
+                and visual.get("right_held") is True
+                and visual.get("mug_off_table") is True)
+
+    def _remember_private_grasp_milestone(self, previous):
+        """Return the internal next phase after a private lift gate fires once.
+
+        The oracle value remains excluded from Opus input and from the public
+        phase floor. The completed per-action monitor is retired and the local
+        runtime advances so the next phase's monitor can be armed.
+        """
+        if (previous is None
+                or previous.information_source != "development_oracle"
+                or previous.stop_reason != "predicate_satisfied"
+                or previous.predicate is None
+                or previous.predicate.value is not True):
+            return
+        phases = {
+            "mug_lifted": ("grasp", "handoff"),
+            "right_mug_lifted": ("handoff", "hang"),
+        }.get(previous.predicate.name)
+        if phases is None:
+            return None
+        completed_phase, next_phase = phases
+        self._completed_private_grasp_phases.add(completed_phase)
+        return next_phase
 
     def _recovery_basis(self, context, phase):
         """Offer recovery tools after public failure or a grasp feedback boundary."""

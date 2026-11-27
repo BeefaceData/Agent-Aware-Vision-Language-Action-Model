@@ -17,7 +17,8 @@ class RackSeatReleaseGate:
     name = "rack_seat_aligned"
 
     def __init__(self, environment, *, position_tolerance_m=0.015,
-                 orientation_tolerance_rad=0.10, unavailable_is_false=False):
+                 orientation_tolerance_rad=0.10, unavailable_is_false=False,
+                 allowed_anchor_sources=("perception",)):
         self.environment = environment
         self.position_tolerance_m = float(position_tolerance_m)
         self.orientation_tolerance_rad = float(orientation_tolerance_rad)
@@ -30,6 +31,12 @@ class RackSeatReleaseGate:
         self._target = None
         self._after_sequence = None
         self.unavailable_is_false = unavailable_is_false
+        sources = tuple(allowed_anchor_sources)
+        if (not sources or len(set(sources)) != len(sources)
+                or any(source not in {"perception", "development_oracle"}
+                       for source in sources)):
+            raise ValueError("invalid_rack_seat_anchor_sources")
+        self.allowed_anchor_sources = frozenset(sources)
 
     @property
     def available(self):
@@ -44,7 +51,7 @@ class RackSeatReleaseGate:
                  and not result.execution_uncertain and not result.episode_terminal
                  and result.stop_reason == "completed"
                  and target_anchor is not None and result.observation_after is not None
-                 and target_anchor.source == "perception"
+                 and target_anchor.source in self.allowed_anchor_sources
                  and target_anchor.observation_sequence == result.observation_before
                  and result.position_error_m is not None
                  and result.orientation_error_rad is not None

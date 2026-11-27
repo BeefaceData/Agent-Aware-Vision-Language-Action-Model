@@ -13,6 +13,9 @@ of individual phases is not evidence of reliable full-task hanging.
 For the component map, data flow, perception boundary, and contributor
 workflow, see [CONTRIBUTE_README.md](CONTRIBUTE_README.md). For a beginner-level
 walkthrough with diagrams, see `docs/v1/robot_mug_guide.pdf`.
+For the current deployed full-episode command, Opus feedback cadence, detached
+run recovery, and hybrid evidence semantics, see
+[`docs/Collaboration/Supervised_Hanging_Runbook.md`](docs/Collaboration/Supervised_Hanging_Runbook.md).
 
 ## Contents
 
@@ -204,15 +207,15 @@ Measured with the spike (seed 3; three RGB-D cameras):
 
 | GPU | Render 3 RGB-D cameras | CuRobo plan | Approx. $/h* | Notes |
 |---|---|---|---|---|
-| T4 | 344 ms | 88 ms | ~0.59 | default and selected for recovery experiments |
+| T4 | 344 ms | 88 ms | ~0.59 | default; selected for reliable scheduling |
 | A10G | 153 ms | 73 ms | ~1.10 | historical comparison |
-| L4 | 110 ms | 86 ms | ~0.80 | historical comparison |
+| L4 | 110 ms | 86 ms | ~0.80 | faster historical comparison; frequently capacity-queued |
 | Laptop RTX 2050 (route 2) | 800 ms | 322 ms | — | for comparison |
 
 \*Approximate; check Modal's pricing page.
 
-The T4 is selected for the current recovery experiments to keep GPU usage
-consistent and credit-efficient. The L4 and A10G measurements are historical comparisons.
+The T4 is selected for current recovery experiments because it has been more
+consistently schedulable. L4 and A10G remain historical performance comparisons.
 
 **Do the images match?** All three tested GPUs render the same images as the local
 GPU (mean difference 0.03/255). Still record which GPU produced a result.
@@ -230,8 +233,8 @@ GPU (mean difference 0.03/255). Still record which GPU produced a result.
 
 For offline perception evaluation (see `CONTRIBUTE_README.md`), roll out the frozen
 policy and save public frames plus simulator labels, one seed after another.
-L4 took about 7 minutes per 900-action seed in the earlier comparison; current
-captures use T4 to conserve credits and may take longer:
+L4 took about 7 minutes per 900-action seed in the earlier comparison. T4 is
+the current capture default for scheduling reliability:
 
 ```bash
 SIM_GPU=T4 modal run modal_apps/simulator.py::frames --seeds 0,1,2,3,4
@@ -435,7 +438,8 @@ Exit code 0 means a success outcome such as `acquisition_confirmed` or
 ### Policy and SAM 3 GPUs
 
 Both routes use the same deployed workers. Their GPU is fixed in the app
-definition: `gpu="T4"` in `modal_apps/policy.py` and `modal_apps/sam3.py`. To
+definition: `gpu=DEFAULT_GPU` (currently `T4`) in `modal_apps/policy.py` and
+`modal_apps/sam3.py`. To
 change it, edit that value and redeploy:
 
 ```bash

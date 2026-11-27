@@ -14,6 +14,7 @@ import modal
 
 
 APP_NAME = "robotwin-perception-sam3"
+DEFAULT_GPU = "T4"
 MODEL_REPO = "facebook/sam3"
 MOUNT = "/perception-data"
 WEIGHTS = f"{MOUNT}/sam3"
@@ -74,7 +75,7 @@ image = (
 
 @app.cls(
     image=image,
-    gpu="T4",
+    gpu=DEFAULT_GPU,
     timeout=10 * 60,
     scaledown_window=2 * 60,
     max_containers=1,

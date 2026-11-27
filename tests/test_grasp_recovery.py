@@ -255,6 +255,48 @@ class HookTests(unittest.TestCase):
         self.assertEqual(result["reason"], "handed_back_to_policy")
         grasp.recover.assert_not_called()
 
+    def test_left_loss_uses_left_recovery_before_right_monitor(self):
+        left, right = Mock(arm="left"), Mock(arm="right")
+        left.check.return_value = "camera_mug_on_table_hand_empty"
+        left.recover.return_value = dict(status="grasp_recovery_completed", attempt=1)
+        right.check.return_value = None
+        hook = HangingRecoveryHook(Mock(), Mock(), Mock(), episode_id="e",
+            deadline=time.monotonic()+60, log=lambda event: None,
+            policy_chunk_size=16, pause_policy_on_entry=False,
+            hand_back_to_policy=True, policy_grace_actions=0,
+            grasp_recoveries=(left, right))
+
+        result = hook.consider(
+            PlannerSelection(SkillCommand(action="vla_act"), "GRASP"),
+            observation(400, 0.), remaining=BUDGET)
+
+        self.assertEqual(result["reason"], "grasp_recovery_completed")
+        left.recover.assert_called_once()
+        right.check.assert_not_called()
+
+    def test_handoff_monitors_right_arm_without_left_arm_starvation(self):
+        left, right = Mock(arm="left"), Mock(arm="right")
+        left.check.return_value = "measured_fingers_closed_on_nothing"
+        left.recover.return_value = None
+        right.check.return_value = "measured_fingers_closed_on_nothing"
+        right.recover.return_value = dict(
+            status="grasp_recovery_completed", attempt=1)
+        hook = HangingRecoveryHook(
+            Mock(), Mock(), Mock(), episode_id="e",
+            deadline=time.monotonic()+60, log=lambda event: None,
+            policy_chunk_size=16, pause_policy_on_entry=False,
+            hand_back_to_policy=True, policy_grace_actions=0,
+            grasp_recoveries=(left, right))
+
+        result = hook.consider(
+            PlannerSelection(SkillCommand(action="vla_act"), "HANDOFF"),
+            observation(400, 0.), remaining=BUDGET)
+
+        self.assertEqual(result["reason"], "grasp_recovery_completed")
+        left.check.assert_not_called()
+        right.check.assert_called_once()
+        right.recover.assert_called_once()
+
 
 class ProviderReleaseTests(unittest.TestCase):
     def test_empty_hand_release_answers_without_a_vision_request(self):

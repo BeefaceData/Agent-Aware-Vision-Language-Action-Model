@@ -55,7 +55,7 @@ def _command(kind, seed, target, model):
                 "--time-limit-minutes", "70", "--perception-camera", "close"]
     return [sys.executable, "-m", "modal", "run", "modal_apps/simulator.py::supervised_hanging",
             "--model", model, *common, "--time-limit-minutes", "75", "--max-turns", "80",
-            "--perception-view", "close", "--complementary-view"]
+            "--perception-view", "close", "--complementary-view", "--policy-grace-actions", "0"]
 
 
 def _run_id(root, seed, kind):
@@ -84,16 +84,47 @@ def _run_id(root, seed, kind):
     return None
 
 
+def _observation_references(value):
+    """Return the basenames of serialized observation references in an artifact."""
+    if isinstance(value, dict):
+        result = set()
+        for nested in value.values():
+            result.update(_observation_references(nested))
+        return result
+    if isinstance(value, (list, tuple)):
+        result = set()
+        for nested in value:
+            result.update(_observation_references(nested))
+        return result
+    if isinstance(value, str) and value.endswith(".npz"):
+        return {Path(value).name}
+    return set()
+
+
 def _observations_complete(target, kind):
-    """True when every saved step's RGB-D archive is present locally."""
+    """True when every observation promised by this run kind is local."""
     summary = target/("summary.json" if kind == "policy_only" else "report.json")
     try:
         document = json.loads(summary.read_text())
     except (OSError, ValueError):
         return False
-    actions = (document if kind == "policy_only" else document.get("summary") or {}).get("policy_actions")
     present = len(list((target/"observations").glob("observation_*.npz")))
-    return actions is not None and present >= actions
+    if kind == "policy_only":
+        actions = document.get("policy_actions")
+        return actions is not None and present >= actions
+
+    # Supervised runs intentionally persist reset, planner-boundary, recovery
+    # and final frames instead of one archive per policy action. Verify the
+    # references in the report/events rather than comparing with action count.
+    references = _observation_references(document)
+    events = target/"supervisor_events.jsonl"
+    try:
+        for line in events.read_text().splitlines():
+            references.update(_observation_references(json.loads(line)))
+    except (OSError, ValueError):
+        return False
+    return bool(references) and all(
+        (target/"observations"/name).is_file() for name in references)
 
 
 def _start_fetch(root, seed, kind, env, popen=subprocess.Popen):
@@ -118,7 +149,7 @@ def _finish_fetches(root, fetches):
                 observations_complete=_observations_complete(root/f"seed{seed}"/kind, kind)))+"\n")
 
 
-def fetch_all(root, *, gpu="L4,A10G,T4", popen=subprocess.Popen):
+def fetch_all(root, *, gpu="T4", popen=subprocess.Popen):
     """Fetch any run's missing RGB-D from the runs Volume (resumable), then rebuild the report."""
     root = Path(root)
     plan = json.loads((root/"plan.json").read_text())
@@ -541,7 +572,7 @@ def main(argv=None):
     run_parser.add_argument("--root", type=Path, required=True)
     run_parser.add_argument("--seeds", required=True)
     run_parser.add_argument("--model", default="claude-opus-5-5")
-    run_parser.add_argument("--gpu", default="L4,A10G,T4")
+    run_parser.add_argument("--gpu", default="T4")
     report_parser = sub.add_parser("report")
     report_parser.add_argument("--root", type=Path, required=True)
     fetch_parser = sub.add_parser("fetch", help="download any missing per-step RGB-D, then rebuild the report")

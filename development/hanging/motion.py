@@ -14,6 +14,10 @@ from harness.skills.executor import SkillExecutor
 from harness.skills.schemas import EpisodeBudget, SkillCommand
 
 
+HANG_RECOVERY_MAX_SKILL_CALLS = 6
+HANG_RECOVERY_MAX_ANALYTIC_TICKS = 12000
+
+
 class NoPolicy:
     def infer(self, *args, **kwargs):
         raise RuntimeError("hanging_recovery_does_not_infer_policy_actions")
@@ -282,6 +286,24 @@ def settle_seat(environment, target_pose, commanded_joints, *, deadline, max_tic
     return result
 
 
+def rack_seat_alignment_diagnostic(environment, target_pose, gate):
+    """Measure a release-gate miss without changing robot or gate state."""
+    try:
+        actual = np.asarray(environment.arm_state("right")["pose"], dtype=float)
+        position_error, orientation_error = pose_error(actual, target_pose)
+        return dict(
+            available=True,
+            measured_tcp_pose=actual.tolist(),
+            target_tcp_pose=np.asarray(target_pose, dtype=float).tolist(),
+            position_error_m=float(position_error),
+            orientation_error_rad=float(orientation_error),
+            position_tolerance_m=gate.position_tolerance_m,
+            orientation_tolerance_rad=gate.orientation_tolerance_rad,
+        )
+    except (KeyError, TypeError, ValueError, RuntimeError):
+        return dict(available=False, reason="measured_tcp_unavailable")
+
+
 class BenchmarkBlindEnvironment:
     """Hide the simulator's native success checker from staged execution.
 
@@ -303,7 +325,8 @@ class BenchmarkBlindEnvironment:
 
 
 def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
-                   log=lambda event: None, settle_after_seat=True, failure_detail=None):
+                   log=lambda event: None, settle_after_seat=True, failure_detail=None,
+                   allow_development_oracle=False):
     """Execute one bounded sequence from current state; stop at the first failure.
 
     The native success checker is reported but never consulted for control.
@@ -320,7 +343,12 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
     try:
         executor = SkillExecutor(BenchmarkBlindEnvironment(environment), NoPolicy(), log=record, anchors=anchors,
             predicates=PredicateRegistry(rack_seat_gate=gate), cancelled=lambda: time.monotonic() >= deadline,
-            budget=EpisodeBudget(max_skill_calls=5, max_analytic_ticks=12000))
+            # Four normal stages plus one bounded re-seat and release retry.
+            budget=EpisodeBudget(
+                max_skill_calls=HANG_RECOVERY_MAX_SKILL_CALLS,
+                max_analytic_ticks=HANG_RECOVERY_MAX_ANALYTIC_TICKS,
+            ),
+            allow_development_oracle=allow_development_oracle)
         commands = (
             ("approach", SkillCommand(action="move_to", arm="right",
                 parameters={"target": "rack_approach", "max_physics_ticks": 3000})),
@@ -332,6 +360,30 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
                 parameters={"target": "rack_retreat", "max_physics_ticks": 2000})),
         )
         retreat_delta = None
+        seat_anchor = None
+
+        def settle_completed_seat(result, target):
+            if (not settle_after_seat or not result.completed
+                    or result.execution_uncertain):
+                return result, None
+            settling = settle_seat(
+                environment, target.pose, last_right_target, deadline=deadline,
+                max_ticks=min(250, 12000-executor.executed_physics_ticks),
+                log=record)
+            executor.executed_physics_ticks += settling["ticks"]
+            after = None if settling["execution_uncertain"] else environment.observe()
+            updated = result.model_copy(update=dict(
+                completed=settling["completed"],
+                stop_reason=settling["reason"],
+                execution_uncertain=settling["execution_uncertain"],
+                executed_physics_ticks=result.executed_physics_ticks+settling["ticks"],
+                position_error_m=settling.get("position_error_m"),
+                orientation_error_rad=settling.get("orientation_error_rad"),
+                observation_after=None if after is None else after.sequence,
+                state_after=None if after is None else result.state_after.model_copy(
+                    update={"command_state": after.command_state})))
+            return updated, settling
+
         for stage, command in commands:
             if time.monotonic() >= deadline:
                 report.update(status="recovery_time_limit", stopped_at=stage)
@@ -345,23 +397,69 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
             else:
                 target = prepare(command, observation)
             if stage == "seat":
-                approach = anchors.resolve("rack_approach", "right", observation)
+                approach = anchors.resolve(
+                    "rack_approach", "right", observation,
+                    allow_oracle=allow_development_oracle)
                 retreat_delta = np.asarray(approach.pose[:3]) - target.pose[:3]
+                seat_anchor = target
             result = executor.execute(command)
-            if stage=="seat" and settle_after_seat and result.completed and not result.execution_uncertain:
-                settling=settle_seat(environment,target.pose,last_right_target,deadline=deadline,
-                    max_ticks=min(250,12000-executor.executed_physics_ticks),log=record)
-                executor.executed_physics_ticks+=settling["ticks"]
-                report["seat_settling"]=settling
-                after=None if settling["execution_uncertain"] else environment.observe()
-                result=result.model_copy(update=dict(completed=settling["completed"],
-                    stop_reason=settling["reason"],execution_uncertain=settling["execution_uncertain"],
-                    executed_physics_ticks=result.executed_physics_ticks+settling["ticks"],
-                    position_error_m=settling.get("position_error_m"),
-                    orientation_error_rad=settling.get("orientation_error_rad"),
-                    observation_after=None if after is None else after.sequence,
-                    state_after=None if after is None else result.state_after.model_copy(
-                        update={"command_state":after.command_state})))
+            if stage == "seat":
+                result, settling = settle_completed_seat(result, target)
+                if settling is not None:
+                    report["seat_settling"] = settling
+
+            if (stage == "release" and not result.execution_uncertain
+                    and result.stop_reason == "rack_seat_alignment_lost"
+                    and seat_anchor is not None):
+                diagnostic = rack_seat_alignment_diagnostic(
+                    environment, seat_anchor.pose, gate)
+                record(dict(event_type="rack_seat_alignment_lost_diagnostic",
+                            observation_sequence=environment.observe().sequence,
+                            **diagnostic))
+                release_recovery = dict(
+                    attempted=True, maximum_attempts=1,
+                    trigger=result.model_dump(mode="json"),
+                    alignment_before_reseat=diagnostic)
+
+                # Reuse the already validated seat pose. Refresh only its
+                # observation identity so the normal anchor freshness contract
+                # remains intact; no new perception fit or oracle query occurs.
+                reseat_observation = environment.observe()
+                frozen_seat = Anchor(
+                    tuple(seat_anchor.pose), reseat_observation.sequence,
+                    source=seat_anchor.source)
+                anchors.bind("rack_seat", "right", frozen_seat)
+                reseat_command = SkillCommand(
+                    action="move_to", arm="right",
+                    parameters={"target": "rack_seat", "max_physics_ticks": 3000})
+                reseat = executor.execute(reseat_command)
+                reseat, reseat_settling = settle_completed_seat(
+                    reseat, frozen_seat)
+                gate.record(reseat_command, reseat, frozen_seat)
+                release_recovery["reseat"] = reseat.model_dump(mode="json")
+                if reseat_settling is not None:
+                    release_recovery["seat_settling"] = reseat_settling
+                release_recovery["alignment_after_reseat"] = (
+                    rack_seat_alignment_diagnostic(
+                        environment, frozen_seat.pose, gate))
+                if not reseat.execution_uncertain:
+                    store.save(environment.observe())
+
+                if not reseat.completed or reseat.execution_uncertain:
+                    report["release_recovery"] = release_recovery
+                    report["stages"][stage] = result.model_dump(mode="json")
+                    report.update(
+                        status="recovery_stopped", stopped_at="release_reseat",
+                        reason=reseat.stop_reason)
+                    break
+
+                result = executor.execute(command)
+                release_recovery["release_retry"] = result.model_dump(mode="json")
+                if result.stop_reason == "rack_seat_alignment_lost":
+                    release_recovery["alignment_after_retry"] = (
+                        rack_seat_alignment_diagnostic(
+                            environment, frozen_seat.pose, gate))
+                report["release_recovery"] = release_recovery
             gate.record(command, result, target)
             report["stages"][stage] = result.model_dump(mode="json")
             if not result.execution_uncertain:
@@ -405,6 +503,7 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
     finally:
         if executor is not None:
             report["analytic_ticks"] = executor.executed_physics_ticks
+            report["skill_calls"] = executor.calls
         try:
             report["native_success"] = environment.native_success
         except Exception:

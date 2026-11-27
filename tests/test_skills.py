@@ -146,7 +146,7 @@ class SkillTests(unittest.TestCase):
                            "max_chunks": 1, "chunk_size": 24, "max_policy_actions": 1}})
 
         self.assertEqual(result.stop_reason, "grasp_monitor_watchdog_exhausted")
-        self.assertTrue(result.episode_terminal)
+        self.assertFalse(result.episode_terminal)
         self.assertEqual(result.executed_policy_actions, 4)
 
     def test_monitored_grasp_does_not_fall_back_to_an_action_cap_without_monitor(self):

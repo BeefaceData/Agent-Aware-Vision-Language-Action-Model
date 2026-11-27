@@ -337,6 +337,40 @@ class LocalSimulatorTests(unittest.TestCase):
                 LocalSimulator("RoboTwin", perception_cameras=("default",))
         build.assert_not_called()
 
+    def test_policy_steps_reuse_fixed_rgbd_until_a_supervisor_refresh(self):
+        from development.simulator.local_simulator import LocalSimulator
+        from harness.environment.perception_cameras import SUPERVISED_REVERSE_CAMERA
+
+        task = robotwin_task()
+        task.setup_demo = lambda **kwargs: None
+        task.scene = "scene"
+        task.take_action = lambda action: None
+        task.check_success = lambda: False
+        task.eval_success = False
+        task.close_env = lambda: None
+        cameras = {
+            "perception_camera": FakeSapienCamera(),
+            "perception_reverse_camera": FakeSapienCamera(depth_m=2.),
+        }
+        torch_stub = SimpleNamespace(enable_grad=__import__("contextlib").nullcontext)
+        with patch.dict("sys.modules", {"torch": torch_stub}), \
+                patch("harness.environment.robotwin.build_task", return_value=(task, {})), \
+                patch("harness.environment.perception_cameras.add_fixed_camera",
+                      side_effect=lambda _scene, spec: cameras[spec.name]):
+            simulator = LocalSimulator("RoboTwin", perception_cameras=(
+                DEFAULT_PERCEPTION_CAMERA, SUPERVISED_REVERSE_CAMERA))
+            reset, _ = simulator("local", 0, "/reset", {"seed": 3})
+            cached, _ = simulator("local", 0, "/step", {
+                "action": [0.] * 14, "refresh_perception": False})
+            fresh = simulator.observation(False)
+
+        self.assertEqual(cameras["perception_camera"].pictures, 2)
+        self.assertEqual(cameras["perception_reverse_camera"].pictures, 2)
+        np.testing.assert_array_equal(cached["perception_camera"], reset["perception_camera"])
+        self.assertNotIn("perception_reverse_camera", cached)
+        self.assertIn("perception_reverse_camera", fresh)
+        self.assertIn("perception_camera__depth_mm", fresh)
+
 
 if __name__ == "__main__":
     unittest.main()

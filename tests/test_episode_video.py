@@ -75,6 +75,16 @@ class VideoTests(unittest.TestCase):
             self.assertEqual(video.metadata()['cameras'],
                              ['head_camera', 'perception_camera'])
 
+    def test_boundary_sampled_supervisor_is_disclosed_in_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("imageio.v2.get_writer", return_value=Mock()):
+            video = EpisodeVideo(tmp, perception_boundary_sampled=True)
+            video.append(observation_with_supervisor_camera(0), "reset", 0, 0)
+            video.close()
+
+        self.assertEqual(video.metadata()["perception_sampling"],
+                         "boundary snapshots reused between feedback points")
+
     def test_real_encoding_and_frame_index(self):
         import imageio.v2 as imageio
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,6 +129,18 @@ class VideoTests(unittest.TestCase):
             self.assertEqual(native_step.call_count, 27)
             reset.assert_called_once_with(3)
             step.assert_called_once()
+
+    def test_boundary_refresh_is_recorded_once_when_enabled(self):
+        video = Mock()
+        env = RecordingEnvironment(Mock(), video, record_refreshed_boundaries=True)
+        current = observation_with_supervisor_camera(8)
+        with patch.object(LocalEnvironmentClient, 'observe', return_value=current):
+            env._recorded_sequence = current.sequence
+            env.observe()
+            env.observe()
+
+        self.assertEqual(video.append.call_count, 1)
+        self.assertEqual(video.append.call_args.args[1], "perception_boundary")
 
     def test_writer_failure_propagates(self):
         video = Mock()

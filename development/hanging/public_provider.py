@@ -73,6 +73,10 @@ LIFT_PERSISTENCE_REASON = "bounded_temporal_lift_persistence"
 # and 5 degree normal sensitivity limits.
 SELF_CONFIRMED_CONFIDENCE = .85
 MINIMUM_PROPOSAL_CONFIDENCE = .5
+# A moderate semantic proposal may enter the metric verifier. It cannot confirm
+# lift by itself: RGB-D association, table clearance, measured gripper state,
+# co-motion and three separate observations are still required below.
+MINIMUM_LIFT_SEMANTIC_CONFIDENCE = .55
 AGREEMENT_CENTER_M = .005
 AGREEMENT_NORMAL_DEG = 5.
 
@@ -1281,7 +1285,8 @@ class PublicRGBDHangingProvider:
             self._lift_motion_supported = False
             self._lift_corroboration["reason"] = "grasp_contradiction_or_gripper_open"
             return
-        qualifies = (report.task_state_confidence is not None and report.task_state_confidence >= .70
+        qualifies = (report.task_state_confidence is not None
+                     and report.task_state_confidence >= MINIMUM_LIFT_SEMANTIC_CONFIDENCE
                      and report.right_held is True and report.mug_off_table is True
                      and self._corroborates_lift(observation, report))
         if qualifies:

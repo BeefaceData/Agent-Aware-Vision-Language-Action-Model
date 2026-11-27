@@ -226,6 +226,30 @@ class RuntimeRecoveryTests(unittest.TestCase):
             if event["event_type"] == "development_oracle_hang_target_fallback")
         self.assertEqual(fallback["public_reason"], "public_geometry_unavailable")
 
+    def test_development_fallback_executes_all_stages_with_oracle_anchors(self):
+        environment = PublicEnvironment(x=0.)
+        environment.arms["right"]["gripper"] = 0.
+        current = environment.arm_state("right")["pose"].copy()
+        approach = current.copy()
+        approach[0] += .01
+        seat = current.copy()
+        seat[0] += .02
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = recover_current(
+                environment, ObservationStore(Path(directory)/"observations"),
+                episode_id="development-fallback", deadline=time.monotonic()+10,
+                initial_proposal=ProposalResult("unknown", "public_geometry_unavailable"),
+                development_oracle_targets=lambda arm: {
+                    "rack_approach": tuple(approach),
+                    "rack_seat": tuple(seat),
+                })
+
+        self.assertEqual(result["information_source"], "development_oracle")
+        self.assertEqual(list(result["stages"]), ["approach", "seat", "release", "retreat"])
+        self.assertTrue(all(stage["completed"] for stage in result["stages"].values()))
+        self.assertNotEqual(result.get("reason"), "oracle_anchor_not_allowed")
+
     def test_shared_execution_has_no_recording_or_fixed_entry_dependencies(self):
         for module in (motion, runtime):
             source = inspect.getsource(module)
@@ -233,7 +257,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 self.assertNotIn(forbidden, source)
 
     def run_wiring(self, sequence, *, reject_after_approach=False, depth_failure=False,
-                   lose_alignment=False):
+                   lose_alignment=False, recover_alignment=False):
         """Fake geometry validation isolates sequencing; geometry has separate tests."""
         environment = PublicEnvironment(x=0.)
         environment.sequence = sequence
@@ -242,7 +266,10 @@ class RuntimeRecoveryTests(unittest.TestCase):
             original_tick = environment.tick
             def tick(*args, **kwargs):
                 original_tick(*args, **kwargs)
-                if 0 < environment.arms["right"]["gripper"] < 1:
+                # The recoverable case drifts only during the first opening.
+                # Planning the third goal marks the one bounded re-seat.
+                if (0 < environment.arms["right"]["gripper"] < 1
+                        and (not recover_alignment or len(environment.goals) < 3)):
                     environment.arms["right"]["pose"][0] += .006
             environment.tick = tick
         calls, events = [], []
@@ -316,8 +343,35 @@ class RuntimeRecoveryTests(unittest.TestCase):
         result, environment, calls, checks, events = self.run_wiring(81, lose_alignment=True)
         self.assertEqual(list(result["stages"]), ["approach", "seat", "release"])
         self.assertEqual(result["stages"]["release"]["stop_reason"], "rack_seat_alignment_lost")
+        self.assertTrue(result["release_recovery"]["attempted"])
+        self.assertEqual(result["release_recovery"]["maximum_attempts"], 1)
+        self.assertEqual(result["stopped_at"], "release_reseat")
+        self.assertGreater(
+            result["release_recovery"]["alignment_before_reseat"]["position_error_m"],
+            result["release_recovery"]["alignment_before_reseat"]["position_tolerance_m"])
         self.assertLess(environment.arms["right"]["gripper"], 1.)
         self.assertEqual(result["retention"]["status"], "unknown")
+
+    def test_one_frozen_target_reseat_recovers_release_alignment_loss(self):
+        result, environment, calls, checks, events = self.run_wiring(
+            81, lose_alignment=True, recover_alignment=True)
+
+        self.assertEqual(list(result["stages"]), ["approach", "seat", "release", "retreat"])
+        self.assertTrue(all(stage["completed"] for stage in result["stages"].values()))
+        recovery = result["release_recovery"]
+        self.assertEqual(recovery["maximum_attempts"], 1)
+        self.assertEqual(recovery["trigger"]["stop_reason"], "rack_seat_alignment_lost")
+        self.assertTrue(recovery["reseat"]["completed"])
+        self.assertTrue(recovery["release_retry"]["completed"])
+        self.assertLessEqual(
+            recovery["alignment_after_reseat"]["position_error_m"],
+            recovery["alignment_after_reseat"]["position_tolerance_m"])
+        self.assertEqual(environment.arms["right"]["gripper"], 1.)
+        diagnostics = [event for event in events
+                       if event.get("event_type") == "rack_seat_alignment_lost_diagnostic"]
+        self.assertEqual(len(diagnostics), 1)
+        self.assertGreater(diagnostics[0]["position_error_m"],
+                           diagnostics[0]["position_tolerance_m"])
 
     def test_saved_success_keeps_exact_adapter_targets_and_roll(self):
         import json

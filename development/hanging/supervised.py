@@ -30,6 +30,12 @@ WAITABLE_GEOMETRY_REASONS = frozenset({
 
 
 SUPERVISED_TIME_LIMIT_MAX = 110
+GRASP_INITIAL_FEEDBACK_ACTIONS = 64
+HANDOFF_INITIAL_FEEDBACK_ACTIONS = 128
+HANG_INITIAL_FEEDBACK_ACTIONS = 32
+STEADY_FEEDBACK_CHUNKS = 2
+MAX_PHASE_POLICY_ACTIONS = HANDOFF_INITIAL_FEEDBACK_ACTIONS
+SUPERVISED_VIDEO_CAMERAS = ("head_camera",)
 
 
 @dataclass(frozen=True)
@@ -200,6 +206,13 @@ class HangingRecoveryHook:
             return regrasp
         if not self.hand_back_to_policy:
             return self._consider(selection, observation, remaining=remaining)
+        in_hang = (self.entry_sequence is not None
+                   or selection.metadata.get("task_phase") == "hang"
+                   or selection.phase == "HANG")
+        # This hook owns only hanging recovery. A GRASP/HANDOFF planner abort
+        # must not silently turn into an unbounded policy-only rollout.
+        if selection.command.action == SkillType.ABORT and not in_hang:
+            return None
         if self.handed_back is not None:
             return self._policy_turn(observation, remaining, "handed_back_to_policy")
         if selection.command.action == SkillType.ABORT:
@@ -249,12 +262,16 @@ class HangingRecoveryHook:
         grasp = self.provider.evaluate("right_mug_lifted", observation, arm="right")
         if grasp.value is None and not self.require_current_lift:
             grasp = self.provider.evaluate("handoff_confirmed", observation, arm="right")
+        private_lift_gate = (
+            selection.metadata.get("development_oracle_phase_gate") == "hang")
         self.log(dict(event_type="recovery_entry_check", observation_sequence=observation.sequence,
-                      grasp=grasp.model_dump(mode="json"), attempts=self.attempts))
-        current_lift = (grasp.value is True and (not self.require_current_lift or
+                      grasp=grasp.model_dump(mode="json"), attempts=self.attempts,
+                      development_oracle_lift_gate=private_lift_gate))
+        current_lift = private_lift_gate or (grasp.value is True and (not self.require_current_lift or
             (grasp.name == "right_mug_lifted" and grasp.source == "perception"
              and grasp.observation_sequence == observation.sequence)))
-        if current_lift and self.require_current_lift and self.entry_sequence is None:
+        if (current_lift and not private_lift_gate
+                and self.require_current_lift and self.entry_sequence is None):
             # The provider stamps every result with the current sequence and may
             # carry a lift forward across a bounded gap. Entry needs this frame's
             # own corroboration; providers without that check fail closed.
@@ -269,6 +286,10 @@ class HangingRecoveryHook:
         if self.entry_sequence is None:
             self.entry_sequence = observation.sequence
             self.entry_policy_remaining = remaining.get("policy_actions", 0)
+            if private_lift_gate:
+                self._decision(observation, "use_development_oracle_fallback",
+                               "right_mug_lifted",
+                               information_source="development_oracle")
             # Spread the finite crop budget over the remaining episode, using
             # whole policy chunks to avoid spending all requests near entry.
             span = min(self.visibility_action_budget, self.entry_policy_remaining)
@@ -405,22 +426,36 @@ def service_preflight(options, client, policy_client):
 def build_supervised_planner(options, client):
     return AnthropicPlanner(AnthropicSettings(model=options.model, task_scope="full_task",
         max_calls=options.max_turns, max_tokens=4096, transport_retries=0,
-        planner_feedback_chunks=1, vla=VLAParameters(max_chunks=1, chunk_size=options.chunk_size,
-                                                    max_policy_actions=options.chunk_size)),
+        planner_feedback_chunks=STEADY_FEEDBACK_CHUNKS,
+        grasp_initial_feedback_after_actions=GRASP_INITIAL_FEEDBACK_ACTIONS,
+        handoff_initial_feedback_after_actions=HANDOFF_INITIAL_FEEDBACK_ACTIONS,
+        hang_initial_feedback_after_actions=HANG_INITIAL_FEEDBACK_ACTIONS,
+        vla=VLAParameters(
+            max_chunks=(MAX_PHASE_POLICY_ACTIONS+options.chunk_size-1)//options.chunk_size,
+            chunk_size=options.chunk_size, max_policy_actions=MAX_PHASE_POLICY_ACTIONS)),
         client=client, preserve_policy_actions=True,
-        runtime_grasp_monitor=getattr(options, "public_grasp_monitor", False))
+        # Hybrid development runs use public perception first, then the local
+        # oracle for unresolved boundary predicates and per-action grasp events.
+        # Public-only runs retain the phase schedule without private fallback.
+        runtime_grasp_monitor=options.development_oracle_fallback,
+        # PublicRGBDHangingProvider already sent this boundary's images to Opus.
+        # The planner receives its structured report and predicates, avoiding a
+        # second upload of the same scene.
+        include_observation_images=False,
+        development_oracle_fallback=options.development_oracle_fallback)
 
 
 def run_controller(environment, vla, provider, store, planner, options, *, episode_id, deadline, log,
                    development_oracle_targets=None, development_oracle_predicates=None):
     """Uses the existing supervisor; caller owns reset and recording resources."""
     anchors = AnchorRegistry()
+    predicate_registry = PredicateRegistry(
+        perception=provider, fallback_oracle=development_oracle_predicates)
     executor = SkillExecutor(environment, vla, log=log, anchors=anchors,
         budget=EpisodeBudget(max_skill_calls=options.max_turns+4, max_analytic_ticks=12000,
                              max_policy_actions=options.max_actions,
                              max_vla_chunks=(options.max_actions+options.chunk_size-1)//options.chunk_size),
-        predicates=PredicateRegistry(
-            perception=provider, fallback_oracle=development_oracle_predicates),
+        predicates=predicate_registry,
         cancelled=lambda: time.monotonic() >= deadline,
         allow_development_oracle=development_oracle_predicates is not None)
     def prepare(command, observation):
@@ -453,6 +488,8 @@ def run_controller(environment, vla, provider, store, planner, options, *, episo
         episode_id=episode_id, seed=options.seed, max_turns=options.max_turns,
         completion_predicate="task_success", prepare=prepare, invariant_check=invariant,
         hanging_recovery=hook).run()
+    if isinstance(summary, dict):
+        summary["evidence_resolution"] = predicate_registry.usage_summary()
     if grasp and isinstance(summary, dict):
         summary["grasp_recovery"] = {
             arm: recovery.summary() for arm, recovery in grasp.items()}
@@ -509,20 +546,17 @@ def run(robotwin_root, output, options, *, fixture_loader=None):
         # All simulator imports/initialization follow API/service preflight.
         from development.simulator.local_simulator import LocalSimulator
         from development.demos.episode_video import EpisodeVideo, RecordingEnvironment
-        from harness.environment.layout import CAMERAS
         from harness.perception.observations import ObservationStore
 
         store = ObservationStore(output/"observations")
         simulator = LocalSimulator(robotwin_root, rgbd_enabled=True,
             perception_cameras=camera_specs)
         report["simulator_started"] = True
-        video = EpisodeVideo(output, cameras=(*CAMERAS, *(spec.name for spec in camera_specs)))
-        class CapturedEnvironment(RecordingEnvironment):
-            def _record_policy_step(self, observation):
-                result = super()._record_policy_step(observation)
-                store.save(result)
-                return result
-        environment = CapturedEnvironment(simulator, video, render_once_per_step=True)
+        # Record the smoothly refreshed policy head view only. Both fixed RGB-D
+        # cameras remain available to perception at supervisor boundaries.
+        video = EpisodeVideo(output, cameras=SUPERVISED_VIDEO_CAMERAS)
+        environment = RecordingEnvironment(simulator, video, render_once_per_step=True,
+            refresh_perception_each_step=False)
         store.save(environment.reset(options.seed))
         provider = PublicRGBDHangingProvider(shared, model=options.model, episode_id=output.name,
                                             store=store, log=log, fixture=fixture_assets)

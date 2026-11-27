@@ -26,7 +26,8 @@ class ReplayState:
 class LocalEnvironmentClient(EnvironmentClient):
     supports_analytic = True
 
-    def __init__(self, simulator, *, render_once_per_step=False):
+    def __init__(self, simulator, *, render_once_per_step=False,
+                 refresh_perception_each_step=True):
         """``render_once_per_step``: skip ``step``'s render of the pre-action state.
 
         The base ``step`` calls ``observe()`` for the previous sequence and the
@@ -36,10 +37,13 @@ class LocalEnvironmentClient(EnvironmentClient):
         and ``native_success`` reads the task), so the returned observations are
         the same with one render per action instead of two.
         """
+        if type(refresh_perception_each_step) is not bool:
+            raise ValueError("invalid_perception_refresh_setting")
         super().__init__(simulator)
         self.simulator = simulator
         self._sequence = 0
         self.render_once_per_step = render_once_per_step
+        self.refresh_perception_each_step = refresh_perception_each_step
 
     def _accept(self, raw, sequence):
         result = super()._accept(raw, sequence)
@@ -59,6 +63,20 @@ class LocalEnvironmentClient(EnvironmentClient):
             raise RuntimeError("environment has no confirmed current observation")
         return self._accept(self.simulator.observation(self.native_success), self._sequence)
 
+    def observe_policy(self):
+        """Fresh policy cameras with the latest supervisor RGB-D snapshot.
+
+        The frozen policy consumes only RoboTwin's head/wrist cameras. Keeping
+        fixed-camera refreshes at supervisor boundaries avoids changing policy
+        inputs while removing high-resolution perception work from every chunk.
+        """
+        if self.refresh_perception_each_step:
+            return self.observe()
+        if self._observation is None or self._uncertain:
+            raise RuntimeError("environment has no confirmed current observation")
+        raw = self.simulator.observation(self.native_success, refresh_perception=False)
+        return self._accept(raw, self._sequence)
+
     def _step(self, action, *, allow_after_success):
         if not self.render_once_per_step:
             return super()._step(action, allow_after_success=allow_after_success)
@@ -68,7 +86,10 @@ class LocalEnvironmentClient(EnvironmentClient):
             raise RuntimeError("environment is terminal")
         action = vector14(action)
         self._uncertain = True  # A failed response may still have moved the robot.
-        raw, _ = self._transport(self.host, self.port, "/step", {"action": list(action)})
+        payload = {"action": list(action)}
+        if not self.refresh_perception_each_step:
+            payload["refresh_perception"] = False
+        raw, _ = self._transport(self.host, self.port, "/step", payload)
         observation = self._accept(raw, self._sequence + 1)
         self._uncertain = False
         return observation

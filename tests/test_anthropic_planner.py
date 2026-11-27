@@ -82,9 +82,11 @@ class AnthropicTests(unittest.TestCase):
     def planner(self, replies, **settings):
         provider = Provider(replies)
         require_pixel_grounding = settings.pop("require_pixel_grounding", False)
+        development_oracle_fallback = settings.pop("development_oracle_fallback", False)
         return AnthropicPlanner(AnthropicSettings(model="claude-test-model", **settings),
                                 client=provider,
-                                require_pixel_grounding=require_pixel_grounding), provider
+                                require_pixel_grounding=require_pixel_grounding,
+                                development_oracle_fallback=development_oracle_fallback), provider
 
     def test_one_call_images_limits_and_no_oracle_in_request(self):
         planner, provider = self.planner([response()])
@@ -1410,6 +1412,126 @@ class AnthropicTests(unittest.TestCase):
         content = user_content(context(previous=result), limits={}, history=[])
         self.assertNotIn("PRIVATE_SENTINEL", json.dumps(content))
         self.assertEqual(result.stop_reason, "PRIVATE_SENTINEL")
+
+    def test_private_lift_gate_retires_same_phase_runtime_monitor(self):
+        from dataclasses import replace
+        from harness.skills.schemas import SkillResult
+
+        planner, provider = self.planner([
+            response(task_phase="grasp", stop="chunk_budget_exhausted"),
+            response(task_phase="grasp", stop="chunk_budget_exhausted"),
+        ], task_scope="full_task", development_oracle_fallback=True)
+        initial = planner.select(replace(context(), predicates=()))
+        self.assertEqual(initial.command.parameters.failure_arm, "left")
+        self.assertEqual(initial.command.parameters.failure_stop, "grasp_attempt_failed")
+
+        state = {"command_state": [0.0] * 14}
+        private_lift = SkillResult.model_validate({
+            "call_id": 1, "skill": "vla_act", "completed": True,
+            "stop_reason": "predicate_satisfied", "executed_policy_actions": 113,
+            "vla_chunks_requested": 8, "discarded_actions": 15,
+            "state_before": state, "state_after": state,
+            "observation_before": 0, "observation_after": 113,
+            "episode_terminal": False, "task_success": False,
+            "controlled_arms": "both", "information_source": "development_oracle",
+            "predicate": {"name": "mug_lifted", "value": True,
+                          "source": "development_oracle", "observation_sequence": 113,
+                          "reason": "temporal_evidence_gate"},
+            "elapsed_seconds": 1.0,
+        })
+        unknown = replace(context(2, previous=private_lift), predicates=(
+            PredicateResult(name="mug_lifted", value=None, source="perception",
+                            observation_sequence=113, reason="public_evidence_unknown"),))
+
+        continuation = planner.select(unknown)
+
+        self.assertIsNone(continuation.command.parameters.failure_stop)
+        self.assertEqual(continuation.command.parameters.max_policy_actions, 8)
+        self.assertEqual(continuation.phase, "HANDOFF")
+        self.assertEqual(continuation.metadata["development_oracle_phase_gate"], "handoff")
+        self.assertNotIn("development_oracle", json.dumps(provider.requests[1]))
+
+    def test_public_hanging_proposal_arms_private_right_lift_monitor(self):
+        from dataclasses import replace
+        from harness.skills.schemas import SkillResult
+
+        planner, _ = self.planner([
+            response(task_phase="handoff", stop="chunk_budget_exhausted"),
+        ], task_scope="full_task")
+        planner._completed_private_grasp_phases.add("grasp")
+        planner.active_phase = "handoff"
+        state = {"command_state": [0.0] * 14}
+        previous = SkillResult.model_validate({
+            "call_id": 1, "skill": "vla_act", "completed": True,
+            "stop_reason": "chunk_budget_exhausted", "executed_policy_actions": 32,
+            "vla_chunks_requested": 2, "discarded_actions": 0,
+            "state_before": state, "state_after": state,
+            "observation_before": 337, "observation_after": 369,
+            "episode_terminal": False, "task_success": False,
+            "controlled_arms": "both", "information_source": "public",
+            "elapsed_seconds": 1.0,
+        })
+        plausible = replace(context(2, previous=previous), visual_context={
+            "stage": "hanging", "right_held": True, "mug_off_table": True,
+        })
+
+        selected = planner.select(plausible)
+
+        self.assertEqual(selected.phase, "HANDOFF")
+        self.assertEqual(selected.command.parameters.failure_arm, "right")
+        self.assertEqual(selected.command.parameters.failure_stop, "grasp_attempt_failed")
+
+    def test_unknown_public_right_lift_uses_private_boundary_phase_gate(self):
+        from dataclasses import replace
+
+        predicates = (
+            PredicateResult(name="right_mug_lifted", value=None, source="perception",
+                            observation_sequence=370, reason="public_evidence_unknown"),
+            PredicateResult(name="right_mug_lifted", value=True,
+                            source="development_oracle", observation_sequence=370,
+                            reason="temporal_evidence_gate"),
+        )
+        planner, provider = self.planner([
+            response(task_phase="hang", stop="chunk_budget_exhausted"),
+        ], task_scope="full_task", development_oracle_fallback=True)
+        planner.active_phase = "handoff"
+
+        selected = planner.select(replace(context(), predicates=predicates))
+
+        self.assertEqual(selected.phase, "HANG")
+        self.assertEqual(selected.metadata["development_oracle_phase_gate"], "hang")
+        self.assertEqual(selected.metadata["phase_basis"], "development_oracle_milestone")
+        self.assertEqual(planner._completed_private_grasp_phases, {"grasp", "handoff"})
+        self.assertNotIn("development_oracle", json.dumps(provider.requests[0]))
+
+    def test_private_right_lift_advances_runtime_to_hang_without_prompt_leak(self):
+        from dataclasses import replace
+        from harness.skills.schemas import SkillResult
+
+        planner, provider = self.planner([
+            response(task_phase="handoff", stop="chunk_budget_exhausted"),
+        ], task_scope="full_task", development_oracle_fallback=True)
+        planner.active_phase = "handoff"
+        state = {"command_state": [0.0] * 14}
+        private_lift = SkillResult.model_validate({
+            "call_id": 2, "skill": "vla_act", "completed": True,
+            "stop_reason": "predicate_satisfied", "executed_policy_actions": 1,
+            "vla_chunks_requested": 1, "discarded_actions": 15,
+            "state_before": state, "state_after": state,
+            "observation_before": 369, "observation_after": 370,
+            "episode_terminal": False, "task_success": False,
+            "controlled_arms": "both", "information_source": "development_oracle",
+            "predicate": {"name": "right_mug_lifted", "value": True,
+                          "source": "development_oracle", "observation_sequence": 370,
+                          "reason": "temporal_evidence_gate"},
+            "elapsed_seconds": 1.0,
+        })
+
+        selected = planner.select(replace(context(3, previous=private_lift), predicates=()))
+
+        self.assertEqual(selected.phase, "HANG")
+        self.assertEqual(selected.metadata["development_oracle_phase_gate"], "hang")
+        self.assertNotIn("development_oracle", json.dumps(provider.requests[0]))
 
     def test_tracking_error_diagnostic_is_available_to_planner(self):
         _, executor, _ = setup_runtime()

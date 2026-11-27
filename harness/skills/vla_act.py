@@ -98,7 +98,12 @@ class VLAAct:
             remaining = configured_action_limit - context.executed
             if remaining <= 0:
                 break
-            observation = env.observe()
+            # Policy inference never consumes perception-only cameras. Runners
+            # with expensive fixed RGB-D views may refresh only the native
+            # head/wrist images here and reserve perception for supervisor
+            # feedback boundaries.
+            observe_policy = getattr(type(env), "observe_policy", None)
+            observation = env.observe_policy() if callable(observe_policy) else env.observe()
             context.chunks += 1  # Failed requests consume the request budget too.
             context.log({"event_type": "chunk_requested", "chunk": context.chunks,
                          "observation": observation.sequence, "requested_actions": parameters.chunk_size})

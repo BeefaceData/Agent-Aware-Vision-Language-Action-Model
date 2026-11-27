@@ -48,7 +48,10 @@ def public_result(result):
     return data
 
 
-def user_content(context, *, limits, history, pixel_grounding=False):
+def user_content(context, *, limits, history, pixel_grounding=False,
+                 include_observation_images=True):
+    if type(include_observation_images) is not bool:
+        raise ValueError("planner_image_setting_must_be_boolean")
     from PIL import Image
     observation = context.observation.copy()
     # The supervisor model gets the fixed scene view instead of the policy's two wrist views.
@@ -99,15 +102,16 @@ def user_content(context, *, limits, history, pixel_grounding=False):
         grounding_feedback=context.grounding_feedback,
         grounding_camera_to_avoid=context.grounding_camera_to_avoid)
     content = []
-    for name in supervisor_cameras:
-        with BytesIO() as stream:
-            picture = Image.fromarray(observation.images[name])
-            picture.thumbnail((640, 480))
-            picture.save(stream, format="PNG")
-            encoded = base64.b64encode(stream.getvalue()).decode("ascii")
-        label = "supervisor_camera (fixed perception_camera)" \
-            if name == "perception_camera" else name
-        content.extend([{"type": "text", "text": label},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": encoded}}])
+    if include_observation_images:
+        for name in supervisor_cameras:
+            with BytesIO() as stream:
+                picture = Image.fromarray(observation.images[name])
+                picture.thumbnail((640, 480))
+                picture.save(stream, format="PNG")
+                encoded = base64.b64encode(stream.getvalue()).decode("ascii")
+            label = "supervisor_camera (fixed perception_camera)" \
+                if name == "perception_camera" else name
+            content.extend([{"type": "text", "text": label},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": encoded}}])
     content.append({"type": "text", "text": json.dumps(data, allow_nan=False)})
     return content

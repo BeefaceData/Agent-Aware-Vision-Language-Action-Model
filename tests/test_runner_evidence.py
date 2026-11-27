@@ -104,6 +104,15 @@ class RunnerEvidenceTests(unittest.TestCase):
         recovered = registry.evaluate("mug_grasp_confirmed", observation, allow_oracle=True)
         self.assertEqual((recovered.value, recovered.source), (False, "development_oracle"))
         self.assertEqual(oracle.calls, 1)
+        self.assertEqual(registry.usage_summary(), {
+            "mode": "hybrid_development",
+            "resolution_counts": {
+                "development_oracle_fallback": 1,
+                "public_result": 2,
+            },
+            "oracle_fallbacks_by_predicate": {"mug_grasp_confirmed": 1},
+            "oracle_fallback_total": 1,
+        })
 
     def test_runner_wires_oracle_as_unknown_only_public_fallback(self):
         import run_skills
@@ -129,6 +138,32 @@ class RunnerEvidenceTests(unittest.TestCase):
         self.assertIs(predicates, registry)
         self.assertIs(registry.fallback_oracle, oracle)
         self.assertTrue(public_evidence.call_args.kwargs["depth_pose_anchors"])
+
+    def test_nested_oracle_registry_receives_explicit_authorization(self):
+        from harness.predicates.base import PredicateResult
+        from harness.predicates.registry import PredicateRegistry
+
+        class Provider:
+            def __init__(self, value, source):
+                self.value, self.source = value, source
+
+            def evaluate(self, name, observation, *, arm="auto"):
+                return PredicateResult(name=name, value=self.value, source=self.source,
+                    observation_sequence=observation.sequence, reason="fixture")
+
+        observation = SimpleNamespace(sequence=11)
+        nested_oracle = PredicateRegistry(
+            hanging_mug=Provider(False, "development_oracle"))
+        registry = PredicateRegistry(
+            perception=Provider(None, "perception"), fallback_oracle=nested_oracle)
+
+        result = registry.evaluate(
+            "mug_in_workspace", observation, allow_oracle=True)
+
+        self.assertIs(result.value, False)
+        self.assertEqual(result.source, "development_oracle")
+        self.assertEqual(registry.usage_summary()["oracle_fallbacks_by_predicate"],
+                         {"mug_in_workspace": 1})
 
     def test_evidence_source_remains_required(self):
         with self.assertRaisesRegex(ValueError, "evidence_provider_required"):

@@ -14,11 +14,11 @@ import numpy as np
 from development.hanging.public_provider import (
     BoundedVisionClient, PublicRGBDHangingProvider, VisibleHangingReport,
     SurfacePixel, measured_bounds,
-    PUBLIC_PROMPT,
+    PUBLIC_PROMPT, MINIMUM_LIFT_SEMANTIC_CONFIDENCE,
 )
 from development.hanging.supervised import (
     SupervisedOptions, HangingRecoveryHook, service_preflight, run_controller, run,
-    build_supervised_planner, mark_interrupted_physical_run,
+    build_supervised_planner, mark_interrupted_physical_run, SUPERVISED_VIDEO_CAMERAS,
 )
 from harness.environment.base import Observation
 from harness.environment.layout import CAMERAS
@@ -48,6 +48,9 @@ def visible(**updates):
 
 
 class SupervisedHangingTests(unittest.TestCase):
+    def test_supervised_episode_video_records_only_the_head_camera(self):
+        self.assertEqual(SUPERVISED_VIDEO_CAMERAS, ("head_camera",))
+
     def test_cancelled_physical_run_is_not_labeled_as_preflight_failure(self):
         report = mark_interrupted_physical_run({
             "status": "preflight_failed", "simulator_started": True,
@@ -77,6 +80,36 @@ class SupervisedHangingTests(unittest.TestCase):
                 self.assertIsNone(hook.consider(selection, observation, remaining={}))
                 provider.evaluate.assert_called_once_with("right_mug_lifted", observation, arm="right")
                 provider.propose.assert_not_called()
+
+    def test_private_right_lift_gate_starts_development_takeover(self):
+        environment = PublicEnvironment(x=0.)
+        environment.sequence = 370
+        observation = environment.observe()
+        provider = Mock()
+        provider.evaluate.return_value = PredicateResult(name="right_mug_lifted",
+            value=None, source="perception", observation_sequence=observation.sequence,
+            reason="public_evidence_unknown")
+        provider.propose.return_value = runtime.ProposalResult(
+            "unknown", "complete_visible_aperture_unavailable")
+        events = []
+        hook = HangingRecoveryHook(environment, provider, Mock(), episode_id="episode",
+            deadline=time.monotonic()+10, log=events.append,
+            pause_policy_on_entry=False, require_current_lift=True,
+            development_oracle_targets=lambda arm: {})
+        selection = PlannerSelection(SkillCommand(action="vla_act"), "HANG", metadata={
+            "task_phase": "hang", "development_oracle_phase_gate": "hang",
+        })
+
+        result = hook.consider(selection, observation, remaining={
+            "policy_actions": 100, "vla_chunks": 10, "skill_calls": 3,
+            "analytic_ticks": 0,
+        })
+
+        self.assertEqual(result["status"], "recovery_budget_unavailable")
+        self.assertEqual(hook.entry_sequence, observation.sequence)
+        self.assertTrue(any(event.get("decision") == "use_development_oracle_fallback"
+                            and event.get("reason") == "right_mug_lifted"
+                            for event in events))
 
     def test_carried_forward_lift_does_not_start_takeover(self):
         environment = PublicEnvironment(x=0.)
@@ -313,6 +346,45 @@ class SupervisedHangingTests(unittest.TestCase):
         provider._lift_motion_supported = False
         with patch.object(provider, "observe", return_value=report):
             self.assertIsNone(provider.evaluate("right_mug_lifted", observation).value)
+
+    def test_moderate_semantic_lift_enters_strict_multiframe_rgbd_verifier(self):
+        provider = PublicRGBDHangingProvider(Mock(), model="offline", episode_id="test",
+                                            store=Mock(), log=lambda event: None)
+        observation, _, _ = runtime_fixtures.RuntimeRecoveryTests().fixture()
+        report = visible().model_copy(update={
+            "task_state_confidence": MINIMUM_LIFT_SEMANTIC_CONFIDENCE,
+        })
+
+        def corroborate(*_):
+            provider._lift_motion_supported = True
+            provider._lift_corroboration.update(
+                status="confirmed", reason="public_rgbd_and_closure")
+            return True
+
+        with patch.object(provider, "_corroborates_lift", side_effect=corroborate) as geometry:
+            for sequence in (0, 16, 32):
+                current = replace(observation, sequence=sequence)
+                key = (sequence, f"frame-{sequence}", "fixed-calibration")
+                provider._update_temporal_lift(current, report, key)
+                provider._key, provider._report = key, report
+
+        self.assertEqual(geometry.call_count, 3)
+        self.assertEqual(provider._corroborated_count, 3)
+        with patch.object(provider, "observe", return_value=report):
+            result = provider.evaluate("right_mug_lifted", current, arm="right")
+        self.assertIs(result.value, True)
+        self.assertEqual(result.reason, "three_corroborated_public_reports")
+
+        below = report.model_copy(update={
+            "task_state_confidence": MINIMUM_LIFT_SEMANTIC_CONFIDENCE-.01,
+        })
+        provider._corroborated_count = 0
+        with patch.object(provider, "_corroborates_lift") as rejected_geometry:
+            provider._update_temporal_lift(
+                replace(observation, sequence=64), below,
+                (64, "below-threshold", "fixed-calibration"))
+        rejected_geometry.assert_not_called()
+        self.assertEqual(provider._corroborated_count, 0)
 
     def test_temporal_lift_resets_on_episode_calibration_age_and_gripper_open(self):
         observation, _, _ = runtime_fixtures.RuntimeRecoveryTests().fixture()
@@ -872,12 +944,28 @@ class SupervisedHangingTests(unittest.TestCase):
                 policy = Mock()
                 policy.infer.return_value = actions.copy()
                 executor = SkillExecutor(environment, policy, log=lambda event: None,
-                                         budget=EpisodeBudget(max_policy_actions=900))
+                                         # This test isolates action forwarding;
+                                         # phase-window duration is covered separately.
+                                         budget=EpisodeBudget(max_policy_actions=900, max_vla_chunks=1))
                 result = executor.execute(selection.command)
                 self.assertEqual(result.executed_policy_actions, 2)
                 forwarded = np.asarray(environment.actions)
                 np.testing.assert_array_equal(forwarded, actions)
                 np.testing.assert_array_equal(actions, np.arange(28).reshape(2, 14)/40)
+
+    def test_supervised_planner_uses_phase_windows_and_reuses_visual_report(self):
+        client = planner_fixtures.Provider([planner_fixtures.response(task_phase="grasp")])
+        planner = build_supervised_planner(SupervisedOptions("claude-test"), client)
+        environment = PublicEnvironment(x=0.)
+        selection = planner.select(PlannerContext(1, environment.observe(), (), None,
+            remaining_budget={"policy_actions": 900, "vla_chunks": 57}))
+
+        self.assertEqual(selection.command.parameters.max_policy_actions, 64)
+        self.assertEqual(selection.command.parameters.max_chunks, 4)
+        self.assertEqual(planner.settings.handoff_initial_feedback_after_actions, 128)
+        self.assertEqual(planner.settings.hang_initial_feedback_after_actions, 32)
+        content = client.requests[0]["messages"][0]["content"]
+        self.assertEqual([block["type"] for block in content], ["text"])
 
     def test_planner_summary_is_json_dictionary_for_all_confidence_and_grasp_states(self):
         import json
@@ -1188,6 +1276,19 @@ class SupervisedHangingTests(unittest.TestCase):
             remaining=dict(policy_actions=324, vla_chunks=40, skill_calls=40, analytic_ticks=12000))
         provider.propose.assert_called_once()  # Geometry is checked only after the grace period.
         self.assertEqual(after["status"], "recovery_deferred")
+
+    def test_hand_back_hook_does_not_override_pre_hang_planner_abort(self):
+        environment = PublicEnvironment(x=0.)
+        provider = Mock()
+        hook = self.hand_back_hook(provider, environment)
+        abort = SkillCommand(action="abort", reason="grasp feedback exhausted")
+
+        result = hook.consider(PlannerSelection(abort, "FAILED"), environment.observe(),
+            remaining=dict(policy_actions=32, vla_chunks=2, skill_calls=2, analytic_ticks=12000))
+
+        self.assertIsNone(result)
+        self.assertIsNone(hook.handed_back)
+        provider.evaluate.assert_not_called()
 
     def test_explicit_development_fallback_bypasses_public_visibility_wait(self):
         environment = PublicEnvironment(x=0.)

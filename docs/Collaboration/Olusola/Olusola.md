@@ -6,6 +6,7 @@
 |---|---|
 | `guides/perception/perception_guide.pdf` | How perception, predicates, providers and planners fit together, and what the grounding-evaluation branch changed. Built from `.tex` and `figures/` by `make_figures.py`. |
 | `guides/pose_estimation/pose_estimation_guide.pdf` | Mug and rack poses from the depth cameras (pose plan steps 1–9): what was built, why, the fresh-seed results, and what it means for supervising the task. Same build setup. |
+| `guides/sow_and_seeds/sow_and_seeds_guide.pdf` | For the whole team: what the signed Final SoW commits us to, how seeds (development vs held-out, paired runs) make the evaluation fair, everything Neotix asked for in the 16–23 Nov e-mails, and where `main` still differs from the SoW. Built from the `.tex` alone (TikZ figures): `latexmk -pdf` then `latexmk -c`. |
 | `plans/pose_estimation_plan.md` | The full pose-estimation plan, its decisions and progress notes. |
 | `handover/perception_for_retries.md` | For the teammate building perception-driven retries: what is available and how to use it. |
 | `handover/pose_estimation_for_retries.md` | For teammates building retries or supervisor logic: reading mug and rack poses, how far to trust them, and known failures. Read after the note above. |

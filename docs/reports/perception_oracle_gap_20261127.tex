@@ -1,0 +1,243 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.62in]{geometry}
+\usepackage{array,booktabs,longtable,tabularx}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=MidnightBlue,urlcolor=MidnightBlue}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\setlist[itemize]{leftmargin=1.35em,itemsep=2pt,topsep=2pt}
+\setlist[enumerate]{leftmargin=1.45em,itemsep=2pt,topsep=2pt}
+\newcommand{\metric}[1]{\textbf{\color{MidnightBlue}#1}}
+\newcommand{\priority}[1]{\textbf{\color{BrickRed}#1}}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+
+\begin{document}
+
+\begin{center}
+{\Large\bfseries Public Perception Failure Investigation}\\[-1pt]
+{\small Hanging-mug supervised pipeline --- evidence for the perception sprint, 27 November 2026}
+\end{center}
+
+\colorbox{MidnightBlue!8}{\parbox{0.965\linewidth}{\small
+\textbf{Conclusion.} The recent failures are not primarily Anthropic transport or schema failures:
+all 62 visual assessments completed. The dominant gaps are (1) missing public implementations for
+most runtime predicates, (2) temporal lift requirements that cannot be satisfied by the efficient
+planner-boundary cadence, and (3) a hanging-geometry gate that is never reached because public
+right-arm lift remains unknown. The hybrid oracle prevents premature termination, but it currently
+supplies most task-state decisions and every executed hanging target in the audited runs.}}
+
+\section{Scope and method}
+
+This is a read-only audit of five full episodes and their saved artifacts. It uses
+\code{report.json} and \code{supervisor_events.jsonl}; no new simulator, policy, SAM 3 or Opus call
+was made. The four latest configurations for seeds 3, 5, 7 and 9 succeeded; the earlier seed-9
+failure is retained because it exposes the release-alignment failure that motivated bounded
+re-seating. ``Public result'' and ``oracle fallback'' below count predicate resolutions, not API
+requests.
+
+\begin{tabularx}{\linewidth}{lrrrrl}
+\toprule
+Run & Turns & Public calls & Public results & Oracle fallbacks & Outcome\\
+\midrule
+Seed 3 & 8 & 8 & 0 & 211 & success\\
+Seed 5 & 8 & 8 & 0 & 211 & success\\
+Seed 7 & 13 & 13 & 30 & 331 & success\\
+Seed 9, first & 24 & 24 & 60 & 619 & release stopped\\
+Seed 9, retry & 9 & 9 & 5 & 234 & success\\
+\midrule
+Total & \metric{62} & \metric{62} & \metric{95} & \metric{1,606} & 4/5 success\\
+\bottomrule
+\end{tabularx}
+
+The cache behaved correctly: \metric{62 planner boundaries produced exactly 62 public visual
+requests}. One report was reused by all predicates at that boundary. The complete Opus traffic was
+129 requests: 62 public assessments, 62 planner tool calls and five compatibility preflights.
+Public-assessment latency totalled about 949 seconds (15.3 seconds/request). Reintroducing one
+visual call per predicate would increase cost without addressing the evidence gaps found here.
+
+\section{Where public perception fails}
+
+\subsection{P0: the public predicate interface is incomplete}
+
+\code{PublicRGBDHangingProvider.evaluate()} currently has substantive public logic only for
+\code{mug_toppled}, \code{mug_lifted}, \code{right_mug_lifted} and
+\code{handoff_confirmed}, plus a special measured-empty-hand case for \code{release_ready}.
+The registry nevertheless requests fourteen task predicates at feedback boundaries. Unsupported
+predicates remain unknown and therefore invoke the development oracle by construction.
+
+\begin{longtable}{p{0.25\linewidth}p{0.23\linewidth}p{0.43\linewidth}}
+\toprule
+Predicate group & Current public state & Required work\\
+\midrule
+\endhead
+Grasp: \code{mug_grasp_confirmed}, \code{grasp_attempt_failed} & No general boundary evaluator;
+hybrid mode uses an oracle-owned per-action monitor & Associate mug surface/pose with measured
+left/right TCP and measured finger opening. Preserve a local per-action monitor; do not poll Opus
+per action.\\
+Workspace: \code{mug_in_workspace} & Unimplemented & Define calibrated world-space workspace
+bounds and classify the RGB-D mug estimate as in/out/unknown. Require multiview absence before a
+definitive false.\\
+Transfer: \code{left_transfer_complete}, \code{mug_placed_on_table},
+\code{mug_staged_on_table} & Unimplemented; model reported \code{transfer_complete=true} in 0/62
+frames & Use table-relative mug height/support, arm association and temporal state. The semantic
+report alone is not enough.\\
+Rack proximity/contact: \code{mug_near_rack}, \code{rack_contact_detected} & Unimplemented & Use
+cached public rack frame plus current held-mug frame for distance. Contact must remain unknown
+without force/contact evidence; proximity is not contact.\\
+Release: \code{mug_released}, general \code{release_ready} & Unimplemented except empty-hand
+authorization & Combine measured finger opening with public support/proximity. Do not infer support
+from open fingers.\\
+Lift: \code{mug_lifted}, \code{right_mug_lifted}, \code{handoff_confirmed} & Implemented but rarely
+resolves positive & Fix the cadence/history and association issues described below.\\
+Topple: \code{mug_toppled} & Implemented from a confident visual upright judgement & Retain
+phase-aware semantics: a horizontally oriented held mug is not a toppled unsupported mug.\\
+\bottomrule
+\end{longtable}
+
+Across the five runs, each of the ten unsupported/generalized predicates fell back 119 times or
+nearly that count. The public results that did resolve were only negative contradictions: empty
+right fingers or a confident ``not lifted/not toppled'' report. No positive public milestone drove
+a phase advance in this audit.
+
+\subsection{P0: temporal lift evidence conflicts with the efficient call cadence}
+
+The new runtime deliberately waits 64 actions before the first GRASP assessment, 128 before the
+first HANDOFF assessment, and then assesses every two 16-action chunks. This removed the earlier
+per-chunk image cost. Public lift logic, however, still requires:
+
+\begin{itemize}
+  \item two high-confidence visual reports for a semantic state;
+  \item three corroborated RGB-D reports plus supported TCP/object co-motion for temporal lift;
+  \item report history no older than 32 simulator actions.
+\end{itemize}
+
+Those requirements are usually impossible after a 64/128-action initial window and fragile at a
+32-action steady interval. Of 62 reports, only \metric{4 (6.5\%)} reached task-state confidence
+$\ge 0.85$; mean task-state confidence was 0.715. Opus nevertheless described the right hand as
+holding an off-table mug in all five hanging-entry frames. Three of those frames also passed the
+single-frame RGB-D/closure check, but the corroborated count was only one, so
+\code{right_mug_lifted} remained unknown.
+
+\textbf{Recommended design:} keep the low-frequency phase schedule. When cheap local evidence
+(finger closure, measured TCP displacement, or a prior visual state change) makes a milestone
+plausible, collect a bounded two/three-frame evidence burst and evaluate locally from the single
+structured reports. Do not restore continuous Opus polling.
+
+\subsection{P0: the hanging pose path is blocked by the lift gate}
+
+Every hanging-entry assessment returned \code{public_hanging_entry_not_confirmed}; therefore all
+five executed approach/seat target pairs used \code{development_oracle}. This does \emph{not}
+prove rack localization failed. Rack landmarks were present in the reports and the static rack
+cache was retained, but \code{propose()} exits before validating aperture/rack geometry whenever
+public right lift is unknown.
+
+The perception sprint should measure these stages separately:
+
+\begin{enumerate}
+  \item episode-reset rack frame availability and repeatability;
+  \item right-held mug entry classification;
+  \item mug aperture/body functional frame at takeover;
+  \item composed public rack approach/seat error against oracle (development metric only).
+\end{enumerate}
+
+Otherwise a lift-gate failure will continue to be misreported as a rack-pose failure.
+
+\subsection{P1: held-object geometry is brittle under rotation and occlusion}
+
+The 62 visual reports contained a body polygon in 55 cases and a complete opening in 43, so gross
+segmentation is often available. The failure is stable object association. At seed-5 takeover,
+the measured TCP moved 0.208 m and rotated 1.220 rad while the visible mug surface overlap fell to
+0.389, below the 0.6 co-motion threshold. The provider returned
+\code{mug_tcp_motion_inconsistent} although Opus described the right hand as holding a lifted mug.
+At other entries, body tracking was unavailable because there was no history or a cylinder fit was
+longer than the object.
+
+Recommended work:
+
+\begin{itemize}
+  \item fuse the fixed head, supervisor and wrist views into one world-frame held-object estimate;
+  \item associate with both measured TCPs before assigning an arm;
+  \item track a compact object frame or robust surface descriptors rather than raw visible-surface
+        overlap, which changes sharply under self-occlusion;
+  \item keep geometry quality separate from grasp truth---a good cylinder fit is not proof of a
+        grasp, and a bad fit should not erase other valid support evidence.
+\end{itemize}
+
+\subsection{P1: table-plane evidence is fragile}
+
+Two reports returned \code{table_plane_invalid}; seed 5 had to reuse a cached plane. The current
+plane is fitted from Opus-selected table pixels with strict normal/spread/residual tests. Shadows,
+object edges and the close supervisor composition can contaminate those points.
+
+Fit and cache the table plane at reset from calibrated depth using deterministic robust sampling,
+then invalidate it only on a calibration change or a statistically significant plane mismatch.
+Opus should identify exclusions/regions, not provide every metric plane sample.
+
+\subsection{P2: public support after release is absent}
+
+\code{public_support} was unknown in 5/5 runs. Native RoboTwin success supplied final development
+confirmation. This is acceptable for the current simulator experiments but remains a sim-to-real
+gap. A future public detector must confirm: fingers open, mug no longer co-moving with the TCP,
+rack-relative mug pose remains stable for a bounded interval, and loss/fall is not observed.
+
+\section{What is working and must be preserved}
+
+\begin{itemize}
+  \item Zero public grounding API/schema failures occurred in the audited runs.
+  \item One public assessment is cached per boundary and reused across predicates.
+  \item The planner receives the structured assessment without uploading the same images again.
+  \item High-resolution complementary RGB-D views refresh at perception boundaries, while the
+        head-only video remains smooth.
+  \item Public true/false evidence is never overwritten by the oracle; fallback occurs only for
+        unknown/unavailable results.
+  \item Oracle provenance, geometry source and native final-success confirmation are explicit in
+        the report.
+\end{itemize}
+
+\section{Prioritized implementation and acceptance plan}
+
+\begin{enumerate}
+  \item \priority{P0 --- coverage audit.} Add an explicit supported-predicate map and tests that
+        fail when the orchestrator requests an unsupported public predicate without an intentional
+        fallback policy. Implement workspace, grasp, staged-table and release states from the
+        already cached report plus RGB-D/proprioception.
+  \item \priority{P0 --- milestone evidence bursts.} Add a bounded local trigger and capture the
+        minimum extra frames needed for lift/transfer confirmation. Acceptance: at most one normal
+        visual call per planner boundary plus a documented bounded burst; no per-action Opus calls.
+  \item \priority{P0 --- lift/arm association.} On reviewed cross-seed frames, target at least 95\%
+        correct left/right held and lift decisions with zero false-positive right-lift takeovers.
+  \item \priority{P0 --- independent hanging stages.} Report rack-frame readiness, mug-frame
+        readiness and composed target validity separately. In development, compare public targets
+        against oracle without exposing oracle geometry to the public planner; suggested initial
+        target is $<2$ cm position and $<5^{\circ}$ axis error.
+  \item \priority{P1 --- robust metric surfaces.} Cache the reset table plane, add multiview mug
+        fusion and replace raw surface-overlap tracking. Validate on saved boundary RGB-D before
+        another GPU campaign.
+  \item \priority{P2 --- released support.} Implement and calibrate a public sustained-support
+        predicate before claiming sim-to-real hanging success.
+\end{enumerate}
+
+For the next 10-seed development set, report per predicate: public true/false/unknown, fallback
+reason, camera set, metric residual and oracle disagreement. Target zero oracle geometry anchors,
+at least 95\% public resolution of phase-critical milestones, and no increase in normal Opus calls
+per boundary.
+
+\section*{Reproduction references}
+
+Primary artifacts:
+\begin{itemize}
+  \item \path{data/validation/recovery_integration_seed3_hybrid_evidence_retry1_20261126}
+  \item \path{data/validation/recovery_integration_hybrid_validation_seed5_20261127}
+  \item \path{data/validation/recovery_integration_hybrid_validation_seed7_20261127}
+  \item \path{data/validation/recovery_integration_hybrid_validation_seed9_20261127}
+  \item \path{data/validation/recovery_integration_hybrid_validation_seed9_reseat_retry1_20261127}
+\end{itemize}
+
+Relevant implementation: \path{development/hanging/public_provider.py},
+\path{development/hanging/runtime.py}, \path{development/hanging/supervised.py}, and
+\path{harness/predicates/registry.py}. Episode launch and evidence interpretation are documented in
+\path{docs/Collaboration/Supervised_Hanging_Runbook.md}.
+
+\end{document}

@@ -13,6 +13,9 @@ of individual phases is not evidence of reliable full-task hanging.
 For the component map, data flow, perception boundary, and contributor
 workflow, see [CONTRIBUTE_README.md](CONTRIBUTE_README.md). For a beginner-level
 walkthrough with diagrams, see `docs/v1/robot_mug_guide.pdf`.
+For the current deployed full-episode command, Opus feedback cadence, detached
+run recovery, and hybrid evidence semantics, see
+[`docs/Collaboration/Supervised_Hanging_Runbook.md`](docs/Collaboration/Supervised_Hanging_Runbook.md).
 
 ## Contents
 

@@ -79,20 +79,56 @@ def _write_state(path: Path, state: dict) -> None:
     temporary.replace(path)
 
 
+def _call_may_still_be_running(error: BaseException) -> bool:
+    """Distinguish a lost waiter from a terminal remote function failure."""
+    if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+        return True
+    try:
+        from modal import exception as modal_error
+    except ImportError:
+        return isinstance(error, (TimeoutError, ConnectionError))
+    terminal = (
+        modal_error.ExecutionError,
+        modal_error.FunctionTimeoutError,
+        modal_error.OutputExpiredError,
+        modal_error.RemoteError,
+    )
+    if isinstance(error, terminal):
+        return False
+    transient = (
+        ConnectionError,
+        TimeoutError,
+        modal_error.ConnectionError,
+        modal_error.ServiceError,
+        modal_error.TimeoutError,
+    )
+    return isinstance(error, transient)
+
+
 def _finish_call(state_path, state, call, *, wait_for_volume, download_run):
     """Wait for a detached call, persist its result, and resume artifact download."""
     print(f"Waiting for detached Modal call {state['call_id']}", flush=True)
     try:
         report = call.get()
     except BaseException as exc:
-        state.update(status="detached", local_error_type=type(exc).__name__)
-        _write_state(state_path, state)
-        print(
-            "The remote call remains detached. Resume with:\n"
-            f"  conda run -n robotwin python -m modal_apps.deployed_supervised_hanging "
-            f"--resume-state {state_path}",
-            flush=True,
+        detached = _call_may_still_be_running(exc)
+        state.update(
+            status="detached" if detached else "failed",
+            local_error_type=type(exc).__name__,
         )
+        _write_state(state_path, state)
+        if detached:
+            print(
+                "The remote call remains detached. Resume with:\n"
+                f"  conda run -n robotwin python -m modal_apps.deployed_supervised_hanging "
+                f"--resume-state {state_path}",
+                flush=True,
+            )
+        else:
+            print(
+                f"The remote call failed ({type(exc).__name__}); it cannot be resumed.",
+                flush=True,
+            )
         raise
 
     state.update(status="completed", result_status=report.get("status"))
@@ -162,6 +198,8 @@ def resume(state_path, *, lookup_call, wait_for_volume, download_run):
         state.get(key) for key in ("call_id", "run_id", "output")
     ):
         raise ValueError("invalid_supervised_call_state")
+    if state.get("status") == "failed":
+        raise ValueError("supervised_remote_call_failed")
     call = lookup_call(state["call_id"])
     return _finish_call(
         state_path,

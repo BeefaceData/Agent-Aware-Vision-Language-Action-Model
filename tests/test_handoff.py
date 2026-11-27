@@ -4,7 +4,7 @@ from functools import partial
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from harness.jsonl import append_jsonl
@@ -124,6 +124,54 @@ class HandoffTests(unittest.TestCase):
         self.assertAlmostEqual(anchor.pose[1], 0.02)
         self.assertAlmostEqual(anchor.pose[2], 0.84)
         self.assertEqual(anchor.pose[3:], (1.0, 0.0, 0.0, 0.0))
+
+    def test_oracle_hang_target_pair_is_consumed_by_seat_and_refreshed(self):
+        class Robot:
+            def get_left_ee_pose(self):
+                return (0.1, 0.2, 0.9, 1.0, 0.0, 0.0, 0.0)
+
+        task = SimpleNamespace(robot=Robot())
+        environment = TransferEnvironment()
+        observation = environment.observe()
+        anchors = executor(environment, oracle=True)[0].anchors
+        prepare = oracle_anchor_preparer(task, anchors, log=lambda event: None)
+        first = {
+            "rack_approach": (0.1, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+            "rack_seat": (0.2, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+        }
+        second = {
+            "rack_approach": (0.3, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+            "rack_seat": (0.4, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+        }
+        targets = Mock(side_effect=(first, second))
+
+        with patch(
+            "development.simulator.skill_oracle.oracle_hang_targets",
+            targets,
+        ):
+            prepare(SkillCommand(
+                action="move_to", arm="right",
+                parameters=MoveParameters(target="rack_approach")), observation)
+            self.assertEqual(
+                anchors.resolve("rack_approach", "right", observation,
+                                allow_oracle=True).pose,
+                first["rack_approach"])
+            prepare(SkillCommand(
+                action="move_to", arm="right",
+                parameters=MoveParameters(target="rack_seat")), observation)
+            self.assertEqual(
+                anchors.resolve("rack_seat", "right", observation,
+                                allow_oracle=True).pose,
+                first["rack_seat"])
+            prepare(SkillCommand(
+                action="move_to", arm="right",
+                parameters=MoveParameters(target="rack_approach")), observation)
+
+        self.assertEqual(targets.call_count, 2)
+        self.assertEqual(
+            anchors.resolve("rack_approach", "right", observation,
+                            allow_oracle=True).pose,
+            second["rack_approach"])
 
     def test_development_anchor_fallback_is_limited_to_unavailable_mug_grounding(self):
         from types import SimpleNamespace

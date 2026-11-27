@@ -355,7 +355,10 @@ class SkillOrchestrator:
                         recovery_report = None
                     if recovery_report is not None:
                         turns = turn
-                        executor.calls += len(recovery_report.get("stages", {}))
+                        recovery_calls = recovery_report.get("skill_calls")
+                        if type(recovery_calls) is not int or recovery_calls < 0:
+                            recovery_calls = len(recovery_report.get("stages", {}))
+                        executor.calls += recovery_calls
                         # Recovery's total already includes settling and post-retreat hold ticks.
                         executor.executed_physics_ticks += recovery_report.get("analytic_ticks", 0)
                         success = recovery_report.get("native_success")

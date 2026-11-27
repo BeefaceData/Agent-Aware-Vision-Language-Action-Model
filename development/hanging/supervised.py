@@ -9,6 +9,10 @@ import numpy as np
 
 from development.hanging.public_provider import BoundedVisionClient, PublicRGBDHangingProvider
 from development.hanging.grounding_preflight import sanitized_failure
+from development.hanging.motion import (
+    HANG_RECOVERY_MAX_ANALYTIC_TICKS,
+    HANG_RECOVERY_MAX_SKILL_CALLS,
+)
 from development.hanging.runtime import recover_current, ProposalResult
 from harness.jsonl import append_jsonl
 from harness.perception.anchors import AnchorRegistry
@@ -89,6 +93,9 @@ class SupervisedOptions:
             raise ValueError("invalid_empty_hand_opening")
         if type(self.development_oracle_fallback) is not bool:
             raise ValueError("invalid_development_oracle_fallback")
+        # The 128-action HANDOFF window must fit VLAParameters.max_chunks<=32.
+        if self.chunk_size < 4:
+            raise ValueError("invalid_supervised_chunk_size")
 
 
 class HangingRecoveryHook:
@@ -143,6 +150,7 @@ class HangingRecoveryHook:
         self.visibility_retry_interval = policy_chunk_size
         self.pause_policy_on_entry = pause_policy_on_entry
         self.require_current_lift = require_current_lift or pause_policy_on_entry
+        self._development_lift_latched = False
         self._blocked_takeover = None
 
     def _block_takeover(self, observation, reason, **details):
@@ -192,16 +200,16 @@ class HangingRecoveryHook:
                     observation_sequence=observation.sequence, control_owner="policy")
 
     def consider(self, selection, observation, *, remaining):
-        """With ``hand_back_to_policy`` the supervisor never ends an episode on its own.
+        """Apply only phase-appropriate grasp or hanging recovery.
 
         The policy keeps control for ``policy_grace_actions`` after a confirmed
         lift. Any stop that happens before motion (geometry unavailable or
-        rejected, lift evidence lost, no budget, or a planner abort) hands control
-        back to the frozen policy for the rest of the episode, so supervision can
-        only add an intervention, never cut a policy rollout short. An executed
-        recovery attempt still ends the episode with its own result.
+        rejected, lift evidence lost, no budget, or an in-HANG planner abort)
+        hands control back to the frozen policy. An abort before HANG remains
+        owned by the orchestrator, and an executed recovery attempt ends the
+        episode with its own result.
         """
-        regrasp = self._consider_regrasp(observation, remaining)
+        regrasp = self._consider_regrasp(selection, observation, remaining)
         if regrasp is not None:
             return regrasp
         if not self.hand_back_to_policy:
@@ -227,22 +235,44 @@ class HangingRecoveryHook:
                        supervisor_report=report.get("status"))
         return self._policy_turn(observation, remaining, "handed_back_to_policy")
 
-    def _consider_regrasp(self, observation, remaining):
+    @staticmethod
+    def _grasp_recovery_arm(selection):
+        phase = selection.metadata.get("task_phase")
+        if not isinstance(phase, str):
+            phase = selection.phase.lower()
+        return "left" if phase == "grasp" else "right" if phase in {"handoff", "hang"} else None
+
+    def _consider_regrasp(self, selection, observation, remaining):
         """Re-grasp after a confirmed loss; the policy then resumes from scratch."""
         if not self.grasp_recoveries or self.attempts:
             return None  # An executed hanging attempt owns the rest of the episode.
+        expected_arm = self._grasp_recovery_arm(selection)
+        candidates = tuple(
+            candidate for candidate in self.grasp_recoveries
+            if (expected_arm is None
+                or getattr(candidate, "arm", None) not in {"left", "right"}
+                or getattr(candidate, "arm", None) == expected_arm)
+        )
         recovery = basis = result = None
-        for candidate in self.grasp_recoveries:
+        for candidate in candidates:
             candidate_basis = candidate.check(observation)
-            if candidate_basis is not None:
-                recovery, basis = candidate, candidate_basis
-                result = candidate.recover(observation, basis, remaining=remaining)
+            if candidate_basis is None:
+                continue
+            candidate_result = candidate.recover(
+                observation, candidate_basis, remaining=remaining)
+            # A candidate waiting for better evidence must not prevent another
+            # applicable monitor from being evaluated at this boundary.
+            if candidate_result is None:
+                continue
+            recovery, basis, result = candidate, candidate_basis, candidate_result
+            if result.get("status") == "grasp_recovery_completed":
                 break
         if recovery is None or result is None or result.get("status") != "grasp_recovery_completed":
             return None  # No loss, waiting for evidence, or recovery stopped: policy keeps control.
         # The hanging supervisor starts over for the new grasp.
         self.handed_back = self._blocked_takeover = None
         self.entry_sequence = self.entry_policy_remaining = None
+        self._development_lift_latched = False
         self.visibility_checks = self.next_visibility_action = 0
         self.last_visibility_sequence = None
         self._decision(observation, "regrasp_hand_back_to_policy", basis, control_owner="policy",
@@ -264,13 +294,17 @@ class HangingRecoveryHook:
             grasp = self.provider.evaluate("handoff_confirmed", observation, arm="right")
         private_lift_gate = (
             selection.metadata.get("development_oracle_phase_gate") == "hang")
+        if private_lift_gate:
+            self._development_lift_latched = True
         self.log(dict(event_type="recovery_entry_check", observation_sequence=observation.sequence,
                       grasp=grasp.model_dump(mode="json"), attempts=self.attempts,
-                      development_oracle_lift_gate=private_lift_gate))
-        current_lift = private_lift_gate or (grasp.value is True and (not self.require_current_lift or
+                      development_oracle_lift_gate=private_lift_gate,
+                      development_oracle_lift_latched=self._development_lift_latched))
+        private_lift_available = self._development_lift_latched and grasp.value is not False
+        current_lift = private_lift_available or (grasp.value is True and (not self.require_current_lift or
             (grasp.name == "right_mug_lifted" and grasp.source == "perception"
              and grasp.observation_sequence == observation.sequence)))
-        if (current_lift and not private_lift_gate
+        if (current_lift and not private_lift_available
                 and self.require_current_lift and self.entry_sequence is None):
             # The provider stamps every result with the current sequence and may
             # carry a lift forward across a bounded gap. Entry needs this frame's
@@ -286,7 +320,7 @@ class HangingRecoveryHook:
         if self.entry_sequence is None:
             self.entry_sequence = observation.sequence
             self.entry_policy_remaining = remaining.get("policy_actions", 0)
-            if private_lift_gate:
+            if private_lift_available:
                 self._decision(observation, "use_development_oracle_fallback",
                                "right_mug_lifted",
                                information_source="development_oracle")
@@ -376,8 +410,9 @@ class HangingRecoveryHook:
             self._decision(observation, "use_development_oracle_fallback", proposal.reason,
                            geometry_status=proposal.status,
                            information_source="development_oracle")
-        # Worst-case four stages plus settling/hold fit below this reservation.
-        if remaining.get("analytic_ticks", 0) < 9000 or remaining.get("skill_calls", 0) < 4:
+        # Four normal stages plus one bounded re-seat and release retry.
+        if (remaining.get("analytic_ticks", 0) < HANG_RECOVERY_MAX_ANALYTIC_TICKS
+                or remaining.get("skill_calls", 0) < HANG_RECOVERY_MAX_SKILL_CALLS):
             if self.pause_policy_on_entry:
                 return self._block_takeover(observation, "recovery_budget_unavailable")
             return dict(status="recovery_budget_unavailable", stages={})
@@ -451,10 +486,17 @@ def run_controller(environment, vla, provider, store, planner, options, *, episo
     anchors = AnchorRegistry()
     predicate_registry = PredicateRegistry(
         perception=provider, fallback_oracle=development_oracle_predicates)
+    if options.grasp_recovery:
+        from development.hanging.grasp_recovery import RECOVERY_SKILL_CALLS
+        grasp_skill_budget = 2 * options.grasp_retries * RECOVERY_SKILL_CALLS
+    else:
+        grasp_skill_budget = 0
     executor = SkillExecutor(environment, vla, log=log, anchors=anchors,
-        budget=EpisodeBudget(max_skill_calls=options.max_turns+4, max_analytic_ticks=12000,
-                             max_policy_actions=options.max_actions,
-                             max_vla_chunks=(options.max_actions+options.chunk_size-1)//options.chunk_size),
+        budget=EpisodeBudget(
+            max_skill_calls=options.max_turns + grasp_skill_budget + HANG_RECOVERY_MAX_SKILL_CALLS,
+            max_analytic_ticks=30000,
+            max_policy_actions=options.max_actions,
+            max_vla_chunks=(options.max_actions+options.chunk_size-1)//options.chunk_size),
         predicates=predicate_registry,
         cancelled=lambda: time.monotonic() >= deadline,
         allow_development_oracle=development_oracle_predicates is not None)

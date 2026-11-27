@@ -51,6 +51,11 @@ class SupervisedHangingTests(unittest.TestCase):
     def test_supervised_episode_video_records_only_the_head_camera(self):
         self.assertEqual(SUPERVISED_VIDEO_CAMERAS, ("head_camera",))
 
+    def test_supervised_chunk_size_must_fit_the_handoff_feedback_window(self):
+        with self.assertRaisesRegex(ValueError, "invalid_supervised_chunk_size"):
+            SupervisedOptions("claude-test", chunk_size=3).validate()
+        SupervisedOptions("claude-test", chunk_size=4).validate()
+
     def test_cancelled_physical_run_is_not_labeled_as_preflight_failure(self):
         report = mark_interrupted_physical_run({
             "status": "preflight_failed", "simulator_started": True,
@@ -110,6 +115,41 @@ class SupervisedHangingTests(unittest.TestCase):
         self.assertTrue(any(event.get("decision") == "use_development_oracle_fallback"
                             and event.get("reason") == "right_mug_lifted"
                             for event in events))
+
+    def test_private_lift_gate_remains_latched_during_policy_grace(self):
+        environment = PublicEnvironment(x=0.)
+        environment.sequence = 370
+        provider = Mock()
+        provider.evaluate.return_value = PredicateResult(
+            name="right_mug_lifted", value=None, source="perception",
+            observation_sequence=370, reason="public_evidence_unknown")
+        hook = HangingRecoveryHook(
+            environment, provider, Mock(), episode_id="episode",
+            deadline=time.monotonic()+10, log=lambda event: None,
+            pause_policy_on_entry=False, require_current_lift=True,
+            hand_back_to_policy=True, policy_grace_actions=32,
+            development_oracle_targets=lambda arm: {})
+        private_gate = PlannerSelection(
+            SkillCommand(action="vla_act"), "HANG", metadata={
+                "task_phase": "hang", "development_oracle_phase_gate": "hang",
+            })
+
+        first = hook.consider(private_gate, environment.observe(), remaining={
+            "policy_actions": 100, "vla_chunks": 10, "skill_calls": 10,
+            "analytic_ticks": 12000,
+        })
+        later = hook.consider(
+            PlannerSelection(SkillCommand(action="vla_act"), "HANG",
+                             metadata={"task_phase": "hang"}),
+            environment.observe(), remaining={
+                "policy_actions": 84, "vla_chunks": 9, "skill_calls": 10,
+                "analytic_ticks": 12000,
+            })
+
+        self.assertEqual(first["reason"], "policy_grace_period")
+        self.assertEqual(later["reason"], "policy_grace_period")
+        self.assertTrue(hook._development_lift_latched)
+        provider.propose.assert_not_called()
 
     def test_carried_forward_lift_does_not_start_takeover(self):
         environment = PublicEnvironment(x=0.)
@@ -1139,7 +1179,7 @@ class SupervisedHangingTests(unittest.TestCase):
             recover.assert_not_called()
             provider.evaluate.return_value = provider.evaluate.return_value.model_copy(update={"value": True})
             recover.return_value = dict(status="recovery_sequence_completed_support_unverified", stages={})
-            result = hook.consider(replace(selection, phase="HANG"), Mock(), remaining={"analytic_ticks": 12000, "skill_calls": 4})
+            result = hook.consider(replace(selection, phase="HANG"), Mock(), remaining={"analytic_ticks": 12000, "skill_calls": 6})
             self.assertEqual(result["status"], "recovery_sequence_completed_support_unverified")
             self.assertEqual(hook.consider(replace(selection, phase="HANG"), Mock(), remaining={})["status"], "recovery_attempt_budget_exhausted")
             self.assertEqual(recover.call_count, 1)
@@ -1159,7 +1199,7 @@ class SupervisedHangingTests(unittest.TestCase):
         hook=HangingRecoveryHook(environment,provider,Mock(),episode_id="episode",deadline=time.monotonic()+10,
                                  log=lambda event:None,policy_chunk_size=16, pause_policy_on_entry=False)
         selection=PlannerSelection(SkillCommand(action="vla_act"),"HANG")
-        remaining=dict(policy_actions=8,vla_chunks=1,skill_calls=4,analytic_ticks=12000)
+        remaining=dict(policy_actions=8,vla_chunks=1,skill_calls=6,analytic_ticks=12000)
         with patch("development.hanging.supervised.recover_current") as recover:
             result=hook.consider(selection,environment.observe(),remaining=remaining)
             self.assertEqual(result["status"],"recovery_deferred")
@@ -1289,6 +1329,22 @@ class SupervisedHangingTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIsNone(hook.handed_back)
         provider.evaluate.assert_not_called()
+
+    def test_hand_back_hook_recognizes_hang_abort_from_metadata(self):
+        environment = PublicEnvironment(x=0.)
+        hook = self.hand_back_hook(Mock(), environment)
+        abort = SkillCommand(action="abort", reason="planner request failed")
+
+        result = hook.consider(
+            PlannerSelection(abort, "FAILED", metadata={"task_phase": "hang"}),
+            environment.observe(), remaining={
+                "policy_actions": 32, "vla_chunks": 2, "skill_calls": 2,
+                "analytic_ticks": 12000,
+            })
+
+        self.assertEqual(result["status"], "recovery_deferred")
+        self.assertEqual(result["reason"], "handed_back_to_policy")
+        self.assertEqual(hook.handed_back, "planner_abort_overridden")
 
     def test_explicit_development_fallback_bypasses_public_visibility_wait(self):
         environment = PublicEnvironment(x=0.)
@@ -1545,12 +1601,12 @@ class SupervisedHangingTests(unittest.TestCase):
         events = []
         result = dict(status="recovery_sequence_completed_support_unverified", native_success=True,
             stages={name: {"completed": True} for name in ("approach", "seat", "release", "retreat")},
-            analytic_ticks=1052, post_retreat_observation_only_ticks=250)
+            skill_calls=6, analytic_ticks=1052, post_retreat_observation_only_ticks=250)
         with tempfile.TemporaryDirectory() as directory, patch.object(HangingRecoveryHook, "consider", return_value=result):
             summary = run_controller(environment, Mock(), provider, ObservationStore(Path(directory)/"observations"),
                 planner, SupervisedOptions("claude-test"), episode_id="episode", deadline=time.monotonic()+10, log=events.append)
         self.assertEqual(summary["analytic_ticks"], 1052)
-        self.assertEqual(summary["skill_calls"], 4)
+        self.assertEqual(summary["skill_calls"], 6)
         self.assertEqual(summary["policy_actions"], 0)
         self.assertEqual(summary["hanging_recovery"], result)
         self.assertEqual(environment.ticks, 0)  # Hook execution itself is mocked.

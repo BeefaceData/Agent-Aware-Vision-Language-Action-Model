@@ -108,6 +108,39 @@ class DeployedSupervisedHangingTests(unittest.TestCase):
             self.assertEqual(state["status"], "detached")
             self.assertEqual(state["call_id"], "fc-detached")
 
+    def test_terminal_remote_failure_is_recorded_as_failed_not_detached(self):
+        class FailedCall:
+            object_id = "fc-failed"
+
+            def get(self):
+                raise TypeError("remote options mismatch")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "seed3"
+            args = build_parser().parse_args(
+                ["--model", "claude-opus-5", "--output", str(output)]
+            )
+            with self.assertRaisesRegex(TypeError, "remote options mismatch"):
+                launch(
+                    args,
+                    spawn=lambda *_: FailedCall(),
+                    wait_for_volume=lambda _: self.fail("failed call has no artifacts"),
+                    download_run=lambda *_args, **_kwargs: None,
+                    now=time.gmtime(0),
+                    nonce=10,
+                )
+            state_path = output.with_name(f"{output.name}.modal-call.json")
+            state = json.loads(state_path.read_text())
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["local_error_type"], "TypeError")
+            with self.assertRaisesRegex(ValueError, "supervised_remote_call_failed"):
+                resume(
+                    state_path,
+                    lookup_call=lambda _: self.fail("failed call must not be resumed"),
+                    wait_for_volume=lambda _: 0,
+                    download_run=lambda *_args, **_kwargs: None,
+                )
+
     def test_resume_waits_for_saved_call_and_resumes_download(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "seed3"

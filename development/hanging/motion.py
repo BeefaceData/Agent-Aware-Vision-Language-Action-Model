@@ -14,6 +14,10 @@ from harness.skills.executor import SkillExecutor
 from harness.skills.schemas import EpisodeBudget, SkillCommand
 
 
+HANG_RECOVERY_MAX_SKILL_CALLS = 6
+HANG_RECOVERY_MAX_ANALYTIC_TICKS = 12000
+
+
 class NoPolicy:
     def infer(self, *args, **kwargs):
         raise RuntimeError("hanging_recovery_does_not_infer_policy_actions")
@@ -340,7 +344,10 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
         executor = SkillExecutor(BenchmarkBlindEnvironment(environment), NoPolicy(), log=record, anchors=anchors,
             predicates=PredicateRegistry(rack_seat_gate=gate), cancelled=lambda: time.monotonic() >= deadline,
             # Four normal stages plus one bounded re-seat and release retry.
-            budget=EpisodeBudget(max_skill_calls=6, max_analytic_ticks=12000),
+            budget=EpisodeBudget(
+                max_skill_calls=HANG_RECOVERY_MAX_SKILL_CALLS,
+                max_analytic_ticks=HANG_RECOVERY_MAX_ANALYTIC_TICKS,
+            ),
             allow_development_oracle=allow_development_oracle)
         commands = (
             ("approach", SkillCommand(action="move_to", arm="right",
@@ -496,6 +503,7 @@ def execute_stages(environment, prepare, anchors, gate, store, *, deadline,
     finally:
         if executor is not None:
             report["analytic_ticks"] = executor.executed_physics_ticks
+            report["skill_calls"] = executor.calls
         try:
             report["native_success"] = environment.native_success
         except Exception:

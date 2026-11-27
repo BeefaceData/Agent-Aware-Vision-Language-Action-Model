@@ -85,8 +85,16 @@ def oracle_anchor_preparer(task, anchors, *, log):
             # Freeze approach and seat from one geometry snapshot. Recomputing
             # the seat after the approach changes the TCP-to-mug transform and
             # can shift the release target even though the rack did not move.
-            targets = hang_targets.setdefault(
-                command.arm, oracle_hang_targets(task, command.arm))
+            if command.parameters.target == "rack_approach":
+                targets = oracle_hang_targets(task, command.arm)
+                hang_targets[command.arm] = targets
+            else:
+                # A seat consumes the pair. A later approach therefore starts
+                # from the new grasp/TCP-to-mug transform instead of reusing an
+                # episode-old target.
+                targets = hang_targets.pop(command.arm, None)
+                if targets is None:
+                    targets = oracle_hang_targets(task, command.arm)
             pose = tuple(map(float, targets[command.parameters.target]))
             log({"event_type": "anchor_oracle_evidence", "name": command.parameters.target,
                  "arm": command.arm, "observation_sequence": observation.sequence,

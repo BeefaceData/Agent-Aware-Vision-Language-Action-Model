@@ -363,6 +363,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(recovery["trigger"]["stop_reason"], "rack_seat_alignment_lost")
         self.assertTrue(recovery["reseat"]["completed"])
         self.assertTrue(recovery["release_retry"]["completed"])
+        self.assertEqual(result["skill_calls"], 6)
         self.assertLessEqual(
             recovery["alignment_after_reseat"]["position_error_m"],
             recovery["alignment_after_reseat"]["position_tolerance_m"])

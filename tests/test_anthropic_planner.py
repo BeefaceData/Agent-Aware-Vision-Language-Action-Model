@@ -41,6 +41,20 @@ class Provider:
         return result
 
 
+class PlannerAbortMetadataTests(unittest.TestCase):
+    def test_abort_preserves_the_active_task_phase_for_runtime_hooks(self):
+        planner = AnthropicPlanner(
+            AnthropicSettings(model="claude-test"),
+            client=Provider([]),
+        )
+        planner.active_phase = "hang"
+
+        selection = planner._abort("planner_request_or_validation_failed", {})
+
+        self.assertEqual(selection.phase, "FAILED")
+        self.assertEqual(selection.metadata["task_phase"], "hang")
+
+
 def context(turn=1, previous=None):
     return PlannerContext(turn, Observation(turn, images(0), (0.0,)*14), (
         PredicateResult(name="mug_lifted", value=True, source="development_oracle",

@@ -363,6 +363,10 @@ class AnthropicPlanner:
 
     def _abort(self, reason, metadata):
         self.failed = True
+        # Preserve the controller phase even though the selection itself is
+        # terminal. Recovery hooks need to distinguish a transient planner
+        # failure during HANG from an abort that is outside their scope.
+        metadata.setdefault("task_phase", self.active_phase)
         return PlannerSelection(SkillCommand(action="abort", reason=reason),
                                 "FAILED", max(0, self.attempts-1), metadata)
 
